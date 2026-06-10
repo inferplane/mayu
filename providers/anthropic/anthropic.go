@@ -91,7 +91,7 @@ func (p *provider) Stream(ctx context.Context, req *providers.ProxyRequest) (ite
 	if resp.StatusCode/100 != 2 {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("anthropic: upstream status %d: %s", resp.StatusCode, body)
+		return nil, &providers.UpstreamError{StatusCode: resp.StatusCode, Body: body, Header: resp.Header}
 	}
 	inner := readSSE(resp.Body)
 	return func(yield func(*providers.StreamEvent, error) bool) {

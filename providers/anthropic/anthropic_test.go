@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -110,5 +111,34 @@ func TestCountTokensProxiesUpstream(t *testing.T) {
 	}
 	if gotPath != "/v1/messages/count_tokens" {
 		t.Fatalf("path = %q", gotPath)
+	}
+}
+
+func TestStreamNon2xxReturnsTeeableError(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(429)
+		io.WriteString(w, `{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`)
+	}))
+	defer upstream.Close()
+
+	p, _ := factory(providers.Config{Type: "anthropic", BaseURL: upstream.URL, APIKey: "sk-up"})
+	_, err := p.Stream(context.Background(), &providers.ProxyRequest{RawBody: []byte(`{"stream":true}`), Headers: http.Header{}, Stream: true})
+	if err == nil {
+		t.Fatal("expected error on non-2xx stream")
+	}
+	var ue *providers.UpstreamError
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *UpstreamError, got %T", err)
+	}
+	if ue.StatusCode != 429 {
+		t.Fatalf("status = %d, want 429", ue.StatusCode)
+	}
+	if !strings.Contains(string(ue.Body), "rate_limit_error") {
+		t.Fatalf("body not preserved: %s", ue.Body)
+	}
+	if ue.Header.Get("Retry-After") != "30" {
+		t.Fatalf("headers not preserved: retry-after=%q", ue.Header.Get("Retry-After"))
 	}
 }
