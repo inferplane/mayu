@@ -68,6 +68,66 @@ func TestWriterSerializesConcurrentAppends(t *testing.T) {
 	}
 }
 
+// flakySink fails the required-sink Write for the first N calls, then succeeds.
+type flakySink struct {
+	failFirst int
+	calls     int
+	written   [][]byte
+}
+
+func (s *flakySink) Write(rec []byte) error {
+	s.calls++
+	if s.calls <= s.failFirst {
+		return errTestFail
+	}
+	s.written = append(s.written, append([]byte(nil), rec...))
+	return nil
+}
+func (s *flakySink) Name() string   { return "flaky" }
+func (s *flakySink) Required() bool { return true }
+func (s *flakySink) Close() error   { return nil }
+
+var errTestFail = errorsNew("sink down")
+
+func errorsNew(s string) error { return &simpleErr{s} }
+
+type simpleErr struct{ s string }
+
+func (e *simpleErr) Error() string { return e.s }
+
+func TestWriterDoesNotDropBufferedRecordOnLaterSuccess(t *testing.T) {
+	walPath := filepath.Join(t.TempDir(), "a.wal")
+	sink := &flakySink{failFirst: 1} // REC1 fails the required sink, REC2 succeeds
+	w, err := NewWriter("inst-1", walPath, []Sink{sink})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Append(Record{SchemaVersion: 1, Event: "request_started", ID: "01A", Instance: "inst-1"})
+	w.Append(Record{SchemaVersion: 1, Event: "request_completed", ID: "01B", Instance: "inst-1"})
+	w.Close()
+
+	// The buffered REC1 must still be present in the WAL after REC2 succeeded —
+	// a later success must NOT truncate away an earlier undelivered record.
+	wal, _ := OpenWAL(walPath)
+	defer wal.Close()
+	var replayed []string
+	wal.Replay(func(rec []byte) error {
+		var r Record
+		json.Unmarshal(rec, &r)
+		replayed = append(replayed, r.ID)
+		return nil
+	})
+	found01A := false
+	for _, id := range replayed {
+		if id == "01A" {
+			found01A = true
+		}
+	}
+	if !found01A {
+		t.Fatalf("buffered REC1 (01A) was dropped from WAL; replayed=%v", replayed)
+	}
+}
+
 type lockedWriter struct {
 	w  *bytes.Buffer
 	mu *sync.Mutex

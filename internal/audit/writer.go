@@ -18,6 +18,7 @@ type Writer struct {
 	wal      *WAL
 	sinks    []Sink
 	prevHash string
+	pending  int
 }
 
 func NewWriter(instance, walPath string, sinks []Sink) (*Writer, error) {
@@ -57,6 +58,7 @@ func (w *Writer) loop() {
 		// durability first: WAL, then sinks. A required-sink failure leaves the
 		// record in the WAL for replay (buffer_then_block; §5.4).
 		_ = w.wal.Append(canon)
+		w.pending++ // records persisted to the WAL, not yet confirmed delivered
 		flushedAll := true
 		for _, s := range w.sinks {
 			if err := s.Write(canon); err != nil {
@@ -67,8 +69,15 @@ func (w *Writer) loop() {
 				}
 			}
 		}
-		if flushedAll {
-			_ = w.wal.Truncate() // all required sinks took it; clear the buffer
+		// Truncate ONLY when this record delivered to all required sinks AND it
+		// is the sole record in the WAL — i.e. no earlier record is still
+		// buffered-undelivered. A later success must never drop an earlier
+		// buffered record (buffer_then_block durability). Once any record is
+		// buffered, the WAL retains everything until a restart replays it
+		// (replay-into-sinks + block-when-full are later milestones).
+		if flushedAll && w.pending == 1 {
+			_ = w.wal.Truncate()
+			w.pending = 0
 		}
 	}
 }
