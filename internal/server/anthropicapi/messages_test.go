@@ -1,20 +1,33 @@
 package anthropicapi
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"iter"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/config"
+	"github.com/inferplane/inferplane/internal/keystore"
+	"github.com/inferplane/inferplane/internal/principal"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/pkg/schema"
 	"github.com/inferplane/inferplane/providers"
 	"github.com/inferplane/inferplane/providers/testing/mockprovider"
 )
+
+// allowAll wraps a request with a principal whose allow-list is "*". The
+// handler now requires a principal in context (401 otherwise), so the tests
+// that don't exercise the allow-list itself inject a permissive one.
+func allowAll(req *http.Request) *http.Request {
+	return req.WithContext(principal.With(req.Context(),
+		keystore.Principal{AllowedModels: []string{"*"}}))
+}
 
 func testRouter() *router.Router {
 	provs := map[string]providers.Provider{"p": mockprovider.New("claude-sonnet-4-6")}
@@ -29,7 +42,7 @@ func TestMessagesNonStreaming(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/messages",
 		strings.NewReader(`{"model":"claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, allowAll(req))
 	if rec.Code != 200 {
 		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
 	}
@@ -43,7 +56,7 @@ func TestMessagesStreamingTee(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/messages",
 		strings.NewReader(`{"model":"claude-sonnet-4-6","stream":true,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, allowAll(req))
 	body := rec.Body.String()
 	if !strings.Contains(body, "event: message_start") || !strings.Contains(body, "event: message_stop") {
 		t.Fatalf("stream not teed verbatim: %s", body)
@@ -58,7 +71,7 @@ func TestMessagesUnknownModel(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/messages",
 		strings.NewReader(`{"model":"no-such-model","messages":[]}`))
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, allowAll(req))
 	if rec.Code != 404 {
 		t.Fatalf("expected 404 for unknown model, got %d", rec.Code)
 	}
@@ -84,7 +97,7 @@ func TestMessagesStreamingUpstreamErrorTeed(t *testing.T) {
 	h := NewMessagesHandler(router.New(provs, models))
 	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"m","stream":true,"messages":[]}`))
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, allowAll(req))
 	if rec.Code != 429 {
 		t.Fatalf("expected upstream 429 teed, got %d", rec.Code)
 	}
@@ -114,7 +127,7 @@ func TestMessagesNonStreamingTeesUpstreamHeaders(t *testing.T) {
 	h := NewMessagesHandler(router.New(provs, models))
 	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"m","messages":[]}`))
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, allowAll(req))
 	if rec.Header().Get("Request-Id") != "req_123" {
 		t.Fatalf("request-id not teed: %q", rec.Header().Get("Request-Id"))
 	}
@@ -140,8 +153,66 @@ func TestMessagesStreamingErrorTeesHeaders(t *testing.T) {
 	h := NewMessagesHandler(router.New(provs, models))
 	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"m","stream":true,"messages":[]}`))
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, allowAll(req))
 	if rec.Code != 429 || rec.Header().Get("Retry-After") != "30" {
 		t.Fatalf("streaming error headers not teed: code=%d retry-after=%q", rec.Code, rec.Header().Get("Retry-After"))
+	}
+}
+
+func TestMessagesEnforcesAllowList(t *testing.T) {
+	h := NewMessagesHandler(testRouter())
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}`))
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik", Team: "t", AllowedModels: []string{"qwen-coder"}})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != 403 {
+		t.Fatalf("allow-list violation must be 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMessagesAllowsListedModel(t *testing.T) {
+	h := NewMessagesHandler(testRouter())
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}`))
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik", Team: "t", AllowedModels: []string{"*"}})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != 200 {
+		t.Fatalf("listed model should pass, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMessagesNoPrincipal401(t *testing.T) {
+	h := NewMessagesHandler(testRouter())
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req) // no principal injected
+	if rec.Code != 401 {
+		t.Fatalf("missing principal must be 401, got %d", rec.Code)
+	}
+}
+
+func TestMessagesEmitsTwoPhaseAudit(t *testing.T) {
+	var buf bytes.Buffer
+	w, err := audit.NewWriter("inst-1", filepath.Join(t.TempDir(), "a.wal"), []audit.Sink{audit.NewWriterSink("buf", &buf, true)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewMessagesHandlerWithAudit(testRouter(), w)
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}`))
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik_x", Team: "platform-eng", AllowedModels: []string{"*"}})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	w.Close() // flush
+
+	out := buf.String()
+	if !strings.Contains(out, `"request_started"`) || !strings.Contains(out, `"request_completed"`) {
+		t.Fatalf("expected both audit phases, got: %s", out)
+	}
+	if !strings.Contains(out, `"ik_x"`) || !strings.Contains(out, `"platform-eng"`) {
+		t.Fatalf("audit missing principal: %s", out)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sort"
 
+	"github.com/inferplane/inferplane/internal/principal"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/pkg/schema"
 )
@@ -18,6 +19,17 @@ func NewModelsHandler(r *router.Router) *ModelsHandler { return &ModelsHandler{r
 // (design doc §3.1).
 func (h *ModelsHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	names := h.r.AllModels()
+	// M3: filter by the virtual key's allow-list. Absent principal (e.g. M2
+	// callers / tests without auth) returns the full, unfiltered list.
+	if p, ok := principal.From(req.Context()); ok {
+		filtered := names[:0:0]
+		for _, n := range names {
+			if p.Allows(n) {
+				filtered = append(filtered, n)
+			}
+		}
+		names = filtered
+	}
 	sort.Strings(names) // deterministic order
 	data := make([]schema.ModelInfo, 0, len(names))
 	for _, n := range names {
