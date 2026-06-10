@@ -1,7 +1,7 @@
 # inferplane — LLM Consumption Governance Gateway 설계 문서
 
 - 상태: Draft (승인 대기)
-- 날짜: 2026-06-10 (r2 — 외부 리뷰 6+1건 반영)
+- 날짜: 2026-06-10 (r3 — 멀티 AI consensus 2라운드 12건 반영)
 - 라이선스: Apache 2.0
 - 언어: Go
 - 대상 릴리스: v0.1
@@ -15,7 +15,7 @@
 > Envoy 계열 게이트웨이는 플랫폼팀의 인프라 프로젝트를 요구하고,
 > LiteLLM/Bifrost는 거버넌스 핵심을 유료화했다.
 > **inferplane은 AI팀이 5분 안에 띄우는 단일 바이너리에
-> RBAC·quota·budget·변조방지 audit를 전부 무료로 담는다.**
+> RBAC·quota·budget·변조감지(tamper-evident) audit를 전부 무료로 담는다.**
 
 inferplane은 데이터 플레인 성능이나 추론 최적화로 경쟁하지 않는다.
 **LLM 소비(consumption)의 거버넌스** — 누가, 어떤 모델을, 얼마나,
@@ -39,8 +39,10 @@ inferplane은 데이터 플레인 성능이나 추론 최적화로 경쟁하지 
 아니라 **LiteLLM/Bifrost의 도입 경험**이다. 따라서 단일 바이너리는
 차별화 포인트가 아니라 **시장 진입의 전제조건**으로 취급한다.
 
-**비어 있는 자리:** "거버넌스 전부 무료 + 변조방지 audit."
-이것이 inferplane의 승부처다.
+**비어 있는 자리:** "거버넌스 전부 무료 + 변조감지(tamper-evident) audit."
+이것이 inferplane의 승부처다. (용어 주의: 검증 주체가 같은 노드에
+있는 한 변조 "방지"는 성립하지 않는다 — 해시 체인이 제공하는 것은
+변조 **감지**이며, 외부 앵커링(v0.2)이 보증을 상향한다. §5.4)
 
 ### 1.3 CNCF 전략
 
@@ -111,9 +113,14 @@ inferplane은 데이터 플레인 성능이나 추론 최적화로 경쟁하지 
 핵심 설계 원칙:
 
 - **쿼터는 2단계**: 사전 낙관 체크 + 응답 후 실제 토큰으로 사후 차감.
-- **감사로그는 응답 완료 후** 기록 (usage 확정 필요).
-- **게이트웨이는 stateless**: 세션 없음. 상태는 quota 스토어와
-  키/팀 메타데이터 스토어에만 존재.
+- **감사로그는 2단계**: 인가 결정 직후 `request_started`(거부 포함),
+  응답 완료 후 `request_completed`(usage 확정) — crash가 나도 인증을
+  통과한 요청의 흔적이 남는다 (§5.4).
+- **세션 무상태**: 요청 간 세션 친화성(affinity) 없음 — 어느
+  레플리카가 받아도 동일하게 처리. 영속 상태는 quota 스토어와
+  키/팀 메타데이터 스토어에 둔다. 단, rate limit 카운터·circuit
+  breaker·audit 체인 헤드·WAL 버퍼는 **인스턴스-로컬**이며, 재시작
+  시 리셋과 다중 레플리카 한계는 §5.3·§4.5·§5.4에 명시한다.
 
 ### 2.2 Canonical 스키마 — 결정 사항
 
@@ -145,6 +152,11 @@ OpenAI와 Anthropic 양쪽 프로토콜을 덮는 **프로토콜 중립 superset
   미들웨어 생태계와 비호환.)
 - 데이터 평면(`:8080`)과 관리 평면(`:9090` — 관리 API, `/metrics`,
   헬스체크) 리스너 분리.
+- **TLS**: `server.tls`(cert/key ref)로 자체 종단을 지원한다.
+  Kubernetes에서는 ingress/서비스 메시 종단을 권장하되, 비-K8s
+  단일 바이너리 실행 시 자체 TLS 활성화를 운영 요구사항으로
+  명시한다 — virtual key가 평문 HTTP로 흐르는 구성을 기본으로
+  두지 않는다.
 
 ### 2.4 Filter 체인 인터페이스
 
@@ -198,7 +210,9 @@ count_tokens 처리 전략:
 
 헤더 처리:
 
-- `anthropic-version`, `anthropic-beta`: upstream으로 패스스루.
+- `anthropic-version`, `anthropic-beta`: Anthropic Direct는 헤더
+  패스스루. Bedrock 경로는 헤더가 그대로 전달되는 프로토콜이
+  아니므로 §4.3의 변환 표를 따른다.
 - `x-api-key` / `Authorization`: 게이트웨이 virtual key로 해석
   (upstream에는 게이트웨이 소유 자격증명 사용, §5.2).
 
@@ -235,6 +249,12 @@ type Provider interface {
     // canonical 청크 iterator. SSE 직렬화는 코어(egress)가 담당.
     Stream(ctx context.Context, req *schema.ChatRequest) (iter.Seq2[*schema.ChatChunk, error], error)
 }
+
+// 선택적 capability: 구현한 provider는 count_tokens가 이 경로를 쓰고,
+// 미구현이면 게이트웨이 추정기로 폴백한다 (§3.1).
+type TokenCounter interface {
+    CountTokens(ctx context.Context, req *schema.ChatRequest) (int64, error)
+}
 ```
 
 - `iter.Seq2` (Go 1.23+)로 고루틴/채널 누수를 언어 차원에서 차단.
@@ -259,6 +279,16 @@ type Provider interface {
 
 config에서 모델 단위 오버라이드:
 `api: invoke_model | converse | mantle`.
+
+`anthropic-version` / `anthropic-beta` 변환 표 (헤더 "패스스루"는
+Anthropic Direct에만 성립):
+
+| 경로 | 처리 |
+|---|---|
+| Anthropic Direct | 헤더 패스스루 |
+| Bedrock InvokeModel | body의 `anthropic_version` · `anthropic_beta` 필드로 변환 |
+| Bedrock Converse | `additionalModelRequestFields`로 전달 시도, 미지원 beta는 **명시적 4xx 거부** (침묵 다운그레이드 금지) |
+| Bedrock Mantle | 헤더 패스스루 (패리티 검증 — §10 #2) |
 
 인증: IRSA / Pod Identity / static credentials / profile.
 클라이언트 IAM identity는 Bedrock으로 전파하지 않는다 (§5.2).
@@ -287,6 +317,11 @@ config에서 모델 단위 오버라이드:
   지수 백오프 half-open.
 - 폴백 트리거: config로 지정 (`rate_limited`, `server_error`,
   `timeout`).
+- **스트리밍 폴백 한계**: 폴백은 첫 청크 전송 전(pre-TTFT,
+  connection-level)에만 동작한다. 첫 청크 이후의 upstream 오류는
+  다른 provider로 투명 폴백이 불가능하므로(HTTP 200 + partial
+  body 기전송), ingress 형식의 표준 에러 이벤트로 스트림을
+  종료하고 부분 usage를 정산한다 (감사로그 `outcome.partial: true`).
 - 폴백 발생 시: 응답 헤더(`x-inferplane-fallback`) + 감사로그 +
   메트릭에 기록.
 
@@ -316,6 +351,11 @@ v0.1 구현 범위:
   수행한다. 클라이언트 IAM identity의 SigV4 전파는 하지 않는다.
 - 책임추적성은 감사로그의 `principal → virtual key → upstream call`
   체인으로 확보한다.
+- 운영 노트 — **noisy neighbor**: 전 팀이 게이트웨이의 단일 AWS
+  자격으로 Bedrock을 호출하므로 계정 단위 모델 쿼터를 공유한다.
+  한 팀의 폭주는 게이트웨이 rate limit으로 1차 방어하고, AWS
+  Service Quota 상향 가이드를 운영 문서에 포함한다. 팀별 upstream
+  자격 오버라이드(Role ARN)는 v0.2 로드맵.
 
 ### 5.3 Rate limit / Quota / Budget — 3분리
 
@@ -328,7 +368,15 @@ v0.1 구현 범위:
 | **budget** | 비용($) | 재무 | 토큰 × 모델별 단가 테이블로 집계 |
 
 quota와 budget은 대칭으로 `on_exceeded: block | warn`을 명시한다
-(기본 `block`) — 초과 시 동작을 암묵에 두지 않는다.
+(기본 `block`) — 초과 시 동작을 암묵에 두지 않는다. 둘이 동시에
+초과되면 **block이 warn에 우선**한다 (하나라도 block이면 차단).
+
+rate limit 집행 의미론: RPM은 진정한 사전 차단. TPM은 요청 시점에
+출력 토큰을 알 수 없으므로 **직전 윈도우 실측 + 현재 요청 input
+추정으로 사전 차단하고, 응답 후 실측으로 윈도우 카운터를 갱신**한다.
+카운터는 인스턴스-로컬이며 — 레플리카 N개면 실효 한도가 최대 N배가
+된다는 사실을 문서에 명시한다. 다중 레플리카 합산 집행(분산 rate
+limit, Redis 재사용)은 v0.2.
 
 스토어 추상화:
 
@@ -347,6 +395,12 @@ type LimiterStore interface {
   사후 차감은 비동기. **정확한 전역 일관성은 보장하지 않으며
   수 % 오버슈트가 가능함을 문서에 명시한다** — 토큰 쿼터는
   응답 후에야 확정되므로 본질적 한계다.
+- **스토어 장애 정책** (`quota_store.failure_mode`): 기본
+  `fail_open` — 스토어 장애 중에는 로컬 캐시 기반으로 집행을
+  지속(degraded local enforcement)하고
+  `inferplane_quota_store_errors_total`로 알림. `fail_closed`는
+  opt-in (스토어 장애 = 전면 차단을 감수하는 조직용). 비동기
+  Debit은 멱등 키(요청 ULID)로 재시도해 중복 차감을 방지한다.
 - 후회 방지: DB 트랜잭션/분산 락 기반 정확한 전역 쿼터는
   핫패스 레이턴시를 파괴하므로 채택하지 않는다.
 
@@ -357,6 +411,22 @@ Budget 구현 제약:
   budget이 핵심 기능인 제품에서 신뢰 붕괴다. 내부 집계 타입,
   감사로그(`amount_usd_micros`), budget 스토어 모두 동일하며,
   config의 `usd_per_month` 등 사람용 표기는 로드 시 µUSD로 변환한다.
+- **정산은 요청 단위 1회, 반올림 규칙 고정**: 단가는 µUSD/MTok
+  정수로 보관하고, 비용은 스트리밍 청크 단위가 아니라 요청 완료
+  시점의 최종 토큰 합계로 1회 계산한다 (`tokens × price / 10^6`,
+  round-half-even). 청크 단위 절사를 반복하면 저단가 모델에서
+  체계적 과소계상이 생긴다. 오차 상한: 요청당 1µUSD 미만.
+- **집행은 µUSD 단위 `BudgetStore`로 닫는다** — quota와 동일한
+  2단계 패턴(낙관 Check + 사후 Debit)의 별도 스토어 인터페이스.
+  집계만으로는 `on_exceeded: block`을 구현할 수 없다.
+- **단가 해석 순서**: 번들 테이블 → config `pricing.overrides`
+  ((provider, model) 키). self-hosted(vLLM/Ollama/llm-d) 모델은
+  운영자가 config로 자체 단가(GPU 상각 chargeback 등)를 정의하는
+  것이 1급 사용 사례다.
+- **단가 미등록 시** (`pricing.on_missing`): 기본 `allow` — 비용 0
+  집계 + 감사로그 `pricing_missing: true` +
+  `inferplane_pricing_miss_total` 메트릭으로 가시화. `block`은
+  opt-in (엄격 통제 조직용).
 - **단가 테이블의 키는 `(provider, model)` 쌍**이다. 같은 Claude
   모델이라도 Anthropic Direct와 Bedrock의 단가가 다르고, Bedrock은
   리전별 차이가 있다 (provider 인스턴스가 리전을 인코딩하므로
@@ -369,19 +439,32 @@ Budget 구현 제약:
   `cache_control.ttl` 기준.
 - usage의 `cache_read_input_tokens`를 **반드시 구분 집계**한다.
   base input 단가로 계산하면 비용이 10배 과대계상된다.
-- 스트리밍 중단 시: upstream의 마지막 usage 청크 기준 정산.
-  못 받으면 출력 청크 기반 추정 + 감사로그에 `estimated: true`.
+- 스트리밍 중단 시: 클라이언트가 먼저 끊어도 upstream 스트림을
+  **grace period(기본 10s, config) 동안 백그라운드로 드레인**해
+  마지막 usage 청크를 수신한 뒤 확정 정산한다 — 조기 종료 반복으로
+  quota/budget을 과소계상시키는 우회를 막는다. 드레인 실패 시에만
+  출력 청크 기반 추정 + 감사로그에 `estimated: true`.
 
 ### 5.4 감사로그
 
-v0.1 범위: **append-only JSONL + 구조화 레코드.** 레코드 스키마에
-`prev_hash` 필드만 예약하고 hash chain 구현은 v0.2.
+v0.1 범위: **append-only JSONL + 구조화 레코드 + 최소 해시 체인.**
+각 레코드의 `prev_hash` = 직전 레코드의 SHA-256 (인스턴스별 독립
+체인 — 체인 시작은 인스턴스 기동 레코드, 레코드의 `instance` 필드로
+체인 식별). `inferplane audit verify`로 체인 무결성 검증.
+외부 앵커링(S3 Object Lock)은 v0.2 — 앵커 전의 보증 수준은
+"변조감지(tamper-evident)"이며 변조 차단이 아님을 문서에 명시한다.
+
+레코드는 **2단계로 기록**한다: 인가 결정 직후 `request_started`
+(principal·model·인가 결과까지 — 거부도 기록), 완료 시
+`request_completed`(usage·cost 정산 포함). crash가 나도 인증을
+통과한 요청의 흔적이 남는다.
 
 레코드 스키마 (v0.1):
 
 ```json
 {
   "schema_version": 1,
+  "event": "request_completed",        // request_started | request_completed
   "id": "01J...",                      // ULID, 시간순 정렬 가능
   "ts": "2026-06-10T12:34:56.789Z",
   "instance": "inferplane-7d4f-abc12", // 다중 레플리카 식별
@@ -402,6 +485,7 @@ v0.1 범위: **append-only JSONL + 구조화 레코드.** 레코드 스키마에
     "status": 200,
     "fallback_used": false,
     "fallback_chain": [],
+    "partial": false,                  // 스트림 중단으로 부분 응답이면 true
     "error": null
   },
   "usage": {
@@ -415,11 +499,12 @@ v0.1 범위: **append-only JSONL + 구조화 레코드.** 레코드 스키마에
   },
   "cost": {
     "amount_usd_micros": 31000,          // 정수 µUSD — float 금지 (오차 누적 방지)
+    "pricing_missing": false,            // 단가 미등록 모델이면 true (비용 0 집계)
     "pricing_version": "2026-06-01"
   },
   "latency": { "ttft_ms": 420, "total_ms": 9800 },
   "trace_id": null,                    // 예약. v0.2: OTel trace 상관관계 (W3C trace-id)
-  "prev_hash": null                    // v0.1: 예약. v0.2: 해시 체인
+  "prev_hash": "sha256:9f2c..."        // 직전 레코드 해시 — 인스턴스별 체인 (v0.1)
 }
 ```
 
@@ -428,19 +513,22 @@ v0.1 범위: **append-only JSONL + 구조화 레코드.** 레코드 스키마에
 - 싱크: `stdout` (K8s 표준 — Fluent Bit/Loki 수거) / `file` / `s3`
   / `webhook`. 포맷 옵션: raw JSONL 또는 CloudEvents 봉투.
 
-**Sink 실패 정책** — "변조방지 audit가 차별점"인 제품이 audit 유실을
+**Sink 실패 정책** — "변조감지 audit가 차별점"인 제품이 audit 유실을
 조용히 허용하면 주장이 무너지고, 무조건 fail-closed면 S3 장애가 LLM
 전면 장애가 된다. config로 위임하되 기본값을 정한다:
 
 ```yaml
 audit:
   failure_mode: buffer_then_block   # fail_open | fail_closed | buffer_then_block (기본)
-  buffer: { max_records: 100_000, max_age: 5m }
+  buffer: { path: /var/lib/inferplane/audit-wal, max_records: 100_000, max_age: 5m }
 ```
 
-- `buffer_then_block` (기본): required sink 실패 시 인메모리 버퍼에
-  적재하고 요청은 계속 처리. 버퍼가 차거나 `max_age` 초과 시 신규
-  요청 차단으로 전환.
+- `buffer_then_block` (기본): required sink 실패 시 **로컬 디스크
+  WAL**(append-only 파일)에 적재하고 요청은 계속 처리. 재기동 시
+  WAL을 재전송하므로 crash/OOM/pod eviction이 레코드를 잃지 않는다
+  — 인메모리 버퍼는 crash 시 유실이 fail_open과 동치가 되므로
+  채택하지 않는다. 버퍼가 차거나 `max_age` 초과 시 신규 요청
+  차단으로 전환.
 - sink별 `required` 플래그 (기본 `true`): 실패 정책은 required
   sink에만 적용. `stdout` 같은 관측용 sink는 `required: false`로
   best-effort 처리.
@@ -448,9 +536,8 @@ audit:
   `inferplane_audit_write_failures_total{sink}` +
   `inferplane_audit_buffer_utilization_ratio` (§6.2)에 알림 연결.
 
-- v0.2: hash chain (각 레코드에 이전 레코드 해시) + N분 주기 체인
-  헤드 외부 앵커링 (S3 Object Lock 등) + 검증 CLI
-  (`inferplane audit verify`).
+- v0.2: N분 주기 체인 헤드 **외부 앵커링** (S3 Object Lock 등) —
+  v0.1 해시 체인의 보증을 "노드 침해 시에도 사후 감지 가능"으로 상향.
 - 정직한 한계를 문서에 명시: 같은 디스크에 쓰는 한 완전한 변조
   불가는 없다. 해시 체인 + 외부 앵커가 소프트웨어 레벨의 상한이다.
 
@@ -461,13 +548,21 @@ audit:
 - **Admin API 인증**: 관리 리스너(`:9090`)의 admin API는 별도
   **admin token**으로 보호한다. 토큰은 config의
   `server.admin_auth.token_ref` (env/file/secret ref)로 주입 —
-  데이터 평면 virtual key와 완전히 분리된 자격 체계.
+  데이터 평면 virtual key와 완전히 분리된 자격 체계. 토큰은 해시로
+  보관·constant-time 비교하며, `token_ref`는 복수 지정 가능
+  (rotation 중 신구 병행 유효). `/metrics`와 헬스체크는 admin token
+  없이 접근 가능 — 스크레이핑 경로와 관리 경로의 인증을 분리한다.
 - **부트스트랩 (첫 키)**: CLI가 admin API를 거치지 않고 **key
   store(SQLite)에 직접 쓰는 로컬 모드**를 지원한다.
   `inferplane keys create --team x`는
   (1) 로컬 모드 (`--store <path>`): 스토어 파일에 직접 기록 —
   서버 기동 전/정지 중에도 가능, 부트스트랩용.
   (2) 원격 모드 (기본): admin API + admin token 경유.
+  로컬 모드 제약: **서버 기동 전 부트스트랩 전용**이며, 키 발급
+  감사 레코드를 동일 경로의 audit WAL에 강제 기록한다 (로컬 모드가
+  감사를 우회하면 "모든 거버넌스 이벤트 기록" 성공 기준과 모순).
+  key store가 Postgres(HA)인 구성에서는 로컬 모드를 비활성화하고
+  admin API로 일원화한다 (split-brain 방지).
 - admin API 호출 자체도 감사로그 대상이다 (키 발급/폐기 =
   거버넌스 이벤트).
 - v0.2: OIDC 연동 시 admin API를 IdP 그룹 기반 권한으로 승격,
@@ -499,6 +594,8 @@ audit:
 | `inferplane_budget_spend_usd_total` | counter | `team`, `model`, `cost_type` | — |
 | `inferplane_audit_write_failures_total` | counter | `sink` | — |
 | `inferplane_audit_buffer_utilization_ratio` | gauge | — (전역) | — |
+| `inferplane_pricing_miss_total` | counter | `provider`, `model` | — |
+| `inferplane_quota_store_errors_total` | counter | `op`(check\|debit) | — |
 
 - 카디널리티 가드: `team`·`model` 레이블은 config에 선언된 값만
   허용 (요청 입력값을 레이블로 직접 사용하지 않음).
@@ -521,9 +618,11 @@ audit:
 ```yaml
 server:
   listen: :8080
-  admin_listen: :9090          # 관리 API + /metrics + 헬스체크
+  # tls: { cert_ref: { file: /etc/tls/cert.pem }, key_ref: { file: /etc/tls/key.pem } }
+  #   ↑ 자체 TLS 종단 (§2.3) — 비-K8s 단일 바이너리 실행 시 활성화 권장
+  admin_listen: :9090          # 관리 API + /metrics + 헬스체크 (/metrics는 무인증 — §5.5)
   admin_auth:
-    token_ref: { env: INFERPLANE_ADMIN_TOKEN }   # admin API 보호 (§5.5)
+    token_ref: { env: INFERPLANE_ADMIN_TOKEN }   # admin API 보호 (§5.5, 복수 지정 = rotation)
 
 providers:
   anthropic-direct:
@@ -571,6 +670,7 @@ teams:
 
 pricing:
   source: bundled                              # 번들 단가 테이블
+  on_missing: allow                            # allow (기본: 비용 0 + pricing_missing 마킹) | block
   overrides:                                   # 키 = (provider, model) 쌍 — §5.3
     anthropic-direct:
       claude-sonnet-4-6:
@@ -586,23 +686,28 @@ pricing:
         cache_read_per_mtok: 0.30
         cache_write_5m_per_mtok: 3.75
         cache_write_1h_per_mtok: 6.00
+    local-vllm:                                # self-hosted: 자체 단가(GPU 상각 chargeback) 정의
+      "Qwen/Qwen2.5-Coder-32B":
+        input_per_mtok: 0.20
+        output_per_mtok: 0.60
 
 plugins: []                                    # v0.1: 내장 거버넌스만. v0.2: pii-mask 등
 
 audit:
   failure_mode: buffer_then_block              # fail_open | fail_closed | buffer_then_block
-  buffer: { max_records: 100_000, max_age: 5m }
+  buffer: { path: /var/lib/inferplane/audit-wal, max_records: 100_000, max_age: 5m }  # disk-backed WAL (§5.4)
   sinks:
     - { type: stdout, format: jsonl, required: false }   # 관측용 best-effort
     - { type: s3, bucket: llm-audit, prefix: gw/, format: jsonl }   # required 기본 true
-  # v0.2: hash_chain: true, anchor: { type: s3_object_lock, interval: 5m }
+  # 해시 체인: v0.1 기본 활성 — 토글 아님 (§5.4). v0.2: anchor: { type: s3_object_lock, interval: 5m }
 
 quota_store:                                   # 생략 시 in-memory (단일 레플리카)
   type: redis
   addr: redis.infra.svc:6379
+  failure_mode: fail_open                      # fail_open (기본, 로컬 지속) | fail_closed (§5.3)
 
 key_store:                                     # virtual key / team 메타데이터
-  type: sqlite                                 # sqlite (기본) | postgres (HA)
+  type: sqlite                                 # sqlite = 단일 레플리카 전용 | postgres = 다중 레플리카(HA) 필수 (v0.2)
   path: /var/lib/inferplane/keys.db
 ```
 
@@ -683,28 +788,32 @@ hack/                            # 개발 스크립트
 - [ ] 팀 기반 토큰 quota (2단계 집행)
 - [ ] Provider failover (명시적 우선순위 + circuit breaker)
 - [ ] Prometheus 메트릭 (GenAI conventions 네이밍) + Grafana 대시보드 JSON
-- [ ] 단일 바이너리 + Helm chart
+- [ ] 단일 바이너리 + Helm chart + 자체 TLS 리스너 옵션
 - [ ] Prompt caching pass-through 보장 (골든 테스트 포함)
 
 차별화 기능 (여기에 승부):
 
-- [ ] 감사로그: append-only JSONL + 구조화 레코드 (`prev_hash`·`trace_id`
-      예약) + sink 실패 정책 (기본 `buffer_then_block`)
+- [ ] 감사로그: append-only JSONL + 2단계 레코드(started/completed)
+      + 최소 해시 체인 + `audit verify` CLI + disk-backed WAL 버퍼
+      + sink 실패 정책 (기본 `buffer_then_block`, `trace_id` 예약)
 - [ ] RBAC: team × model allow-list
-- [ ] rate limit / quota / budget 3분리 + (provider, model) 단가 테이블
-      + TTL별 cache write 구분 + 정수 µUSD 집계
+- [ ] rate limit / quota / budget 3분리 + BudgetStore + (provider,
+      model) 단가 테이블 + TTL별 cache write 구분 + 정수 µUSD 집계
+      + `pricing.on_missing` (self-hosted 자체 단가 지원)
 
 거버넌스 파일 (첫 커밋부터): DCO, GOVERNANCE.md(벤더 중립),
 MAINTAINERS.md, SECURITY.md, CODE_OF_CONDUCT.md, 공개 로드맵.
 
 ### v0.2 — 거버넌스 완성
 
-- 감사로그 hash chain + 외부 앵커링 + `audit verify` CLI
+- 감사로그 외부 앵커링 (S3 Object Lock) — v0.1 해시 체인의 보증 상향
 - OIDC SSO (Dex/Keycloak/Okta) — Identity 계층 연결, groups → team 매핑
 - OTel trace (GenAI conventions)
 - 키 발급 셀프서비스 페이지 (최소 UI — 로그인 → 내 키 발급)
 - PII 마스킹 플러그인 (캐시 파괴 명시 opt-in + 비용 경고)
-- Redis/Valkey quota 스토어 HA 검증, Postgres key store
+- Redis/Valkey quota 스토어 HA 검증, Postgres key store (다중 레플리카 필수 경로)
+- 분산 rate limit (Redis/Valkey — 다중 레플리카 합산 집행)
+- 팀별 upstream 자격 오버라이드 (Role ARN — Bedrock noisy-neighbor 분산)
 - OpenSSF Best Practices 배지
 
 ### Phase 3 — CNCF Sandbox 신청 (첫 릴리스 후 8~14개월)
@@ -736,15 +845,16 @@ MAINTAINERS.md, SECURITY.md, CODE_OF_CONDUCT.md, 공개 로드맵.
 
 | # | 질문 | 결정 시한 |
 |---|---|---|
-| 1 | **count_tokens 비-Anthropic 타깃 추정 전략**: 보수적 휴리스틱(문자수/4 등) vs 로컬 토크나이저 동봉(바이너리 크기 영향) | v0.1 구현 전 |
-| 2 | **Bedrock Mantle 검증**: 리전 가용성, count_tokens/beta 헤더 패리티, IRSA 인증 경로 — 실측 후 기본 경로 승격 여부 | v0.1 중 spike |
-| 3 | **단가 테이블 유지 정책**: 번들 YAML 갱신 주기, 모델 신규 출시 시 fallback 동작 (단가 미정 모델 = budget 미집계 + 경고?) | v0.1 구현 전 |
-| 4 | **다중 레플리카 감사로그 순서**: 인스턴스별 독립 체인(v0.2 hash chain 시) vs 중앙 시퀀서 — 인스턴스별 체인 + `instance` 필드가 유력 | v0.2 설계 |
-| 5 | **스트리밍 중단 비용 추정 정확도**: 출력 청크 기반 추정의 오차 허용 범위와 `estimated` 레코드의 budget 반영 방식 | v0.1 구현 중 |
-| 6 | **프로젝트명 "inferplane" 상표/중복 검사**: CNCF 제출 전 필수 (기존 프로젝트·상표 충돌 확인) | 공개 전 |
-| 7 | **OpenAI ingress → Claude provider의 tool calling 매핑 상세**: parallel tool calls, tool_choice 옵션별 변환 규칙 | v0.1 구현 중 |
-| 8 | **회사 법무/정책 확인**: public 공개 및 외부 홍보 가능 시점 | 외부 의존 |
-| 9 | **audit 버퍼 내구성**: `buffer_then_block`의 인메모리 버퍼는 crash 시 유실 — disk-backed 버퍼(WAL) 채택 여부와 비용 | v0.1 구현 중 |
+| 1 | **count_tokens 비-Anthropic 타깃 추정 전략**: 보수적 휴리스틱(문자수/4 등) vs 로컬 토크나이저 동봉(바이너리 크기 영향) — `TokenCounter` 미구현 provider의 폴백 정확도 | v0.1 첫 spike |
+| 2 | **Bedrock 경로 검증 spike**: Mantle 리전 가용성·beta 패리티·IRSA 인증 + Bedrock CountTokens API의 InvokeModel 형식 입력 지원 여부 | v0.1 중 spike |
+| 3 | **번들 단가 테이블 갱신 주기**: 릴리스 동봉 vs 별도 데이터 릴리스 (미등록 시 동작은 `pricing.on_missing`으로 결정 완료) | v0.1 구현 전 |
+| 4 | **스트리밍 중단 비용 추정 정확도**: grace-period 드레인 실패 시 추정 오차 허용 범위와 `estimated` 레코드의 budget 반영 방식 | v0.1 구현 중 |
+| 5 | **프로젝트명 "inferplane" 상표/중복 검사**: CNCF 제출 전 필수 (기존 프로젝트·상표 충돌 확인) | 공개 전 |
+| 6 | **OpenAI ingress → Claude provider의 tool calling 매핑 상세**: parallel tool calls, tool_choice 옵션별 변환 규칙 | v0.1 구현 중 |
+| 7 | **회사 법무/정책 확인**: public 공개 및 외부 홍보 가능 시점 | 외부 의존 |
+
+(구 #4 다중 레플리카 체인 → 인스턴스별 독립 체인으로 결정,
+구 #9 audit 버퍼 내구성 → disk-backed WAL로 결정 — §5.4·부록 A 참조.)
 
 ---
 
@@ -769,3 +879,10 @@ MAINTAINERS.md, SECURITY.md, CODE_OF_CONDUCT.md, 공개 로드맵.
 | 단가 키 = (provider, model) | 모델명 단독 키 | 같은 모델도 provider/리전별 단가 상이 → Bedrock 과금 오차 |
 | audit 기본 buffer_then_block | 무조건 fail-open / fail-closed | 조용한 유실은 차별점 붕괴, hard fail은 S3 장애 = LLM 전면 장애 |
 | admin token + 로컬 부트스트랩 | admin API 무인증 / 첫 키 수동 DB 조작 | 키 발급 경로 무방비 또는 닭-달걀 미해결 |
+| 최소 해시 체인 v0.1 + "변조감지" 용어 | 문구 하향 / "변조방지" 유지 | 차별점 주장 vs v0.1 실체 모순 — 4개 모델 패널 합의 (CRITICAL) |
+| audit 버퍼 = disk-backed WAL | 인메모리 버퍼 | crash 시 유실 = fail_open과 동치, 6/6 패널 지적 |
+| 2단계 audit (started/completed) | 완료 후 단일 기록 | crash·거부 요청이 감사에서 증발 |
+| 정산 = 요청 단위 1회 + round-half-even | 청크 단위 절사 누적 | 저단가 모델 체계적 과소계상 |
+| pricing.on_missing 기본 allow + 마킹 | 무조건 차단 | self-hosted(vLLM) 자체 단가/chargeback이 1급 사용 사례 — block은 opt-in |
+| quota store 기본 fail_open (로컬 지속) | fail_closed 전면 차단 | 스토어 장애가 LLM 전면 장애로 번지는 것 방지 — fail_closed는 opt-in |
+| 폴백 = pre-TTFT 한정 + 드레인 정산 | mid-stream 투명 폴백 | HTTP/SSE 특성상 불가능 + 조기종료 정산 우회 방지 |
