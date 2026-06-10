@@ -1,5 +1,14 @@
 {
-  "server": { "listen": ":8080", "admin_listen": ":9090", "drain_grace": "10s" },
+  "server": {
+    "listen": ":8080", "admin_listen": ":9090", "drain_grace": "10s",
+    "admin_auth": { "token_refs": [ { "env": "INFERPLANE_ADMIN_TOKEN" } ] }
+  },
+  "key_store": { "type": "sqlite", "path": "/var/lib/inferplane/keys.db" },
+  "audit": {
+    "failure_mode": "buffer_then_block",
+    "buffer": { "path": "/var/lib/inferplane/audit.wal" },
+    "sinks": [ { "type": "stdout" }, { "type": "file", "path": "/var/lib/inferplane/audit.jsonl" } ]
+  },
   "providers": {
     "anthropic-direct": { "type": "anthropic", "base_url": "https://api.anthropic.com", "api_key_ref": { "env": "ANTHROPIC_API_KEY" } }
   },
