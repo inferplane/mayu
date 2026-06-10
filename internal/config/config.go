@@ -33,16 +33,50 @@ type ModelConfig struct {
 	Targets []Target `json:"targets"`
 }
 
+// AdminAuth guards the admin plane (§5.5). Tokens are referenced via
+// SecretRef (env/file) and resolved into Tokens at load — never inline.
+type AdminAuth struct {
+	TokenRefs []SecretRef `json:"token_refs,omitempty"`
+	Tokens    []string    `json:"-"` // resolved at load
+}
+
 type ServerConfig struct {
-	Listen      string `json:"listen"`
-	AdminListen string `json:"admin_listen"`
-	DrainGrace  string `json:"drain_grace"`
+	Listen      string    `json:"listen"`
+	AdminListen string    `json:"admin_listen"`
+	DrainGrace  string    `json:"drain_grace"`
+	AdminAuth   AdminAuth `json:"admin_auth"`
+}
+
+// KeyStoreConfig selects the virtual-key backend. M3 ships "sqlite";
+// "postgres" is the HA path (v0.2).
+type KeyStoreConfig struct {
+	Type string `json:"type"`
+	Path string `json:"path"`
+}
+
+// AuditSink configures one audit output: "stdout" or "file" (with Path).
+type AuditSink struct {
+	Type string `json:"type"`
+	Path string `json:"path,omitempty"`
+}
+
+// AuditBuffer is the disk-backed WAL location for buffer_then_block.
+type AuditBuffer struct {
+	Path string `json:"path"`
+}
+
+type AuditConfig struct {
+	FailureMode string      `json:"failure_mode"` // buffer_then_block (default)
+	Buffer      AuditBuffer `json:"buffer"`
+	Sinks       []AuditSink `json:"sinks"`
 }
 
 type Config struct {
 	Server    ServerConfig              `json:"server"`
 	Providers map[string]ProviderConfig `json:"providers"`
 	Models    map[string]ModelConfig    `json:"models"`
+	KeyStore  KeyStoreConfig            `json:"key_store"`
+	Audit     AuditConfig               `json:"audit"`
 }
 
 func Load(path string) (*Config, error) {
@@ -74,6 +108,14 @@ func Load(path string) (*Config, error) {
 		}
 		p.APIKey = secret
 		cfg.Providers[name] = p
+	}
+	for i := range cfg.Server.AdminAuth.TokenRefs {
+		ref := cfg.Server.AdminAuth.TokenRefs[i]
+		tok, err := resolveSecret(&ref)
+		if err != nil {
+			return nil, fmt.Errorf("config: admin token: %w", err)
+		}
+		cfg.Server.AdminAuth.Tokens = append(cfg.Server.AdminAuth.Tokens, tok)
 	}
 	return &cfg, nil
 }

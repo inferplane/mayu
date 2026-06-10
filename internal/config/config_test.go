@@ -47,3 +47,27 @@ func TestLoadRejectsInlineSecret(t *testing.T) {
 		t.Fatal("expected rejection of inline api_key")
 	}
 }
+
+func TestLoadKeyStoreAuditAdmin(t *testing.T) {
+	t.Setenv("ADMIN_TOK", "secret-admin")
+	dir := t.TempDir()
+	f := filepath.Join(dir, "c.json")
+	os.WriteFile(f, []byte(`{
+	  "server": {"listen":":8080","admin_listen":":9090","admin_auth":{"token_refs":[{"env":"ADMIN_TOK"}]}},
+	  "key_store": {"type":"sqlite","path":"/tmp/keys.db"},
+	  "audit": {"failure_mode":"buffer_then_block","buffer":{"path":"/tmp/audit.wal"},"sinks":[{"type":"stdout"},{"type":"file","path":"/tmp/audit.jsonl"}]}
+	}`), 0o600)
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.KeyStore.Type != "sqlite" || cfg.KeyStore.Path != "/tmp/keys.db" {
+		t.Fatalf("key_store: %+v", cfg.KeyStore)
+	}
+	if len(cfg.Server.AdminAuth.TokenRefs) != 1 || len(cfg.Server.AdminAuth.Tokens) != 1 || cfg.Server.AdminAuth.Tokens[0] != "secret-admin" {
+		t.Fatalf("admin tokens not resolved: %+v", cfg.Server.AdminAuth)
+	}
+	if cfg.Audit.FailureMode != "buffer_then_block" || len(cfg.Audit.Sinks) != 2 {
+		t.Fatalf("audit: %+v", cfg.Audit)
+	}
+}
