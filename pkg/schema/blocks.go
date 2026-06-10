@@ -26,10 +26,11 @@ func (c CacheControl) MarshalJSON() ([]byte, error) {
 // over the Anthropic block vocabulary. Unknown block types round-trip via
 // Extra; tool_result.content stays raw until a milestone needs to interpret it.
 type ContentBlock struct {
+	// Type has no omitempty on purpose: never silently drop the union discriminator.
 	Type string `json:"type"`
 
 	// text
-	Text string `json:"text,omitempty"`
+	Text *string `json:"text,omitempty"`
 
 	// tool_use
 	ID    string          `json:"id,omitempty"`
@@ -42,9 +43,9 @@ type ContentBlock struct {
 	IsError   *bool           `json:"is_error,omitempty"`
 
 	// thinking / redacted_thinking
-	Thinking  string `json:"thinking,omitempty"`
-	Signature string `json:"signature,omitempty"`
-	Data      string `json:"data,omitempty"`
+	Thinking  *string `json:"thinking,omitempty"`
+	Signature *string `json:"signature,omitempty"`
+	Data      *string `json:"data,omitempty"`
 
 	CacheControl *CacheControl `json:"cache_control,omitempty"`
 

@@ -1,6 +1,9 @@
 package schema
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestContentBlockRoundTrip(t *testing.T) {
 	cases := map[string]string{
@@ -11,14 +14,21 @@ func TestContentBlockRoundTrip(t *testing.T) {
 		"redacted":        `{"type":"redacted_thinking","data":"EmwKAhgB"}`,
 		"unknown_type":    `{"type":"future_block","payload":{"deep":[1,2]}}`,
 		"unknown_field":   `{"type":"text","text":"x","novel_attr":true}`,
+
+		"empty_text_start":     `{"type":"text","text":""}`,
+		"empty_thinking_start": `{"type":"thinking","thinking":"","signature":""}`,
+		"empty_redacted":       `{"type":"redacted_thinking","data":""}`,
+		"cache_no_ttl":         `{"type":"text","text":"x","cache_control":{"type":"ephemeral"}}`,
+
+		"nested_tool_result_cache": `{"type":"tool_result","tool_use_id":"t9","content":[{"type":"text","text":"r","cache_control":{"type":"ephemeral","ttl":"1h"}}]}`,
 	}
 	for name, in := range cases {
 		t.Run(name, func(t *testing.T) {
 			var b ContentBlock
-			if err := b.UnmarshalJSON([]byte(in)); err != nil {
+			if err := json.Unmarshal([]byte(in), &b); err != nil {
 				t.Fatal(err)
 			}
-			out, err := b.MarshalJSON()
+			out, err := json.Marshal(b)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -29,7 +39,7 @@ func TestContentBlockRoundTrip(t *testing.T) {
 
 func TestContentBlockTypedFields(t *testing.T) {
 	var b ContentBlock
-	_ = b.UnmarshalJSON([]byte(`{"type":"tool_use","id":"toolu_01","name":"bash","input":{}}`))
+	_ = json.Unmarshal([]byte(`{"type":"tool_use","id":"toolu_01","name":"bash","input":{}}`), &b)
 	if b.Type != "tool_use" || b.ID != "toolu_01" || b.Name != "bash" {
 		t.Fatalf("typed fields not populated: %+v", b)
 	}
