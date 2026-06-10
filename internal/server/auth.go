@@ -2,7 +2,6 @@ package server
 
 import (
 	"crypto/subtle"
-	"encoding/json"
 	"net/http"
 	"strings"
 )
@@ -27,17 +26,5 @@ func DevKeyAuth(devKey string, next http.Handler) http.Handler {
 			return
 		}
 		next.ServeHTTP(w, r)
-	})
-}
-
-// writeAnthropicError emits an Anthropic-shaped error body. Anthropic clients
-// (Claude Code) expect {"type":"error","error":{"type","message"}}.
-// (Task 10 relocates this to errors.go.)
-func writeAnthropicError(w http.ResponseWriter, status int, errType, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]any{
-		"type":  "error",
-		"error": map[string]string{"type": errType, "message": msg},
 	})
 }
