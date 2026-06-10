@@ -440,10 +440,15 @@ Budget 구현 제약:
 - usage의 `cache_read_input_tokens`를 **반드시 구분 집계**한다.
   base input 단가로 계산하면 비용이 10배 과대계상된다.
 - 스트리밍 중단 시: 클라이언트가 먼저 끊어도 upstream 스트림을
-  **grace period(기본 10s, config) 동안 백그라운드로 드레인**해
-  마지막 usage 청크를 수신한 뒤 확정 정산한다 — 조기 종료 반복으로
-  quota/budget을 과소계상시키는 우회를 막는다. 드레인 실패 시에만
-  출력 청크 기반 추정 + 감사로그에 `estimated: true`.
+  **grace period(`server.drain_grace`, 기본 10s) 동안 백그라운드로
+  드레인**해 마지막 usage 청크를 수신한 뒤 확정 정산한다 — 조기
+  종료 반복으로 quota/budget을 과소계상시키는 우회를 막는다.
+  드레인 실패 시에만 출력 청크 기반 추정 + 감사로그에
+  `estimated: true`.
+  **트레이드오프**: 드레인은 취소 전파를 포기하는 것이다 —
+  클라이언트 중단 후 최대 grace 시간만큼 upstream 유료 생성이
+  계속된다. `drain_grace: 0`이면 즉시 취소하고 `estimated`로
+  정산한다 (비용 절감 우선 조직용 opt-in).
 
 ### 5.4 감사로그
 
@@ -458,6 +463,12 @@ v0.1 범위: **append-only JSONL + 구조화 레코드 + 최소 해시 체인.**
 (principal·model·인가 결과까지 — 거부도 기록), 완료 시
 `request_completed`(usage·cost 정산 포함). crash가 나도 인증을
 통과한 요청의 흔적이 남는다.
+
+구현 노트: 해시 체인 기록은 **단일 writer 고루틴으로 직렬화**한다 —
+동시 요청의 `request_started`/`request_completed`가 인터리빙될 때
+`prev_hash` 경합을 막는 유일하게 안전한 구조다. 체인이 기록 순서를
+정의하고, 그 순서는 writer 큐가 정한다 (요청 핸들러는 큐에 적재만,
+fsync·체인 해시는 writer가 담당).
 
 레코드 스키마 (v0.1):
 
@@ -520,7 +531,7 @@ v0.1 범위: **append-only JSONL + 구조화 레코드 + 최소 해시 체인.**
 ```yaml
 audit:
   failure_mode: buffer_then_block   # fail_open | fail_closed | buffer_then_block (기본)
-  buffer: { path: /var/lib/inferplane/audit-wal, max_records: 100_000, max_age: 5m }
+  buffer: { path: /var/lib/inferplane/audit-wal, max_records: 100000, max_age: 5m }
 ```
 
 - `buffer_then_block` (기본): required sink 실패 시 **로컬 디스크
@@ -618,6 +629,7 @@ audit:
 ```yaml
 server:
   listen: :8080
+  drain_grace: 10s             # 스트림 중단 시 upstream 드레인 시간 — 0 = 즉시 취소 (§5.3)
   # tls: { cert_ref: { file: /etc/tls/cert.pem }, key_ref: { file: /etc/tls/key.pem } }
   #   ↑ 자체 TLS 종단 (§2.3) — 비-K8s 단일 바이너리 실행 시 활성화 권장
   admin_listen: :9090          # 관리 API + /metrics + 헬스체크 (/metrics는 무인증 — §5.5)
@@ -661,12 +673,12 @@ models:
 teams:
   platform-eng:
     allowed_models: ["claude-sonnet-4-6", "qwen-coder"]
-    rate_limit:  { requests_per_minute: 300, tokens_per_minute: 2_000_000 }
-    quota:       { tokens_per_day: 50_000_000, on_exceeded: block }  # block | warn (기본 block)
-    budget:      { usd_per_month: 5_000, on_exceeded: block }        # 내부 집계는 정수 µUSD (§5.3)
+    rate_limit:  { requests_per_minute: 300, tokens_per_minute: 2000000 }
+    quota:       { tokens_per_day: 50000000, on_exceeded: block }  # block | warn (기본 block)
+    budget:      { usd_per_month: 5000, on_exceeded: block }       # 내부 집계는 정수 µUSD (§5.3)
   data-science:
     allowed_models: ["*"]
-    quota: { tokens_per_day: 200_000_000, on_exceeded: block }
+    quota: { tokens_per_day: 200000000, on_exceeded: block }
 
 pricing:
   source: bundled                              # 번들 단가 테이블
@@ -695,7 +707,7 @@ plugins: []                                    # v0.1: 내장 거버넌스만. v
 
 audit:
   failure_mode: buffer_then_block              # fail_open | fail_closed | buffer_then_block
-  buffer: { path: /var/lib/inferplane/audit-wal, max_records: 100_000, max_age: 5m }  # disk-backed WAL (§5.4)
+  buffer: { path: /var/lib/inferplane/audit-wal, max_records: 100000, max_age: 5m }  # disk-backed WAL (§5.4)
   sinks:
     - { type: stdout, format: jsonl, required: false }   # 관측용 best-effort
     - { type: s3, bucket: llm-audit, prefix: gw/, format: jsonl }   # required 기본 true
