@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/inferplane/inferplane/internal/config"
+	"github.com/inferplane/inferplane/internal/keystore"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/providers"
 	"github.com/inferplane/inferplane/providers/testing/mockprovider"
@@ -17,7 +18,8 @@ func TestDataMuxRoutesAndAuths(t *testing.T) {
 		"claude-sonnet-4-6": {Targets: []config.Target{{Provider: "p", Model: "claude-sonnet-4-6"}}},
 	}
 	r := router.New(provs, models)
-	mux := DataMux(r, "dev-key")
+	store := stubStore{key: "dev-key", p: keystore.Principal{KeyID: "ik_abc", Team: "platform-eng", AllowedModels: []string{"*"}}}
+	mux := DataMux(r, store)
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	rec := httptest.NewRecorder()

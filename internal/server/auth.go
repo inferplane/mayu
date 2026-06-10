@@ -1,30 +1,32 @@
 package server
 
 import (
-	"crypto/subtle"
 	"net/http"
 	"strings"
+
+	"github.com/inferplane/inferplane/internal/keystore"
+	"github.com/inferplane/inferplane/internal/principal"
 )
 
-// DevKeyAuth is the TEMPORARY single-key gate for M2. It compares the client's
-// x-api-key or Authorization: Bearer against one configured key in constant
-// time. Replaced by virtual-key auth + key store in M3. The upstream provider
-// key is never exposed to the client (design doc §5.2 — established from M2).
-func DevKeyAuth(devKey string, next http.Handler) http.Handler {
-	want := []byte(devKey)
+// KeyAuth resolves the client's virtual API key (x-api-key or Authorization:
+// Bearer) to a Principal via the key store and injects it into the request
+// context. Replaces M2's DevKeyAuth. The upstream provider key is never the
+// client's (§5.2). Resolution failure → 401 with an Anthropic-shaped error.
+func KeyAuth(store keystore.Store, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if len(want) == 0 {
+		key := r.Header.Get("x-api-key")
+		if key == "" {
+			key = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		}
+		if key == "" {
+			writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "missing API key")
+			return
+		}
+		p, err := store.Resolve(r.Context(), key)
+		if err != nil {
 			writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "invalid API key")
 			return
 		}
-		got := r.Header.Get("x-api-key")
-		if got == "" {
-			got = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		}
-		if subtle.ConstantTimeCompare([]byte(got), want) != 1 {
-			writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "invalid API key")
-			return
-		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(principal.With(r.Context(), p)))
 	})
 }

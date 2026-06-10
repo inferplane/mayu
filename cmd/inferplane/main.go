@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/inferplane/inferplane/internal/config"
+	"github.com/inferplane/inferplane/internal/keystore"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/internal/server"
 	"github.com/inferplane/inferplane/providers"
@@ -41,10 +42,18 @@ func run(cfgPath string) error {
 	if err != nil {
 		return err
 	}
-	devKey := os.Getenv("INFERPLANE_DEV_KEY")
-	if devKey == "" {
-		return errors.New("INFERPLANE_DEV_KEY must be set (M2 temporary auth)")
+
+	// M3 Task 9 interim; Task 13 wires from config. Open the virtual-key store
+	// from INFERPLANE_KEY_STORE (default keys.db) so KeyAuth can resolve keys.
+	storePath := os.Getenv("INFERPLANE_KEY_STORE")
+	if storePath == "" {
+		storePath = "keys.db"
 	}
+	store, err := keystore.OpenSQLite(storePath)
+	if err != nil {
+		return fmt.Errorf("keystore: %w", err)
+	}
+	defer store.Close()
 
 	provs := map[string]providers.Provider{}
 	for name, pc := range cfg.Providers {
@@ -56,7 +65,7 @@ func run(cfgPath string) error {
 	}
 	r := router.New(provs, cfg.Models)
 
-	dataSrv := &http.Server{Addr: cfg.Server.Listen, Handler: server.DataMux(r, devKey)}
+	dataSrv := &http.Server{Addr: cfg.Server.Listen, Handler: server.DataMux(r, store)}
 	adminSrv := &http.Server{Addr: cfg.Server.AdminListen, Handler: server.AdminMux()}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
