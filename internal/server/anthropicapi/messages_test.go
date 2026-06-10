@@ -92,3 +92,56 @@ func TestMessagesStreamingUpstreamErrorTeed(t *testing.T) {
 		t.Fatalf("upstream error body not teed: %s", rec.Body.String())
 	}
 }
+
+type headerProvider struct{}
+
+func (headerProvider) Name() string               { return "hdr" }
+func (headerProvider) Models() []schema.ModelInfo { return nil }
+func (headerProvider) Complete(context.Context, *providers.ProxyRequest) (*providers.ProxyResponse, error) {
+	return &providers.ProxyResponse{
+		StatusCode: 200,
+		Headers:    http.Header{"Request-Id": {"req_123"}, "Anthropic-Ratelimit-Requests-Remaining": {"42"}, "Content-Type": {"application/json"}},
+		RawBody:    []byte(`{"id":"msg_x","type":"message","role":"assistant","model":"m","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`),
+	}, nil
+}
+func (headerProvider) Stream(context.Context, *providers.ProxyRequest) (iter.Seq2[*providers.StreamEvent, error], error) {
+	return nil, errors.New("unused")
+}
+
+func TestMessagesNonStreamingTeesUpstreamHeaders(t *testing.T) {
+	provs := map[string]providers.Provider{"p": headerProvider{}}
+	models := map[string]config.ModelConfig{"m": {Targets: []config.Target{{Provider: "p", Model: "m"}}}}
+	h := NewMessagesHandler(router.New(provs, models))
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"m","messages":[]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Header().Get("Request-Id") != "req_123" {
+		t.Fatalf("request-id not teed: %q", rec.Header().Get("Request-Id"))
+	}
+	if rec.Header().Get("Anthropic-Ratelimit-Requests-Remaining") != "42" {
+		t.Fatalf("ratelimit header not teed")
+	}
+}
+
+type retryStreamProvider struct{}
+
+func (retryStreamProvider) Name() string               { return "retry" }
+func (retryStreamProvider) Models() []schema.ModelInfo { return nil }
+func (retryStreamProvider) Complete(context.Context, *providers.ProxyRequest) (*providers.ProxyResponse, error) {
+	return nil, errors.New("unused")
+}
+func (retryStreamProvider) Stream(context.Context, *providers.ProxyRequest) (iter.Seq2[*providers.StreamEvent, error], error) {
+	return nil, &providers.UpstreamError{StatusCode: 429, Body: []byte(`{"type":"error"}`), Header: http.Header{"Retry-After": {"30"}}}
+}
+
+func TestMessagesStreamingErrorTeesHeaders(t *testing.T) {
+	provs := map[string]providers.Provider{"p": retryStreamProvider{}}
+	models := map[string]config.ModelConfig{"m": {Targets: []config.Target{{Provider: "p", Model: "m"}}}}
+	h := NewMessagesHandler(router.New(provs, models))
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"m","stream":true,"messages":[]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 429 || rec.Header().Get("Retry-After") != "30" {
+		t.Fatalf("streaming error headers not teed: code=%d retry-after=%q", rec.Code, rec.Header().Get("Retry-After"))
+	}
+}

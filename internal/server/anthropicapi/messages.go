@@ -51,7 +51,12 @@ func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request
 		writeErr(w, 502, "api_error", "upstream error")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
+	if resp.Headers != nil {
+		copyUpstreamHeaders(w.Header(), resp.Headers)
+	}
+	if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "application/json")
+	}
 	w.WriteHeader(resp.StatusCode)
 	w.Write(resp.RawBody) // tee verbatim (incl. non-2xx error bodies)
 	// resp.Parsed.Usage is the observation hook for M3 audit / M5 quota.
@@ -64,7 +69,10 @@ func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, 
 		// sees Anthropic's real rate-limit/error response, not a fabricated one.
 		var ue *providers.UpstreamError
 		if errors.As(err, &ue) {
-			w.Header().Set("Content-Type", "application/json")
+			copyUpstreamHeaders(w.Header(), ue.Header)
+			if w.Header().Get("Content-Type") == "" {
+				w.Header().Set("Content-Type", "application/json")
+			}
 			w.WriteHeader(ue.StatusCode)
 			w.Write(ue.Body)
 			return
@@ -87,6 +95,21 @@ func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, 
 		w.Write(ev.Raw) // tee original bytes verbatim
 		flusher.Flush()
 		// ev.Chunk.Usage on message_delta is the settlement observation point (M3/M5).
+	}
+}
+
+// copyUpstreamHeaders tees upstream response headers to the client, skipping
+// hop-by-hop headers Go manages itself. Preserves request-id and
+// anthropic-ratelimit-*/retry-after so the client keeps its backoff signal.
+func copyUpstreamHeaders(dst http.Header, src http.Header) {
+	for k, vs := range src {
+		switch http.CanonicalHeaderKey(k) {
+		case "Content-Length", "Transfer-Encoding", "Connection":
+			continue
+		}
+		for _, v := range vs {
+			dst.Add(k, v)
+		}
 	}
 }
 
