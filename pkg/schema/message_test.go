@@ -11,6 +11,8 @@ func TestMessageRoundTrip(t *testing.T) {
 		"string_content": `{"role":"user","content":"plain text"}`,
 		"block_content":  `{"role":"assistant","content":[{"type":"text","text":"hi"},{"type":"tool_use","id":"t1","name":"grep","input":{"q":"x"}}]}`,
 		"block_order":    `{"role":"assistant","content":[{"type":"thinking","thinking":"...","signature":"sig"},{"type":"text","text":"answer"}]}`,
+		"null_content":   `{"role":"user","content":null}`,
+		"empty_array":    `{"role":"user","content":[]}`,
 	}
 	for name, in := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -33,5 +35,14 @@ func TestMessageBlockOrderPreserved(t *testing.T) {
 	_ = json.Unmarshal([]byte(in), &m)
 	if len(m.Content) != 2 || m.Content[0].Type != "thinking" || m.Content[1].Type != "text" {
 		t.Fatalf("block order broken: %+v", m.Content)
+	}
+}
+
+func TestMessageRejectsScalarContent(t *testing.T) {
+	for _, in := range []string{`{"role":"user","content":123}`, `{"role":"user","content":true}`} {
+		var m Message
+		if err := json.Unmarshal([]byte(in), &m); err == nil {
+			t.Fatalf("expected error for %s", in)
+		}
 	}
 }
