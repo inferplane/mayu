@@ -8,7 +8,9 @@ package schema
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"reflect"
+	"strings"
 )
 
 // unmarshalWithExtra decodes data into v (standard json tags), then returns
@@ -16,10 +18,13 @@ import (
 //
 // Constraint: known entries must exactly match the json tag casing.
 // Go decodes struct fields case-insensitively, but the strip here is
-// exact-case — a mixed-case incoming key (e.g. "Known") would populate
-// the typed field AND survive into extra, duplicating on re-marshal.
-// Anthropic/OpenAI wire formats are lowercase snake_case, so exact
-// lowercase known lists are correct by construction.
+// exact-case. A mixed-case incoming key (e.g. "Known" vs "known") would
+// otherwise populate the typed field AND survive into extra, emitting
+// duplicate keys on re-marshal — a parser-differential smuggling vector
+// at the gateway trust boundary. Such case-variant collisions are now
+// rejected (see below), so leftover extra keys never collide with a
+// known field. Anthropic/OpenAI wire formats are lowercase snake_case,
+// so honest clients are unaffected.
 func unmarshalWithExtra(data []byte, v any, known ...string) (map[string]json.RawMessage, error) {
 	if err := json.Unmarshal(data, v); err != nil {
 		return nil, err
@@ -30,6 +35,19 @@ func unmarshalWithExtra(data []byte, v any, known ...string) (map[string]json.Ra
 	}
 	for _, k := range known {
 		delete(all, k)
+	}
+	// Reject case-variant collisions: Go decodes struct fields
+	// case-insensitively, but the strip above is exact-case. A leftover key
+	// whose lowercase form matches a known key would duplicate onto the typed
+	// field AND survive into extra, emitting duplicate keys on re-marshal — a
+	// parser-differential smuggling vector at the gateway trust boundary.
+	for k := range all {
+		lower := strings.ToLower(k)
+		for _, known := range known {
+			if lower == strings.ToLower(known) {
+				return nil, fmt.Errorf("schema: case-variant of known key %q is not allowed: %q", known, k)
+			}
+		}
 	}
 	if len(all) == 0 {
 		return nil, nil

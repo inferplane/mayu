@@ -97,6 +97,31 @@ func TestExtraKnownKeyNotOverlaid(t *testing.T) {
 	assertJSONSemanticEqual(t, []byte(`{"known":"typed"}`), out)
 }
 
+func TestExtraRejectsCaseCollision(t *testing.T) {
+	// Adversarial: a case-variant of a known key would populate the typed
+	// field (Go decodes case-insensitively) AND survive into Extra, emitting
+	// duplicate keys on re-marshal — a parser-differential smuggling vector.
+	in := []byte(`{"known":"cheap","Known":"expensive"}`)
+	var s sample
+	_, err := unmarshalWithExtra(in, &s, "known")
+	if err == nil {
+		t.Fatal("expected case-collision to be rejected, got nil error")
+	}
+}
+
+func TestExtraAllowsDistinctKeys(t *testing.T) {
+	// Non-colliding unknown keys must still pass (regression guard).
+	in := []byte(`{"known":"a","unrelated":"b"}`)
+	var s sample
+	extra, err := unmarshalWithExtra(in, &s, "known")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := extra["unrelated"]; !ok {
+		t.Fatal("distinct unknown key should be preserved in extra")
+	}
+}
+
 // assertJSONSemanticEqual: 키 순서 무시, 숫자 정밀도 보존 비교.
 func assertJSONSemanticEqual(t *testing.T, want, got []byte) {
 	t.Helper()
