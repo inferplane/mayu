@@ -33,3 +33,16 @@ func TestDevKeyAuth(t *testing.T) {
 		})
 	}
 }
+
+func TestDevKeyAuthRejectsEmptyKey(t *testing.T) {
+	// Defense-in-depth: an empty devKey must never authenticate anyone,
+	// even a client sending no credentials (which would otherwise match "").
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	h := DevKeyAuth("", next)
+	req := httptest.NewRequest("POST", "/v1/messages", nil) // no auth header
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Fatalf("empty devKey must reject all requests; got %d", rec.Code)
+	}
+}

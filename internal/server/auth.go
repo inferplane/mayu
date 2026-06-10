@@ -14,6 +14,10 @@ import (
 func DevKeyAuth(devKey string, next http.Handler) http.Handler {
 	want := []byte(devKey)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(want) == 0 {
+			writeAnthropicError(w, http.StatusUnauthorized, "authentication_error", "invalid API key")
+			return
+		}
 		got := r.Header.Get("x-api-key")
 		if got == "" {
 			got = strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
