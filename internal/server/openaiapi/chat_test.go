@@ -1,0 +1,170 @@
+package openaiapi
+
+import (
+	"context"
+	"iter"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/inferplane/inferplane/internal/config"
+	"github.com/inferplane/inferplane/internal/keystore"
+	"github.com/inferplane/inferplane/internal/openai"
+	"github.com/inferplane/inferplane/internal/principal"
+	"github.com/inferplane/inferplane/internal/router"
+	"github.com/inferplane/inferplane/pkg/schema"
+	"github.com/inferplane/inferplane/providers"
+	"github.com/inferplane/inferplane/providers/testing/mockprovider"
+)
+
+func testRouter() *router.Router {
+	provs := map[string]providers.Provider{"p": mockprovider.New("gpt-x")}
+	models := map[string]config.ModelConfig{
+		"gpt-x": {Targets: []config.Target{{Provider: "p", Model: "gpt-x"}}},
+	}
+	return router.New(provs, models)
+}
+
+func TestChatNonStreamingConvertsMockCanonicalToOpenAI(t *testing.T) {
+	// mockprovider returns canonical (Anthropic) response with id "msg_mock";
+	// its wire is "anthropic", so the OpenAI ingress must CONVERT to OpenAI shape.
+	h := NewChatHandler(testRouter())
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}`))
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik", Team: "t", AllowedModels: []string{"*"}})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"chat.completion"`) {
+		t.Fatalf("response not converted to OpenAI shape: %s", body)
+	}
+	if !strings.Contains(body, `"finish_reason"`) {
+		t.Fatalf("missing finish_reason: %s", body)
+	}
+}
+
+func TestChatUnknownModel404(t *testing.T) {
+	h := NewChatHandler(testRouter())
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"nope","messages":[]}`))
+	ctx := principal.With(req.Context(), keystore.Principal{AllowedModels: []string{"*"}})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != 404 {
+		t.Fatalf("want 404, got %d", rec.Code)
+	}
+}
+
+func TestChatAllowListBlocks403(t *testing.T) {
+	h := NewChatHandler(testRouter())
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-x","messages":[]}`))
+	ctx := principal.With(req.Context(), keystore.Principal{AllowedModels: []string{"other"}})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != 403 {
+		t.Fatalf("want 403, got %d", rec.Code)
+	}
+}
+
+func TestChatNoPrincipal401(t *testing.T) {
+	h := NewChatHandler(testRouter())
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-x","messages":[]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Fatalf("want 401, got %d", rec.Code)
+	}
+}
+
+func TestChatStreamingConvertsMockCanonicalToOpenAI(t *testing.T) {
+	// mockprovider streams Anthropic SSE; the OpenAI ingress (anthropic-wire
+	// provider) must re-serialize canonical chunks into OpenAI chunk shape and
+	// terminate with [DONE].
+	h := NewChatHandler(testRouter())
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-x","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik", Team: "t", AllowedModels: []string{"*"}})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"chat.completion.chunk"`) {
+		t.Fatalf("stream not converted to OpenAI chunk shape: %s", body)
+	}
+	if !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("stream missing terminal [DONE]: %s", body)
+	}
+	// must NOT leak the Anthropic SSE event lines
+	if strings.Contains(body, "event: message_start") {
+		t.Fatalf("anthropic SSE leaked into openai stream: %s", body)
+	}
+}
+
+// ── openai-wire provider: tee verbatim (no conversion) ───────────────────────
+
+// oaiWireProvider mimics openai_compatible: its native wire is "openai", so the
+// ingress must forward Raw/RawBody verbatim instead of converting from canonical.
+type oaiWireProvider struct{}
+
+func (oaiWireProvider) Name() string               { return "openai_compatible" }
+func (oaiWireProvider) Models() []schema.ModelInfo { return nil }
+
+func (oaiWireProvider) Complete(_ context.Context, _ *providers.ProxyRequest) (*providers.ProxyResponse, error) {
+	raw := []byte(`{"id":"verbatim","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2}}`)
+	parsed, _ := openai.ResponseToCanonical(raw)
+	return &providers.ProxyResponse{StatusCode: 200, RawBody: raw, Parsed: parsed}, nil
+}
+
+func (oaiWireProvider) Stream(_ context.Context, _ *providers.ProxyRequest) (iter.Seq2[*providers.StreamEvent, error], error) {
+	events := []*providers.StreamEvent{
+		{Raw: []byte("data: {\"id\":\"v\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")},
+		{Raw: []byte("data: [DONE]\n\n")},
+	}
+	return func(yield func(*providers.StreamEvent, error) bool) {
+		for _, ev := range events {
+			if !yield(ev, nil) {
+				return
+			}
+		}
+	}, nil
+}
+
+func oaiWireRouter() *router.Router {
+	provs := map[string]providers.Provider{"p": oaiWireProvider{}}
+	models := map[string]config.ModelConfig{
+		"qwen": {Targets: []config.Target{{Provider: "p", Model: "qwen"}}},
+	}
+	return router.New(provs, models)
+}
+
+func TestChatTeesOpenAIProviderVerbatim(t *testing.T) {
+	h := NewChatHandler(oaiWireRouter())
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"qwen","messages":[{"role":"user","content":"hi"}]}`))
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik", Team: "t", AllowedModels: []string{"*"}})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"verbatim"`) {
+		t.Fatalf("openai-wire provider body not teed verbatim: %s", rec.Body.String())
+	}
+}
+
+func TestChatTeesOpenAIProviderStreamVerbatim(t *testing.T) {
+	h := NewChatHandler(oaiWireRouter())
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"qwen","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik", Team: "t", AllowedModels: []string{"*"}})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	body := rec.Body.String()
+	if !strings.Contains(body, `"v"`) || !strings.Contains(body, "data: [DONE]") {
+		t.Fatalf("openai-wire stream not teed verbatim: %s", body)
+	}
+}

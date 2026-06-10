@@ -9,6 +9,7 @@ import (
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/internal/server/adminapi"
 	"github.com/inferplane/inferplane/internal/server/anthropicapi"
+	"github.com/inferplane/inferplane/internal/server/openaiapi"
 )
 
 // DataMux builds the data-plane (:8080) handler: Anthropic ingress endpoints
@@ -21,8 +22,28 @@ func DataMux(r *router.Router, store keystore.Store, aud *audit.Writer, gov *gov
 	mux := http.NewServeMux()
 	mux.Handle("POST /v1/messages", anthropicapi.NewMessagesHandlerFull(r, aud, gov))
 	mux.Handle("POST /v1/messages/count_tokens", anthropicapi.NewCountTokensHandler(r))
-	mux.Handle("GET /v1/models", anthropicapi.NewModelsHandler(r))
+	mux.Handle("POST /v1/chat/completions", openaiapi.NewChatHandlerFull(r, aud, gov))
+	// Both the Anthropic (Claude Code) and OpenAI (OpenCode) clients hit the
+	// same GET /v1/models path but expect different response shapes, so we
+	// content-negotiate: Anthropic clients send an `anthropic-version` header,
+	// OpenAI clients do not. (Documented heuristic, M5 §3.2.)
+	mux.Handle("GET /v1/models", negotiateModels(
+		anthropicapi.NewModelsHandler(r), openaiapi.NewModelsHandler(r)))
 	return KeyAuth(store, mux)
+}
+
+// negotiateModels routes GET /v1/models to the Anthropic-shaped handler when the
+// request carries an `anthropic-version` header (sent by Claude Code and other
+// Anthropic SDKs), and to the OpenAI-shaped handler otherwise (OpenCode / OpenAI
+// clients). The two ingress protocols share the path but expect different JSON.
+func negotiateModels(anthropicH, openaiH http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Header.Get("anthropic-version") != "" {
+			anthropicH.ServeHTTP(w, req)
+			return
+		}
+		openaiH.ServeHTTP(w, req)
+	})
 }
 
 // AdminMux builds the admin-plane (:9090) handler: health + /admin/keys CRUD.

@@ -26,8 +26,9 @@ import (
 	"github.com/inferplane/inferplane/pkg/ulid"
 	"github.com/inferplane/inferplane/providers"
 
-	_ "github.com/inferplane/inferplane/providers/anthropic" // register "anthropic"
-	_ "github.com/inferplane/inferplane/providers/bedrock"   // register "bedrock"
+	_ "github.com/inferplane/inferplane/providers/anthropic"    // register "anthropic"
+	_ "github.com/inferplane/inferplane/providers/bedrock"      // register "bedrock"
+	_ "github.com/inferplane/inferplane/providers/openaicompat" // register "openai_compatible"
 )
 
 func main() {
