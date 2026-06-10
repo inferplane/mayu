@@ -25,3 +25,15 @@ func TestResolveModel(t *testing.T) {
 		t.Fatal("expected error for unknown model")
 	}
 }
+
+func TestResolveUnknownProvider(t *testing.T) {
+	// model maps to a provider key that isn't in the providers map (config drift).
+	provs := map[string]providers.Provider{} // empty
+	models := map[string]config.ModelConfig{
+		"m": {Targets: []config.Target{{Provider: "ghost", Model: "m"}}},
+	}
+	r := New(provs, models)
+	if _, _, err := r.Resolve("m"); err == nil {
+		t.Fatal("expected error when target points at unknown provider")
+	}
+}
