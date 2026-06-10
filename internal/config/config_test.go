@@ -48,6 +48,25 @@ func TestLoadRejectsInlineSecret(t *testing.T) {
 	}
 }
 
+func TestLoadBedrockProviderFields(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "c.json")
+	os.WriteFile(f, []byte(`{
+	  "providers": {"bedrock-us": {"type":"bedrock","region":"us-west-2","auth":{"mode":"profile","profile":"dev"}}},
+	  "models": {"claude-bedrock": {"targets":[{"provider":"bedrock-us","model":"anthropic.claude-sonnet-4-6-v1:0","api":"invoke_model"}]}}
+	}`), 0o600)
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Providers["bedrock-us"].Region != "us-west-2" || cfg.Providers["bedrock-us"].Auth.Mode != "profile" || cfg.Providers["bedrock-us"].Auth.Profile != "dev" {
+		t.Fatalf("bedrock fields: %+v", cfg.Providers["bedrock-us"])
+	}
+	if cfg.Models["claude-bedrock"].Targets[0].API != "invoke_model" {
+		t.Fatalf("target api: %+v", cfg.Models["claude-bedrock"].Targets[0])
+	}
+}
+
 func TestLoadKeyStoreAuditAdmin(t *testing.T) {
 	t.Setenv("ADMIN_TOK", "secret-admin")
 	dir := t.TempDir()

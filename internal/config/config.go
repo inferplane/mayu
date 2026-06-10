@@ -22,11 +22,22 @@ type ProviderConfig struct {
 	// APIKey is the RESOLVED secret, filled at load. Tagged "-" so a config
 	// file can never set it inline (defense-in-depth alongside the scan below).
 	APIKey string `json:"-"`
+	// Region and Auth configure the Bedrock provider (M4). Region is the AWS
+	// region; Auth selects the credential mode (irsa|pod_identity|profile|
+	// static|default) and, for "profile", the named shared-config profile.
+	Region string `json:"region,omitempty"`
+	Auth   struct {
+		Mode    string `json:"mode"`
+		Profile string `json:"profile,omitempty"`
+	} `json:"auth,omitempty"`
 }
 
 type Target struct {
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
+	// API selects the Bedrock call path for this target (M4):
+	// invoke_model|converse|mantle. Empty means default routing.
+	API string `json:"api,omitempty"`
 }
 
 type ModelConfig struct {
