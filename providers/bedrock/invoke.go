@@ -1,6 +1,13 @@
 package bedrock
 
-import "encoding/json"
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	"github.com/inferplane/inferplane/pkg/schema"
+	"github.com/inferplane/inferplane/providers"
+)
 
 const bedrockAnthropicVersion = `"bedrock-2023-05-31"`
 
@@ -19,4 +26,21 @@ func toInvokeBody(raw []byte) ([]byte, error) {
 		top["anthropic_version"] = json.RawMessage(bedrockAnthropicVersion)
 	}
 	return json.Marshal(top)
+}
+
+func (p *provider) completeInvoke(ctx context.Context, req *providers.ProxyRequest) (*providers.ProxyResponse, error) {
+	body, err := toInvokeBody(req.RawBody)
+	if err != nil {
+		return nil, fmt.Errorf("bedrock: invoke body: %w", err)
+	}
+	respBody, err := p.inv.Invoke(ctx, req.Upstream, body)
+	if err != nil {
+		return nil, fmt.Errorf("bedrock: invoke: %w", err)
+	}
+	out := &providers.ProxyResponse{StatusCode: 200, RawBody: respBody}
+	var parsed schema.ChatResponse
+	if json.Unmarshal(respBody, &parsed) == nil {
+		out.Parsed = &parsed
+	}
+	return out, nil
 }

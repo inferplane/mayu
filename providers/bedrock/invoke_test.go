@@ -1,8 +1,11 @@
 package bedrock
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
+
+	"github.com/inferplane/inferplane/providers"
 )
 
 func TestToInvokeBodyStripsModelAddsVersionPreservesCachePrefix(t *testing.T) {
@@ -38,5 +41,30 @@ func TestToInvokeBodyKeepsExistingAnthropicVersion(t *testing.T) {
 	json.Unmarshal(out, &m)
 	if string(m["anthropic_version"]) != `"bedrock-2023-05-31"` {
 		t.Fatalf("version: %s", m["anthropic_version"])
+	}
+}
+
+func TestProviderCompleteInvoke(t *testing.T) {
+	fi := &fakeInvoker{respBody: []byte(`{"id":"msg_b","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":7,"output_tokens":2}}`)}
+	p := &provider{inv: fi, modelAPI: map[string]string{}}
+	raw := []byte(`{"model":"claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	resp, err := p.Complete(context.Background(), &providers.ProxyRequest{Model: "claude-sonnet-4-6", Upstream: "anthropic.claude-sonnet-4-6-v1:0", RawBody: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 || resp.Parsed == nil || resp.Parsed.Usage == nil || *resp.Parsed.Usage.InputTokens != 7 {
+		t.Fatalf("resp: %+v", resp.Parsed)
+	}
+	// the invoker must have received the URL modelId and a model-less, versioned body
+	if fi.gotModelID != "anthropic.claude-sonnet-4-6-v1:0" {
+		t.Fatalf("modelID: %q", fi.gotModelID)
+	}
+	var sent map[string]json.RawMessage
+	json.Unmarshal(fi.gotBody, &sent)
+	if _, has := sent["model"]; has {
+		t.Fatal("sent body still has model")
+	}
+	if string(sent["anthropic_version"]) != `"bedrock-2023-05-31"` {
+		t.Fatal("sent body missing anthropic_version")
 	}
 }
