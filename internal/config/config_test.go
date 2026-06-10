@@ -24,6 +24,21 @@ func TestLoadResolvesSecretRef(t *testing.T) {
 	}
 }
 
+func TestLoadFileSecretTrimsTrailingNewline(t *testing.T) {
+	dir := t.TempDir()
+	secretFile := filepath.Join(dir, "key")
+	os.WriteFile(secretFile, []byte("sk-from-file\n"), 0o600) // K8s/echo leave a trailing \n
+	cfgFile := filepath.Join(dir, "cfg.json")
+	os.WriteFile(cfgFile, []byte(`{"providers":{"p":{"type":"anthropic","api_key_ref":{"file":"`+secretFile+`"}}}}`), 0o600)
+	cfg, err := Load(cfgFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Providers["p"].APIKey; got != "sk-from-file" {
+		t.Fatalf("file secret not trimmed: %q", got)
+	}
+}
+
 func TestLoadRejectsInlineSecret(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "bad.json")

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 )
 
 type SecretRef struct {
@@ -93,7 +94,7 @@ func resolveSecret(ref *SecretRef) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return string(b), nil
+		return strings.TrimSpace(string(b)), nil
 	default:
 		return "", fmt.Errorf("empty secret ref")
 	}
