@@ -13,6 +13,13 @@ import (
 
 // unmarshalWithExtra decodes data into v (standard json tags), then returns
 // every top-level key NOT in known as raw bytes for lossless re-emission.
+//
+// Constraint: known entries must exactly match the json tag casing.
+// Go decodes struct fields case-insensitively, but the strip here is
+// exact-case — a mixed-case incoming key (e.g. "Known") would populate
+// the typed field AND survive into extra, duplicating on re-marshal.
+// Anthropic/OpenAI wire formats are lowercase snake_case, so exact
+// lowercase known lists are correct by construction.
 func unmarshalWithExtra(data []byte, v any, known ...string) (map[string]json.RawMessage, error) {
 	if err := json.Unmarshal(data, v); err != nil {
 		return nil, err
@@ -32,6 +39,12 @@ func unmarshalWithExtra(data []byte, v any, known ...string) (map[string]json.Ra
 
 // marshalWithExtra marshals v (its json tags decide known fields), then
 // overlays extra keys. Known keys always win over stale extra entries.
+//
+// Constraint: extra must never contain a known key. A known field tagged
+// omitempty that is later zeroed disappears from base, and a stale extra
+// entry under the same key would silently resurrect the old value.
+// Callers that mutate typed fields after unmarshal (M2+ filters) must
+// not hold keys in extra that the type also models.
 func marshalWithExtra(v any, extra map[string]json.RawMessage) ([]byte, error) {
 	base, err := json.Marshal(v)
 	if err != nil {
