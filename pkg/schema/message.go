@@ -1,6 +1,10 @@
 package schema
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+)
 
 // Message is one turn. Anthropic accepts content as a bare string or a
 // block array; contentIsString remembers the original form so re-emission
@@ -41,6 +45,16 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	}
 	delete(all, "role")
 	delete(all, "content")
+	// Reject case-variant collisions: Go decodes case-insensitively but the
+	// strip above is exact-case, so a key like "Role" would populate the typed
+	// field AND survive into Extra, emitting duplicate keys on re-marshal — the
+	// parser-differential smuggling vector f8969bb closed in unmarshalWithExtra.
+	for k := range all {
+		switch strings.ToLower(k) {
+		case "role", "content":
+			return fmt.Errorf("schema: case-variant of known key is not allowed: %q", k)
+		}
+	}
 	if len(all) > 0 {
 		m.Extra = all
 	}

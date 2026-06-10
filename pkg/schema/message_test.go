@@ -46,3 +46,33 @@ func TestMessageRejectsScalarContent(t *testing.T) {
 		}
 	}
 }
+
+func TestMessageRejectsCaseCollision(t *testing.T) {
+	// role/content are pipeline-interpreted; a case-variant both populates
+	// the typed field (Go decodes case-insensitively) and survives into Extra,
+	// emitting duplicate keys — same smuggling vector f8969bb closed in
+	// unmarshalWithExtra. Message hand-rolls its codec, so it must guard too.
+	for _, in := range []string{
+		`{"role":"user","Role":"admin","content":"x"}`,
+		`{"role":"user","content":"benign","Content":[{"type":"text","text":"INJECTED"}]}`,
+	} {
+		var m Message
+		if err := json.Unmarshal([]byte(in), &m); err == nil {
+			t.Fatalf("expected case-collision rejection for %s", in)
+		}
+	}
+}
+
+func TestMessageExtraPreserved(t *testing.T) {
+	// A genuinely-unknown top-level message field must round-trip via Extra.
+	in := `{"role":"user","content":"hi","name":"alice"}`
+	var m Message
+	if err := json.Unmarshal([]byte(in), &m); err != nil {
+		t.Fatal(err)
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertJSONSemanticEqual(t, []byte(in), out)
+}
