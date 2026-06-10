@@ -1,7 +1,7 @@
 # inferplane — LLM Consumption Governance Gateway 설계 문서
 
 - 상태: Draft (승인 대기)
-- 날짜: 2026-06-10
+- 날짜: 2026-06-10 (r2 — 외부 리뷰 6+1건 반영)
 - 라이선스: Apache 2.0
 - 언어: Go
 - 대상 릴리스: v0.1
@@ -78,7 +78,7 @@ inferplane은 데이터 플레인 성능이나 추론 최적화로 경쟁하지 
      ▼                          ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ Ingress Adapters                                            │
-│   /v1/messages, /v1/messages/count_tokens   /v1/chat/...,   │
+│   /v1/messages, count_tokens, /v1/models    /v1/chat/...,   │
 │   (Anthropic shape)                         /v1/models      │
 │   → canonical 변환 (무손실 불변식, §2.2)                      │
 ├─────────────────────────────────────────────────────────────┤
@@ -181,6 +181,7 @@ type Filter interface {
 |---|---|
 | `POST /v1/messages` | 비스트리밍 + SSE 스트리밍. Anthropic SSE 이벤트 구조 (`message_start`, `content_block_start/delta/stop`, `message_delta`, `message_stop`, `ping`, `error`) 그대로 재현 |
 | `POST /v1/messages/count_tokens` | **반드시 정상 응답.** 단순 501/403 반환 시 Claude Code가 크래시한 버그 이력 있음 (truncated JSON 크래시). 절대 5xx/501로 끝내지 않는다 |
+| `GET /v1/models` | Claude Code v2.1.129+의 게이트웨이 모델 디스커버리(`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY`)가 호출. 해당 virtual key의 **allow-list 모델만**, Anthropic 모델 리스트 응답 형식으로 반환 |
 
 count_tokens 처리 전략:
 
@@ -326,6 +327,9 @@ v0.1 구현 범위:
 | **quota** | 일/월 (tokens/day 등) | 정책 | 사전 낙관 체크 + 사후 차감 (2단계) |
 | **budget** | 비용($) | 재무 | 토큰 × 모델별 단가 테이블로 집계 |
 
+quota와 budget은 대칭으로 `on_exceeded: block | warn`을 명시한다
+(기본 `block`) — 초과 시 동작을 암묵에 두지 않는다.
+
 스토어 추상화:
 
 ```go
@@ -348,9 +352,21 @@ type LimiterStore interface {
 
 Budget 구현 제약:
 
-- **단가 테이블을 게이트웨이가 소유**한다. 모델별
-  `input / output / cache_read / cache_write` 단가 구분.
+- **비용은 처음부터 끝까지 정수 마이크로달러(int64, µUSD)로 다룬다.**
+  float 누적은 부동소수점 오차가 쌓여 월말 정산 불일치를 만든다 —
+  budget이 핵심 기능인 제품에서 신뢰 붕괴다. 내부 집계 타입,
+  감사로그(`amount_usd_micros`), budget 스토어 모두 동일하며,
+  config의 `usd_per_month` 등 사람용 표기는 로드 시 µUSD로 변환한다.
+- **단가 테이블의 키는 `(provider, model)` 쌍**이다. 같은 Claude
+  모델이라도 Anthropic Direct와 Bedrock의 단가가 다르고, Bedrock은
+  리전별 차이가 있다 (provider 인스턴스가 리전을 인코딩하므로
+  provider 키로 자연 해소). 단가 테이블은 게이트웨이가 소유 —
   번들 YAML + 사용자 오버라이드, `pricing_version` 필드로 추적.
+- **cache write 단가는 TTL별 구분**: 5분 write = 1.25×, 1시간
+  write = 2×. `cache_write_1h` 누락 시 Claude Code가 1h 캐시를
+  쓰는 경우 비용이 과소계상된다. TTL 판별은 upstream usage의
+  `cache_creation` TTL별 상세(있으면) 우선, 없으면 요청의
+  `cache_control.ttl` 기준.
 - usage의 `cache_read_input_tokens`를 **반드시 구분 집계**한다.
   base input 단가로 계산하면 비용이 10배 과대계상된다.
 - 스트리밍 중단 시: upstream의 마지막 usage 청크 기준 정산.
@@ -392,15 +408,17 @@ v0.1 범위: **append-only JSONL + 구조화 레코드.** 레코드 스키마에
     "input_tokens": 1200,
     "output_tokens": 850,
     "cache_read_input_tokens": 45000,
-    "cache_creation_input_tokens": 0,
+    "cache_creation_input_tokens": 1024,     // 합계
+    "cache_creation_5m_input_tokens": 1024,  // TTL별 — 단가 상이 (1.25× vs 2×)
+    "cache_creation_1h_input_tokens": 0,
     "estimated": false
   },
   "cost": {
-    "currency": "USD",
-    "amount": 0.031,
+    "amount_usd_micros": 31000,          // 정수 µUSD — float 금지 (오차 누적 방지)
     "pricing_version": "2026-06-01"
   },
   "latency": { "ttft_ms": 420, "total_ms": 9800 },
+  "trace_id": null,                    // 예약. v0.2: OTel trace 상관관계 (W3C trace-id)
   "prev_hash": null                    // v0.1: 예약. v0.2: 해시 체인
 }
 ```
@@ -409,11 +427,51 @@ v0.1 범위: **append-only JSONL + 구조화 레코드.** 레코드 스키마에
   v0.2+ 플러그인(`prompt-log`)의 명시 opt-in.
 - 싱크: `stdout` (K8s 표준 — Fluent Bit/Loki 수거) / `file` / `s3`
   / `webhook`. 포맷 옵션: raw JSONL 또는 CloudEvents 봉투.
+
+**Sink 실패 정책** — "변조방지 audit가 차별점"인 제품이 audit 유실을
+조용히 허용하면 주장이 무너지고, 무조건 fail-closed면 S3 장애가 LLM
+전면 장애가 된다. config로 위임하되 기본값을 정한다:
+
+```yaml
+audit:
+  failure_mode: buffer_then_block   # fail_open | fail_closed | buffer_then_block (기본)
+  buffer: { max_records: 100_000, max_age: 5m }
+```
+
+- `buffer_then_block` (기본): required sink 실패 시 인메모리 버퍼에
+  적재하고 요청은 계속 처리. 버퍼가 차거나 `max_age` 초과 시 신규
+  요청 차단으로 전환.
+- sink별 `required` 플래그 (기본 `true`): 실패 정책은 required
+  sink에만 적용. `stdout` 같은 관측용 sink는 `required: false`로
+  best-effort 처리.
+- block 전환은 반드시 관측 가능해야 한다:
+  `inferplane_audit_write_failures_total{sink}` +
+  `inferplane_audit_buffer_utilization_ratio` (§6.2)에 알림 연결.
+
 - v0.2: hash chain (각 레코드에 이전 레코드 해시) + N분 주기 체인
   헤드 외부 앵커링 (S3 Object Lock 등) + 검증 CLI
   (`inferplane audit verify`).
 - 정직한 한계를 문서에 명시: 같은 디스크에 쓰는 한 완전한 변조
   불가는 없다. 해시 체인 + 외부 앵커가 소프트웨어 레벨의 상한이다.
+
+### 5.5 Admin API 인증과 부트스트랩
+
+키를 발급하는 admin API 자체의 인증과 "첫 키" 닭-달걀 문제를 푼다.
+
+- **Admin API 인증**: 관리 리스너(`:9090`)의 admin API는 별도
+  **admin token**으로 보호한다. 토큰은 config의
+  `server.admin_auth.token_ref` (env/file/secret ref)로 주입 —
+  데이터 평면 virtual key와 완전히 분리된 자격 체계.
+- **부트스트랩 (첫 키)**: CLI가 admin API를 거치지 않고 **key
+  store(SQLite)에 직접 쓰는 로컬 모드**를 지원한다.
+  `inferplane keys create --team x`는
+  (1) 로컬 모드 (`--store <path>`): 스토어 파일에 직접 기록 —
+  서버 기동 전/정지 중에도 가능, 부트스트랩용.
+  (2) 원격 모드 (기본): admin API + admin token 경유.
+- admin API 호출 자체도 감사로그 대상이다 (키 발급/폐기 =
+  거버넌스 이벤트).
+- v0.2: OIDC 연동 시 admin API를 IdP 그룹 기반 권한으로 승격,
+  admin token은 비상용(break-glass)으로 유지.
 
 ---
 
@@ -431,7 +489,7 @@ v0.1 범위: **append-only JSONL + 구조화 레코드.** 레코드 스키마에
 
 | 메트릭 (Prometheus) | 타입 | 레이블 | GenAI 컨벤션 매핑 |
 |---|---|---|---|
-| `gen_ai_client_token_usage_total` | counter | `type`(input\|output\|cache_read\|cache_write), `model`, `provider`, `team` | `gen_ai.usage.{input,output}_tokens` |
+| `gen_ai_client_token_usage_total` | counter | `type`(input\|output\|cache_read\|cache_write_5m\|cache_write_1h), `model`, `provider`, `team` | `gen_ai.usage.{input,output}_tokens` |
 | `gen_ai_server_request_duration_seconds` | histogram | `model`, `provider`, `ingress`, `status` | `gen_ai.server.request.duration` |
 | `gen_ai_server_time_to_first_token_seconds` | histogram | `model`, `provider` | `gen_ai.server.time_to_first_token` |
 | `inferplane_requests_total` | counter | `ingress`, `model`, `provider`, `team`, `status` | — |
@@ -440,9 +498,15 @@ v0.1 범위: **append-only JSONL + 구조화 레코드.** 레코드 스키마에
 | `inferplane_quota_utilization_ratio` | gauge | `team`, `window` | — |
 | `inferplane_budget_spend_usd_total` | counter | `team`, `model`, `cost_type` | — |
 | `inferplane_audit_write_failures_total` | counter | `sink` | — |
+| `inferplane_audit_buffer_utilization_ratio` | gauge | — (전역) | — |
 
 - 카디널리티 가드: `team`·`model` 레이블은 config에 선언된 값만
   허용 (요청 입력값을 레이블로 직접 사용하지 않음).
+- `inferplane_budget_spend_usd_total`은 관측용 근사치다 (Prometheus
+  float). **정산의 진실원은 budget 스토어/감사로그의 정수 µUSD
+  집계** (§5.3) — 메트릭을 정산에 쓰지 않는다.
+- `inferplane_audit_buffer_utilization_ratio`가 1.0에 접근하면
+  block 전환 임박 (§5.4 sink 실패 정책) — 알림 룰을 대시보드에 동봉.
 - Grafana 대시보드 JSON을 레포에 동봉 (`deploy/grafana/`).
 
 ### 6.3 v0.2 trace 스팬 구조 (예고)
@@ -458,6 +522,8 @@ v0.1 범위: **append-only JSONL + 구조화 레코드.** 레코드 스키마에
 server:
   listen: :8080
   admin_listen: :9090          # 관리 API + /metrics + 헬스체크
+  admin_auth:
+    token_ref: { env: INFERPLANE_ADMIN_TOKEN }   # admin API 보호 (§5.5)
 
 providers:
   anthropic-direct:
@@ -481,7 +547,7 @@ models:
         model: anthropic.claude-sonnet-4-6-v1:0
         api: invoke_model                      # invoke_model | converse | mantle
     fallback:
-      on: [rate_limited, server_error, timeout]
+      triggers: [rate_limited, server_error, timeout]  # 키명 'on'은 YAML 1.1 부울 함정 → 회피
       circuit_break_after: 5
   kimi-k2:
     targets:
@@ -497,27 +563,38 @@ teams:
   platform-eng:
     allowed_models: ["claude-sonnet-4-6", "qwen-coder"]
     rate_limit:  { requests_per_minute: 300, tokens_per_minute: 2_000_000 }
-    quota:       { tokens_per_day: 50_000_000 }
-    budget:      { usd_per_month: 5_000, on_exceeded: block }   # block | warn
+    quota:       { tokens_per_day: 50_000_000, on_exceeded: block }  # block | warn (기본 block)
+    budget:      { usd_per_month: 5_000, on_exceeded: block }        # 내부 집계는 정수 µUSD (§5.3)
   data-science:
     allowed_models: ["*"]
-    quota: { tokens_per_day: 200_000_000 }
+    quota: { tokens_per_day: 200_000_000, on_exceeded: block }
 
 pricing:
   source: bundled                              # 번들 단가 테이블
-  overrides:                                   # 사용자 오버라이드
-    claude-sonnet-4-6:
-      input_per_mtok: 3.00
-      output_per_mtok: 15.00
-      cache_read_per_mtok: 0.30
-      cache_write_5m_per_mtok: 3.75
+  overrides:                                   # 키 = (provider, model) 쌍 — §5.3
+    anthropic-direct:
+      claude-sonnet-4-6:
+        input_per_mtok: 3.00
+        output_per_mtok: 15.00
+        cache_read_per_mtok: 0.30
+        cache_write_5m_per_mtok: 3.75          # 1.25×
+        cache_write_1h_per_mtok: 6.00          # 2× — 누락 시 1h 캐시 과소계상
+    bedrock-us:                                # provider가 리전 인코딩 → 리전별 단가 자연 해소
+      "anthropic.claude-sonnet-4-6-v1:0":
+        input_per_mtok: 3.00
+        output_per_mtok: 15.00
+        cache_read_per_mtok: 0.30
+        cache_write_5m_per_mtok: 3.75
+        cache_write_1h_per_mtok: 6.00
 
 plugins: []                                    # v0.1: 내장 거버넌스만. v0.2: pii-mask 등
 
 audit:
+  failure_mode: buffer_then_block              # fail_open | fail_closed | buffer_then_block
+  buffer: { max_records: 100_000, max_age: 5m }
   sinks:
-    - { type: stdout, format: jsonl }
-    - { type: s3, bucket: llm-audit, prefix: gw/, format: jsonl }
+    - { type: stdout, format: jsonl, required: false }   # 관측용 best-effort
+    - { type: s3, bucket: llm-audit, prefix: gw/, format: jsonl }   # required 기본 true
   # v0.2: hash_chain: true, anchor: { type: s3_object_lock, interval: 5m }
 
 quota_store:                                   # 생략 시 in-memory (단일 레플리카)
@@ -548,7 +625,7 @@ pkg/                             # ★ 공개 API는 이 두 패키지뿐
   plugin/                        #   Filter 인터페이스
 internal/
   server/
-    anthropicapi/                # /v1/messages, count_tokens ingress
+    anthropicapi/                # /v1/messages, count_tokens, /v1/models ingress
     openaiapi/                   # /v1/chat/completions, /v1/models ingress
     adminapi/                    # 키 관리 API (관리 리스너)
   pipeline/                      # 거버넌스 Filter 체인 실행기
@@ -602,6 +679,7 @@ hack/                            # 개발 스크립트
 - [ ] 이중 ingress (§3 범위: messages + count_tokens + chat/completions + models)
 - [ ] Provider 3종: anthropic / bedrock / openai_compatible
 - [ ] Virtual key 발급/폐기 + CLI (`inferplane keys create --team x`)
+      — admin token 인증 + 로컬 부트스트랩 (§5.5)
 - [ ] 팀 기반 토큰 quota (2단계 집행)
 - [ ] Provider failover (명시적 우선순위 + circuit breaker)
 - [ ] Prometheus 메트릭 (GenAI conventions 네이밍) + Grafana 대시보드 JSON
@@ -610,9 +688,11 @@ hack/                            # 개발 스크립트
 
 차별화 기능 (여기에 승부):
 
-- [ ] 감사로그: append-only JSONL + 구조화 레코드 (`prev_hash` 예약)
+- [ ] 감사로그: append-only JSONL + 구조화 레코드 (`prev_hash`·`trace_id`
+      예약) + sink 실패 정책 (기본 `buffer_then_block`)
 - [ ] RBAC: team × model allow-list
-- [ ] rate limit / quota / budget 3분리 + cache 토큰 구분 비용 집계
+- [ ] rate limit / quota / budget 3분리 + (provider, model) 단가 테이블
+      + TTL별 cache write 구분 + 정수 µUSD 집계
 
 거버넌스 파일 (첫 커밋부터): DCO, GOVERNANCE.md(벤더 중립),
 MAINTAINERS.md, SECURITY.md, CODE_OF_CONDUCT.md, 공개 로드맵.
@@ -664,6 +744,7 @@ MAINTAINERS.md, SECURITY.md, CODE_OF_CONDUCT.md, 공개 로드맵.
 | 6 | **프로젝트명 "inferplane" 상표/중복 검사**: CNCF 제출 전 필수 (기존 프로젝트·상표 충돌 확인) | 공개 전 |
 | 7 | **OpenAI ingress → Claude provider의 tool calling 매핑 상세**: parallel tool calls, tool_choice 옵션별 변환 규칙 | v0.1 구현 중 |
 | 8 | **회사 법무/정책 확인**: public 공개 및 외부 홍보 가능 시점 | 외부 의존 |
+| 9 | **audit 버퍼 내구성**: `buffer_then_block`의 인메모리 버퍼는 crash 시 유실 — disk-backed 버퍼(WAL) 채택 여부와 비용 | v0.1 구현 중 |
 
 ---
 
@@ -684,3 +765,7 @@ MAINTAINERS.md, SECURITY.md, CODE_OF_CONDUCT.md, 공개 로드맵.
 | 파일 config 먼저 | CRD 먼저 | 스키마 유동기 API 마이그레이션 비용 |
 | Gateway API 독립+호환 | GatewayClass 구현체 | conformance 유지가 풀타임 업무, kgateway와 정면 경쟁 구도 |
 | UI 분리 (셀프서비스만 v0.2) | 코어에 풀 UI | 소수 인원 프로젝트의 프론트 유지보수 세금 |
+| 비용 = 정수 µUSD (int64) | float 누적 | 부동소수점 오차 누적 → 월말 정산 불일치 = budget 제품의 신뢰 붕괴 |
+| 단가 키 = (provider, model) | 모델명 단독 키 | 같은 모델도 provider/리전별 단가 상이 → Bedrock 과금 오차 |
+| audit 기본 buffer_then_block | 무조건 fail-open / fail-closed | 조용한 유실은 차별점 붕괴, hard fail은 S3 장애 = LLM 전면 장애 |
+| admin token + 로컬 부트스트랩 | admin API 무인증 / 첫 키 수동 DB 조작 | 키 발급 경로 무방비 또는 닭-달걀 미해결 |
