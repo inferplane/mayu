@@ -1167,3 +1167,11 @@ M2 시작 조건):
 - **플레이스홀더**: 없음 — 모든 스텝에 실제 코드/픽스처/커맨드 포함. ✓
 - **타입 일관성**: `unmarshalWithExtra(data, v, known...)` 시그니처가 Task 2 정의·Task 3~7 사용처 일치, `assertJSONSemanticEqual` Task 2 정의·전역 사용. ✓
 - **알려진 한계 (의도)**: `jsonSemanticEqual`은 키 순서 무시 — Anthropic API는 키 순서 비의존이므로 안전. 블록 **배열 순서**는 슬라이스로 보존되며 이것이 §2.2-1의 본질.
+
+## 구현 중 발견·반영 (리뷰 수정)
+
+- `48d412d` ContentBlock.Text/Thinking/Signature/Data → `*string` (스트리밍 빈 문자열 보존)
+- `3d5e050` ChatRequest.Stream → `*bool` (명시적 false 보존)
+- `ea32a3f` Usage/CacheCreation 수치 → `*int64` (부분 usage·명시적 0 보존)
+- `f8969bb` `unmarshalWithExtra`가 대소문자 변형 키 충돌을 **거부** — `{"model":..,"Model":..}` 류의 파서 차이(smuggling) 차단. M2 인증/라우팅 전에 트러스트 경계 강화.
+- 공통 결함 계열: known key에 omitempty value 타입을 쓰면 명시적 zero가 Extra로도 안 가고 marshal에서도 드랍됨 → 포인터 타입으로 present/absent 구분.
