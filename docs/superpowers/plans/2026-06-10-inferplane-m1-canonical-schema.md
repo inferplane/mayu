@@ -618,7 +618,7 @@ func TestChatRequestRoundTrip(t *testing.T) {
 	if err := r.UnmarshalJSON([]byte(in)); err != nil {
 		t.Fatal(err)
 	}
-	if r.Model != "claude-sonnet-4-6" || !r.Stream || len(r.Messages) != 1 {
+	if r.Model != "claude-sonnet-4-6" || r.Stream == nil || !*r.Stream || len(r.Messages) != 1 {
 		t.Fatalf("typed fields: %+v", r)
 	}
 	out, err := r.MarshalJSON()
@@ -650,7 +650,8 @@ type ChatRequest struct {
 	Model     string    `json:"model"`
 	Messages  []Message `json:"messages"`
 	MaxTokens *int64    `json:"max_tokens,omitempty"`
-	Stream    bool      `json:"stream,omitempty"`
+	// *bool: 명시적 "stream":false 보존 (omitempty 결함 계열, 리뷰 수정 3d5e050)
+	Stream *bool `json:"stream,omitempty"`
 
 	System     json.RawMessage `json:"system,omitempty"`
 	Tools      json.RawMessage `json:"tools,omitempty"`
