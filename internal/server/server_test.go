@@ -21,7 +21,7 @@ func TestDataMuxRoutesAndAuths(t *testing.T) {
 	}
 	r := router.New(provs, models)
 	store := stubStore{key: "dev-key", p: keystore.Principal{KeyID: "ik_abc", Team: "platform-eng", AllowedModels: []string{"*"}}}
-	mux := DataMux(r, store, nil)
+	mux := DataMux(r, store, nil, nil)
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	rec := httptest.NewRecorder()

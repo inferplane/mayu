@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/inferplane/inferplane/internal/audit"
+	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/internal/server/adminapi"
@@ -14,9 +15,11 @@ import (
 // behind virtual-key auth (M3). All endpoints resolve a Principal via the key
 // store before reaching the router. aud is the audit writer (may be nil) used
 // for the two-phase request_started/request_completed records on /v1/messages.
-func DataMux(r *router.Router, store keystore.Store, aud *audit.Writer) http.Handler {
+// gov is the governance pipeline (rate/quota/budget + cost); when non-nil the
+// /v1/messages handler enforces it, when nil governance is bypassed.
+func DataMux(r *router.Router, store keystore.Store, aud *audit.Writer, gov *governance.Governor) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("POST /v1/messages", anthropicapi.NewMessagesHandlerWithAudit(r, aud))
+	mux.Handle("POST /v1/messages", anthropicapi.NewMessagesHandlerFull(r, aud, gov))
 	mux.Handle("POST /v1/messages/count_tokens", anthropicapi.NewCountTokensHandler(r))
 	mux.Handle("GET /v1/models", anthropicapi.NewModelsHandler(r))
 	return KeyAuth(store, mux)

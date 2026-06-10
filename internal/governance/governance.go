@@ -67,6 +67,11 @@ func (g *Governor) PreCheck(team string, estimateTokens int64) GovDecision {
 	if p.RatePerMin > 0 && !g.lim.AllowRate("rate:"+team, 1, p.RatePerMin, max64(p.RateBurst, 1)) {
 		return GovDecision{Status: 429, Reason: "rate limit exceeded"}
 	}
+	// token rate limit (TPM): charge the request estimate against a per-minute
+	// token bucket whose burst is one minute's worth of tokens.
+	if p.TokensPerMinute > 0 && !g.lim.AllowRate("tpm:"+team, estimateTokens, p.TokensPerMinute, p.TokensPerMinute) {
+		return GovDecision{Status: 429, Reason: "token rate limit exceeded"}
+	}
 	// quota (daily tokens)
 	if p.TokensPerDay > 0 {
 		if g.lim.CheckQuota("quota:"+team, estimateTokens, p.TokensPerDay, 24*time.Hour) == limiter.Block {

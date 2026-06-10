@@ -38,3 +38,15 @@ func TestGovernorSettleComputesCost(t *testing.T) {
 		t.Fatalf("settle cost=%d missing=%v", cost, missing)
 	}
 }
+
+func TestGovernorTPMBlocks(t *testing.T) {
+	teams := map[string]TeamPolicy{"t": {TokensPerMinute: 1000}}
+	g := NewGovernor(teams, limiter.NewMemory(), budget.NewMemory(), pricing.New(pricing.OnMissingAllow, nil))
+	// first request estimate 800 → ok; second estimate 800 → 1600>1000 burst → block
+	if d := g.PreCheck("t", 800); !d.Allowed {
+		t.Fatalf("first: %+v", d)
+	}
+	if d := g.PreCheck("t", 800); d.Allowed {
+		t.Fatalf("TPM should block second: %+v", d)
+	}
+}
