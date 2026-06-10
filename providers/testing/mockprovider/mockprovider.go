@@ -23,7 +23,6 @@ func (m *mock) Models() []schema.ModelInfo {
 }
 
 func ptrStr(s string) *string { return &s }
-func ptrI64(i int64) *int64   { return &i }
 
 func (m *mock) Complete(_ context.Context, _ *providers.ProxyRequest) (*providers.ProxyResponse, error) {
 	in, out := int64(10), int64(5)
