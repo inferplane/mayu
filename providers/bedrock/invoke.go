@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"iter"
+	"strings"
 
 	"github.com/inferplane/inferplane/pkg/schema"
 	"github.com/inferplane/inferplane/providers"
@@ -43,4 +45,40 @@ func (p *provider) completeInvoke(ctx context.Context, req *providers.ProxyReque
 		out.Parsed = &parsed
 	}
 	return out, nil
+}
+
+func (p *provider) streamInvoke(ctx context.Context, req *providers.ProxyRequest) (iter.Seq2[*providers.StreamEvent, error], error) {
+	body, err := toInvokeBody(req.RawBody)
+	if err != nil {
+		return nil, fmt.Errorf("bedrock: invoke body: %w", err)
+	}
+	payloads, err := p.inv.InvokeStream(ctx, req.Upstream, body)
+	if err != nil {
+		return nil, fmt.Errorf("bedrock: invoke stream: %w", err)
+	}
+	return func(yield func(*providers.StreamEvent, error) bool) {
+		for payload, perr := range payloads {
+			if perr != nil {
+				yield(nil, perr)
+				return
+			}
+			ev := &providers.StreamEvent{}
+			var c schema.ChatChunk
+			if json.Unmarshal(payload, &c) == nil {
+				ev.Chunk = &c
+				// re-serialize the parsed chunk as canonical Anthropic SSE
+				var b strings.Builder
+				if werr := schema.WriteAnthropicSSE(&b, &c); werr == nil {
+					ev.Raw = []byte(b.String())
+				}
+			}
+			if ev.Raw == nil {
+				// unparseable payload: emit verbatim as a data line (defensive)
+				ev.Raw = append(append([]byte("event: unknown\ndata: "), payload...), '\n', '\n')
+			}
+			if !yield(ev, nil) {
+				return
+			}
+		}
+	}, nil
 }

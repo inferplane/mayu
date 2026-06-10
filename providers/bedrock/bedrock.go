@@ -50,12 +50,8 @@ func (p *provider) Stream(ctx context.Context, req *providers.ProxyRequest) (ite
 
 var _ providers.Provider = (*provider)(nil)
 
-// NOTE: temporary stubs so Task 5 compiles in isolation; replaced by the real
-// implementations in invoke.go (streamInvoke, Task 6) and converse.go
-// (completeConverse/streamConverse, Task 7).
-func (p *provider) streamInvoke(ctx context.Context, req *providers.ProxyRequest) (iter.Seq2[*providers.StreamEvent, error], error) {
-	panic("not implemented (Task 6)")
-}
+// NOTE: temporary stubs so the package compiles before Task 7; replaced by the
+// real implementations in converse.go (completeConverse/streamConverse, Task 7).
 func (p *provider) completeConverse(ctx context.Context, req *providers.ProxyRequest) (*providers.ProxyResponse, error) {
 	panic("not implemented (Task 7)")
 }

@@ -3,6 +3,7 @@ package bedrock
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/inferplane/inferplane/providers"
@@ -66,5 +67,61 @@ func TestProviderCompleteInvoke(t *testing.T) {
 	}
 	if string(sent["anthropic_version"]) != `"bedrock-2023-05-31"` {
 		t.Fatal("sent body missing anthropic_version")
+	}
+}
+
+func TestStreamInvokeReserializesToAnthropicSSE(t *testing.T) {
+	// Bedrock event-stream payloads are Anthropic SSE event JSON. Provider must
+	// re-emit them as Anthropic SSE bytes (Raw) + parsed Chunk, preserving the
+	// thinking→text block ORDER.
+	payloads := [][]byte{
+		[]byte(`{"type":"message_start","message":{"id":"m","type":"message","role":"assistant","model":"x","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":3,"output_tokens":1}}}`),
+		[]byte(`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}`),
+		[]byte(`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"reason"}}`),
+		[]byte(`{"type":"content_block_stop","index":0}`),
+		[]byte(`{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}`),
+		[]byte(`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"answer"}}`),
+		[]byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":3,"output_tokens":9}}`),
+		[]byte(`{"type":"message_stop"}`),
+	}
+	fi := &fakeInvoker{streamRaw: payloads}
+	p := &provider{inv: fi, modelAPI: map[string]string{}}
+	seq, err := p.Stream(context.Background(), &providers.ProxyRequest{Model: "claude-sonnet-4-6", Upstream: "anthropic.claude-sonnet-4-6-v1:0", RawBody: []byte(`{"model":"m","stream":true,"messages":[]}`), Stream: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sse strings.Builder
+	var types []string
+	var lastOut int64
+	for ev, err := range seq {
+		if err != nil {
+			t.Fatal(err)
+		}
+		sse.WriteString(string(ev.Raw))
+		if ev.Chunk != nil {
+			types = append(types, ev.Chunk.Type)
+			if ev.Chunk.Usage != nil && ev.Chunk.Usage.OutputTokens != nil {
+				lastOut = *ev.Chunk.Usage.OutputTokens
+			}
+		}
+	}
+	// Raw must be valid Anthropic SSE
+	if !strings.Contains(sse.String(), "event: message_start\n") || !strings.Contains(sse.String(), "event: message_stop\n") {
+		t.Fatalf("not Anthropic SSE: %s", sse.String())
+	}
+	// thinking block (index 0) must precede text block (index 1)
+	joined := strings.Join(types, ",")
+	wantOrder := "message_start,content_block_start,content_block_delta,content_block_stop,content_block_start,content_block_delta,message_delta,message_stop"
+	if joined != wantOrder {
+		t.Fatalf("block order broken:\n got: %s\nwant: %s", joined, wantOrder)
+	}
+	if lastOut != 9 {
+		t.Fatalf("usage: %d", lastOut)
+	}
+	// verify the thinking delta is before the text delta in the raw SSE
+	ti := strings.Index(sse.String(), "thinking_delta")
+	xi := strings.Index(sse.String(), "text_delta")
+	if ti < 0 || xi < 0 || ti > xi {
+		t.Fatalf("thinking must precede text in SSE output")
 	}
 }
