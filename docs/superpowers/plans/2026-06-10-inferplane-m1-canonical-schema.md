@@ -732,10 +732,10 @@ func TestChatResponseRoundTrip(t *testing.T) {
 	if err := r.UnmarshalJSON([]byte(in)); err != nil {
 		t.Fatal(err)
 	}
-	if r.Usage == nil || r.Usage.CacheReadInputTokens != 45000 {
+	if r.Usage == nil || r.Usage.CacheReadInputTokens == nil || *r.Usage.CacheReadInputTokens != 45000 {
 		t.Fatalf("usage not typed: %+v", r.Usage)
 	}
-	if r.Usage.CacheCreation == nil || r.Usage.CacheCreation.Ephemeral5mInputTokens != 1024 {
+	if r.Usage.CacheCreation == nil || r.Usage.CacheCreation.Ephemeral5mInputTokens == nil || *r.Usage.CacheCreation.Ephemeral5mInputTokens != 1024 {
 		t.Fatalf("cache_creation TTL detail not typed: %+v", r.Usage.CacheCreation)
 	}
 	out, err := r.MarshalJSON()
@@ -761,18 +761,22 @@ import "encoding/json"
 
 // Usage — budget 정산의 입력 (§5.3). cache 토큰은 TTL별 단가가 다르므로
 // (5m=1.25x, 1h=2x) 반드시 구분 보존한다.
+// 모든 수치는 *int64: upstream이 보낸 키만 재방출한다. message_delta
+// usage는 output_tokens만 싣는 경우가 있고(no-omitempty면 키 추가 발생),
+// 명시적 0("cache_creation_input_tokens":0)은 보존해야 한다(omitempty
+// 값 타입이면 드랍) — 48d412d/3d5e050과 동일한 결함 계열의 선제 차단.
 type Usage struct {
-	InputTokens              int64          `json:"input_tokens"`
-	OutputTokens             int64          `json:"output_tokens"`
-	CacheReadInputTokens     int64          `json:"cache_read_input_tokens,omitempty"`
-	CacheCreationInputTokens int64          `json:"cache_creation_input_tokens,omitempty"`
+	InputTokens              *int64         `json:"input_tokens,omitempty"`
+	OutputTokens             *int64         `json:"output_tokens,omitempty"`
+	CacheReadInputTokens     *int64         `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens *int64         `json:"cache_creation_input_tokens,omitempty"`
 	CacheCreation            *CacheCreation `json:"cache_creation,omitempty"`
 	Extra map[string]json.RawMessage `json:"-"`
 }
 
 type CacheCreation struct {
-	Ephemeral5mInputTokens int64 `json:"ephemeral_5m_input_tokens"`
-	Ephemeral1hInputTokens int64 `json:"ephemeral_1h_input_tokens"`
+	Ephemeral5mInputTokens *int64 `json:"ephemeral_5m_input_tokens,omitempty"`
+	Ephemeral1hInputTokens *int64 `json:"ephemeral_1h_input_tokens,omitempty"`
 	Extra map[string]json.RawMessage `json:"-"`
 }
 
