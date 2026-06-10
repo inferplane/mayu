@@ -60,3 +60,40 @@ func TestUsagePinsPartialAndExplicitZero(t *testing.T) {
 		assertJSONSemanticEqual(t, []byte(in), out)
 	}
 }
+
+func TestChatResponseSkeletonConstruction(t *testing.T) {
+	// M2가 message_start 골격을 코드로 만들 때의 계약: nil StopReason/
+	// StopSequence는 명시적 null로, 빈 Content는 []로 방출된다.
+	in := int64(4805)
+	out := int64(2)
+	r := ChatResponse{
+		ID: "msg_01S", Type: "message", Role: "assistant",
+		Model:   "claude-sonnet-4-6",
+		Content: []ContentBlock{},
+		Usage:   &Usage{InputTokens: &in, OutputTokens: &out},
+	}
+	got, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"id":"msg_01S","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":4805,"output_tokens":2}}`
+	assertJSONSemanticEqual(t, []byte(want), got)
+}
+
+func TestUsageExtraRoundTrip(t *testing.T) {
+	// 정산 입력에서 미지의 과금 필드는 절대 드랍되면 안 된다.
+	for _, in := range []string{
+		`{"input_tokens":1,"output_tokens":2,"server_tool_use":{"web_search_requests":3}}`,
+		`{"output_tokens":2,"cache_creation":{"ephemeral_5m_input_tokens":1,"ephemeral_30m_input_tokens":7}}`,
+	} {
+		var u Usage
+		if err := json.Unmarshal([]byte(in), &u); err != nil {
+			t.Fatal(err)
+		}
+		got, err := json.Marshal(u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertJSONSemanticEqual(t, []byte(in), got)
+	}
+}

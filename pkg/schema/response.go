@@ -53,10 +53,12 @@ func (c CacheCreation) MarshalJSON() ([]byte, error) {
 // ChatResponse — canonical 비스트리밍 응답 (스트리밍 message_start의
 // 골격이기도 하다). stop_reason/stop_sequence는 null 유의미 → 포인터.
 type ChatResponse struct {
-	ID           string                     `json:"id"`
-	Type         string                     `json:"type"`
-	Role         string                     `json:"role"`
-	Model        string                     `json:"model"`
+	ID    string `json:"id"`
+	Type  string `json:"type"`
+	Role  string `json:"role"`
+	Model string `json:"model"`
+	// Content: 호출자는 nil 대신 []ContentBlock{}을 설정할 것 — nil은
+	// "content":null로 방출되며 실제 API 형태는 항상 배열이다.
 	Content      []ContentBlock             `json:"content"`
 	StopReason   *string                    `json:"stop_reason"`
 	StopSequence *string                    `json:"stop_sequence"`
