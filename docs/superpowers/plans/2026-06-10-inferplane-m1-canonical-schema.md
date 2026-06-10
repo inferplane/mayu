@@ -381,10 +381,12 @@ func (c CacheControl) MarshalJSON() ([]byte, error) {
 // over the Anthropic block vocabulary. Unknown block types round-trip via
 // Extra; tool_result.content stays raw until a milestone needs to interpret it.
 type ContentBlock struct {
+	// Type has no omitempty on purpose: never silently drop the union discriminator.
 	Type string `json:"type"`
 
-	// text
-	Text string `json:"text,omitempty"`
+	// text — *string: content_block_start 프레임의 "text":"" 가 정당한 값이라
+	// 빈 문자열의 존재/부재를 구분해야 함 (리뷰 수정 48d412d)
+	Text *string `json:"text,omitempty"`
 
 	// tool_use
 	ID    string          `json:"id,omitempty"`
@@ -396,10 +398,10 @@ type ContentBlock struct {
 	Content   json.RawMessage `json:"content,omitempty"`
 	IsError   *bool           `json:"is_error,omitempty"`
 
-	// thinking / redacted_thinking
-	Thinking  string `json:"thinking,omitempty"`
-	Signature string `json:"signature,omitempty"`
-	Data      string `json:"data,omitempty"`
+	// thinking / redacted_thinking — *string: 위와 동일한 이유
+	Thinking  *string `json:"thinking,omitempty"`
+	Signature *string `json:"signature,omitempty"`
+	Data      *string `json:"data,omitempty"`
 
 	CacheControl *CacheControl `json:"cache_control,omitempty"`
 
@@ -523,7 +525,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 		if err := json.Unmarshal(head.Content, &s); err != nil {
 			return err
 		}
-		m.Content = []ContentBlock{{Type: "text", Text: s}}
+		m.Content = []ContentBlock{{Type: "text", Text: &s}}
 		m.contentIsString = true
 	} else if len(head.Content) > 0 {
 		if err := json.Unmarshal(head.Content, &m.Content); err != nil {
@@ -548,8 +550,8 @@ func (m Message) MarshalJSON() ([]byte, error) {
 	out["role"] = roleRaw
 	var contentRaw []byte
 	var err error
-	if m.contentIsString && len(m.Content) == 1 && m.Content[0].Type == "text" {
-		contentRaw, err = json.Marshal(m.Content[0].Text)
+	if m.contentIsString && len(m.Content) == 1 && m.Content[0].Type == "text" && m.Content[0].Text != nil {
+		contentRaw, err = json.Marshal(*m.Content[0].Text)
 	} else {
 		contentRaw, err = json.Marshal(m.Content)
 	}
