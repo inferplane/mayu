@@ -52,8 +52,9 @@ func New(onMissing OnMissing, rates map[Key]Rate) *Table {
 func (t *Table) OnMissing() OnMissing { return t.onMissing }
 
 // CostUSDMicros returns the request cost in µUSD and whether the (provider,
-// model) rate was missing. Cost is computed once over the full token totals
-// (never per-chunk) with round-half-even on the /1e6 division.
+// model) rate was missing. Cost sums each token class rounded independently
+// (round-half-even on the /1e6 division), computed once over the full token
+// totals — never per-chunk.
 func (t *Table) CostUSDMicros(provider, model string, u Usage) (cost int64, missing bool) {
 	r, ok := t.rates[Key{provider, model}]
 	if !ok {
