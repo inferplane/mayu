@@ -104,6 +104,52 @@ func TestChatStreamingConvertsMockCanonicalToOpenAI(t *testing.T) {
 	}
 }
 
+// failProvider always errors, to drive the pre-TTFT fallback to the next target.
+type failProvider struct{}
+
+func (failProvider) Name() string               { return "fail" }
+func (failProvider) Models() []schema.ModelInfo { return nil }
+func (failProvider) Complete(context.Context, *providers.ProxyRequest) (*providers.ProxyResponse, error) {
+	return nil, errInjected
+}
+func (failProvider) Stream(context.Context, *providers.ProxyRequest) (iter.Seq2[*providers.StreamEvent, error], error) {
+	return nil, errInjected
+}
+
+var errInjected = stringErr("upstream down")
+
+type stringErr string
+
+func (e stringErr) Error() string { return string(e) }
+
+func TestChatNonStreamingFallsBackPreTTFT(t *testing.T) {
+	provs := map[string]providers.Provider{
+		"bad":  failProvider{},
+		"good": mockprovider.New("gpt-x"),
+	}
+	models := map[string]config.ModelConfig{
+		"gpt-x": {Targets: []config.Target{
+			{Provider: "bad", Model: "m1"},
+			{Provider: "good", Model: "gpt-x"},
+		}},
+	}
+	h := NewChatHandler(router.New(provs, models))
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}`))
+	ctx := principal.With(req.Context(), keystore.Principal{AllowedModels: []string{"*"}})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != 200 {
+		t.Fatalf("fallback should yield 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"chat.completion"`) {
+		t.Fatalf("fallback response not converted: %s", rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Inferplane-Fallback"); got != "good" {
+		t.Fatalf("x-inferplane-fallback header = %q, want %q", got, "good")
+	}
+}
+
 // ── openai-wire provider: tee verbatim (no conversion) ───────────────────────
 
 // oaiWireProvider mimics openai_compatible: its native wire is "openai", so the

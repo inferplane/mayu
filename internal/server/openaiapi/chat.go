@@ -77,7 +77,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 403, "permission_error", "model not allowed for this key: "+canonical.Model)
 		return
 	}
-	prov, providerName, upstream, err := h.r.ResolveProvider(canonical.Model)
+	chain, err := h.r.ResolveChain(canonical.Model)
 	if err != nil {
 		h.audit(p, canonical.Model, "", &audit.OutcomeRef{Status: 404})
 		writeErr(w, 404, "not_found_error", "unknown model: "+canonical.Model)
@@ -87,30 +87,51 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if h.gov != nil {
 		dec := h.gov.PreCheck(p.Team, estimateTokens(raw))
 		if !dec.Allowed {
-			h.audit(p, canonical.Model, upstream, &audit.OutcomeRef{Status: dec.Status})
+			h.audit(p, canonical.Model, chain[0].Upstream, &audit.OutcomeRef{Status: dec.Status})
 			writeErr(w, dec.Status, govErrType(dec.Status), dec.Reason)
 			return
 		}
 	}
 	// request_started: the request passed auth + allow-list + governance and
-	// resolved a target.
-	h.audit(p, canonical.Model, upstream, nil)
+	// resolved a target (the first in the priority chain).
+	h.audit(p, canonical.Model, chain[0].Upstream, nil)
 	stream := canonical.Stream != nil && *canonical.Stream
-	pr := &providers.ProxyRequest{
-		Model: canonical.Model, Upstream: upstream, Parsed: canonical,
-		RawBody: raw, Headers: req.Header, Stream: stream,
-		IngressProtocol: "openai",
+
+	// Priority fallback chain (§4.5): try targets in order. A pre-TTFT failure
+	// falls back to the next target, records the breaker result, and sets
+	// x-inferplane-fallback. Stream fallback is pre-first-event only.
+	for i, ct := range chain {
+		pr := &providers.ProxyRequest{
+			Model: canonical.Model, Upstream: ct.Upstream, Parsed: canonical,
+			RawBody: raw, Headers: req.Header, Stream: stream,
+			IngressProtocol: "openai",
+		}
+		last := i == len(chain)-1
+		if i > 0 {
+			w.Header().Set("x-inferplane-fallback", ct.ProviderName)
+		}
+		var retriable bool
+		if stream {
+			retriable = h.serveStream(w, req, ct.Provider, pr, p, canonical.Model, ct.ProviderName, ct.Upstream, last)
+		} else {
+			retriable = h.serveComplete(w, req, ct.Provider, pr, p, canonical.Model, ct.ProviderName, ct.Upstream, last)
+		}
+		if !retriable {
+			return
+		}
+		h.r.RecordResult(ct.ProviderName, false)
 	}
-	if stream {
-		h.serveStream(w, req, prov, pr, p, canonical.Model, providerName, upstream)
-		return
-	}
-	h.serveComplete(w, req, prov, pr, p, canonical.Model, providerName, upstream)
 }
 
-func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string) {
+// serveComplete proxies one non-streaming target. It returns retriable=true on a
+// pre-TTFT failure (transport error or upstream 5xx/429) when a next target
+// exists (!last); otherwise it writes the response/error and returns false.
+func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool) (retriable bool) {
 	resp, err := prov.Complete(req.Context(), pr)
 	if err != nil {
+		if !last {
+			return true // fall back to the next target
+		}
 		// Tee a non-2xx upstream error verbatim when available.
 		var ue *providers.UpstreamError
 		if errors.As(err, &ue) {
@@ -120,11 +141,17 @@ func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, pr
 			w.WriteHeader(ue.StatusCode)
 			w.Write(ue.Body)
 			h.auditCompleted(p, model, upstream, ue.StatusCode, nil, nil)
-			return
+			return false
 		}
 		writeErr(w, 502, "api_error", "upstream error")
 		h.auditCompleted(p, model, upstream, 502, nil, nil)
-		return
+		return false
+	}
+	if !last && (resp.StatusCode >= 500 || resp.StatusCode == 429) {
+		return true // upstream 5xx/429 → fall back
+	}
+	if resp.StatusCode < 400 {
+		h.r.RecordResult(providerName, true)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if providerWire(prov.Name()) == "openai" {
@@ -148,11 +175,18 @@ func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, pr
 		cost = h.settle(p.Team, providerName, upstream, resp.Parsed.Usage)
 	}
 	h.auditCompleted(p, model, upstream, resp.StatusCode, usage, cost)
+	return false
 }
 
-func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string) {
+// serveStream proxies one streaming target. Fallback is PRE-TTFT ONLY: Stream()
+// erroring before any event with a next target available (!last) returns
+// retriable=true. Once the first event is rendered the response is committed.
+func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool) (retriable bool) {
 	seq, err := prov.Stream(req.Context(), pr)
 	if err != nil {
+		if !last {
+			return true // pre-TTFT failure → fall back
+		}
 		var ue *providers.UpstreamError
 		if errors.As(err, &ue) {
 			if w.Header().Get("Content-Type") == "" {
@@ -161,18 +195,20 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 			w.WriteHeader(ue.StatusCode)
 			w.Write(ue.Body)
 			h.auditCompleted(p, model, upstream, ue.StatusCode, nil, nil)
-			return
+			return false
 		}
 		writeErr(w, 502, "api_error", "upstream stream error")
 		h.auditCompleted(p, model, upstream, 502, nil, nil)
-		return
+		return false
 	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeErr(w, 500, "api_error", "streaming unsupported")
 		h.auditCompleted(p, model, upstream, 500, nil, nil)
-		return
+		return false
 	}
+	// Stream() succeeded → the target is healthy (breaker success, post-TTFT).
+	h.r.RecordResult(providerName, true)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(200)
@@ -185,7 +221,7 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 		if err != nil {
 			// upstream broke mid-stream; client sees a truncated stream.
 			h.auditCompletedPartial(p, model, upstream, usage)
-			return
+			return false
 		}
 		if openaiWire {
 			// openai-wire provider: tee the upstream OpenAI SSE bytes verbatim
@@ -213,6 +249,7 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 	}
 	cost := h.settle(p.Team, providerName, upstream, lastUsage)
 	h.auditCompleted(p, model, upstream, 200, usage, cost)
+	return false
 }
 
 // govErrType maps a governance deny status to the OpenAI error `type`.

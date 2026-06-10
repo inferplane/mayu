@@ -164,6 +164,73 @@ func TestMessagesStreamingErrorTeesHeaders(t *testing.T) {
 	}
 }
 
+// failProvider always errors on Complete/Stream (transport-level), to drive the
+// pre-TTFT fallback to the next target in the chain.
+type failProvider struct{}
+
+func (failProvider) Name() string               { return "fail" }
+func (failProvider) Models() []schema.ModelInfo { return nil }
+func (failProvider) Complete(context.Context, *providers.ProxyRequest) (*providers.ProxyResponse, error) {
+	return nil, errors.New("upstream down")
+}
+func (failProvider) Stream(context.Context, *providers.ProxyRequest) (iter.Seq2[*providers.StreamEvent, error], error) {
+	return nil, errors.New("upstream down")
+}
+
+func TestMessagesNonStreamingFallsBackPreTTFT(t *testing.T) {
+	provs := map[string]providers.Provider{
+		"bad":  failProvider{},
+		"good": mockprovider.New("claude-sonnet-4-6"),
+	}
+	models := map[string]config.ModelConfig{
+		"claude-sonnet-4-6": {Targets: []config.Target{
+			{Provider: "bad", Model: "m1"},
+			{Provider: "good", Model: "claude-sonnet-4-6"},
+		}},
+	}
+	h := NewMessagesHandler(router.New(provs, models))
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, allowAll(req))
+	if rec.Code != 200 {
+		t.Fatalf("fallback to healthy provider should yield 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"msg_mock"`) {
+		t.Fatalf("body missing fallback provider response: %s", rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Inferplane-Fallback"); got != "good" {
+		t.Fatalf("x-inferplane-fallback header = %q, want %q", got, "good")
+	}
+}
+
+func TestMessagesStreamingFallsBackPreTTFT(t *testing.T) {
+	provs := map[string]providers.Provider{
+		"bad":  failProvider{},
+		"good": mockprovider.New("claude-sonnet-4-6"),
+	}
+	models := map[string]config.ModelConfig{
+		"claude-sonnet-4-6": {Targets: []config.Target{
+			{Provider: "bad", Model: "m1"},
+			{Provider: "good", Model: "claude-sonnet-4-6"},
+		}},
+	}
+	h := NewMessagesHandler(router.New(provs, models))
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-4-6","stream":true,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, allowAll(req))
+	if rec.Code != 200 {
+		t.Fatalf("pre-TTFT stream fallback should yield 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "event: message_start") {
+		t.Fatalf("fallback stream not teed: %s", rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Inferplane-Fallback"); got != "good" {
+		t.Fatalf("x-inferplane-fallback header = %q, want %q", got, "good")
+	}
+}
+
 func TestMessagesEnforcesAllowList(t *testing.T) {
 	h := NewMessagesHandler(testRouter())
 	req := httptest.NewRequest("POST", "/v1/messages",
