@@ -1,0 +1,13 @@
+{
+  "server": { "listen": ":8080", "admin_listen": ":9090", "drain_grace": "10s" },
+  "providers": {
+    "anthropic-direct": {
+      "type": "anthropic",
+      "base_url": "https://api.anthropic.com",
+      "api_key_ref": { "env": "ANTHROPIC_API_KEY" }
+    }
+  },
+  "models": {
+    "claude-sonnet-4-6": { "targets": [ { "provider": "anthropic-direct", "model": "claude-sonnet-4-6" } ] }
+  }
+}
