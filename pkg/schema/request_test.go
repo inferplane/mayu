@@ -27,7 +27,7 @@ func TestChatRequestRoundTrip(t *testing.T) {
 	if err := json.Unmarshal([]byte(in), &r); err != nil {
 		t.Fatal(err)
 	}
-	if r.Model != "claude-sonnet-4-6" || !r.Stream || len(r.Messages) != 1 {
+	if r.Model != "claude-sonnet-4-6" || r.Stream == nil || !*r.Stream || len(r.Messages) != 1 {
 		t.Fatalf("typed fields: %+v", r)
 	}
 	out, err := json.Marshal(r)
@@ -35,4 +35,23 @@ func TestChatRequestRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertJSONSemanticEqual(t, []byte(in), out)
+}
+
+func TestChatRequestPinsTypingDecisions(t *testing.T) {
+	// stream:false 명시값과 max_tokens:0 존재값이 왕복에서 살아남는다 —
+	// 이 두 필드의 타입 결정(*bool, *int64)을 핀.
+	for _, in := range []string{
+		`{"model":"m","messages":[],"stream":false}`,
+		`{"model":"m","messages":[],"max_tokens":0}`,
+	} {
+		var r ChatRequest
+		if err := json.Unmarshal([]byte(in), &r); err != nil {
+			t.Fatal(err)
+		}
+		out, err := json.Marshal(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertJSONSemanticEqual(t, []byte(in), out)
+	}
 }
