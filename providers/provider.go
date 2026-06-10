@@ -24,6 +24,11 @@ type ProxyRequest struct {
 	Headers  http.Header         // anthropic-version / anthropic-beta passthrough
 	Stream   bool                // req.stream
 	Upstream string              // target model id at the upstream (may differ from Model)
+	// IngressProtocol is the wire protocol the client spoke ("anthropic" |
+	// "openai"). Providers compare it to their own native protocol: a match
+	// forwards RawBody verbatim (lossless, cache-safe §3.3); a mismatch goes
+	// through canonical conversion (best-effort).
+	IngressProtocol string
 }
 
 // ProxyResponse is a non-streaming upstream response. RawBody is teed to the

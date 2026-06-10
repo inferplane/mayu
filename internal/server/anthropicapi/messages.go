@@ -88,6 +88,7 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	pr := &providers.ProxyRequest{
 		Model: parsed.Model, Upstream: upstream, Parsed: &parsed,
 		RawBody: raw, Headers: req.Header, Stream: stream,
+		IngressProtocol: "anthropic",
 	}
 	if stream {
 		h.serveStream(w, req, prov, pr, p, parsed.Model, providerName, upstream)
