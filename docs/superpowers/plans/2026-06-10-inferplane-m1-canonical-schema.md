@@ -381,10 +381,12 @@ func (c CacheControl) MarshalJSON() ([]byte, error) {
 // over the Anthropic block vocabulary. Unknown block types round-trip via
 // Extra; tool_result.content stays raw until a milestone needs to interpret it.
 type ContentBlock struct {
+	// Type has no omitempty on purpose: never silently drop the union discriminator.
 	Type string `json:"type"`
 
-	// text
-	Text string `json:"text,omitempty"`
+	// text — *string: content_block_start 프레임의 "text":"" 가 정당한 값이라
+	// 빈 문자열의 존재/부재를 구분해야 함 (리뷰 수정 48d412d)
+	Text *string `json:"text,omitempty"`
 
 	// tool_use
 	ID    string          `json:"id,omitempty"`
@@ -396,10 +398,10 @@ type ContentBlock struct {
 	Content   json.RawMessage `json:"content,omitempty"`
 	IsError   *bool           `json:"is_error,omitempty"`
 
-	// thinking / redacted_thinking
-	Thinking  string `json:"thinking,omitempty"`
-	Signature string `json:"signature,omitempty"`
-	Data      string `json:"data,omitempty"`
+	// thinking / redacted_thinking — *string: 위와 동일한 이유
+	Thinking  *string `json:"thinking,omitempty"`
+	Signature *string `json:"signature,omitempty"`
+	Data      *string `json:"data,omitempty"`
 
 	CacheControl *CacheControl `json:"cache_control,omitempty"`
 
@@ -523,7 +525,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 		if err := json.Unmarshal(head.Content, &s); err != nil {
 			return err
 		}
-		m.Content = []ContentBlock{{Type: "text", Text: s}}
+		m.Content = []ContentBlock{{Type: "text", Text: &s}}
 		m.contentIsString = true
 	} else if len(head.Content) > 0 {
 		if err := json.Unmarshal(head.Content, &m.Content); err != nil {
@@ -548,8 +550,8 @@ func (m Message) MarshalJSON() ([]byte, error) {
 	out["role"] = roleRaw
 	var contentRaw []byte
 	var err error
-	if m.contentIsString && len(m.Content) == 1 && m.Content[0].Type == "text" {
-		contentRaw, err = json.Marshal(m.Content[0].Text)
+	if m.contentIsString && len(m.Content) == 1 && m.Content[0].Type == "text" && m.Content[0].Text != nil {
+		contentRaw, err = json.Marshal(*m.Content[0].Text)
 	} else {
 		contentRaw, err = json.Marshal(m.Content)
 	}
@@ -616,7 +618,7 @@ func TestChatRequestRoundTrip(t *testing.T) {
 	if err := r.UnmarshalJSON([]byte(in)); err != nil {
 		t.Fatal(err)
 	}
-	if r.Model != "claude-sonnet-4-6" || !r.Stream || len(r.Messages) != 1 {
+	if r.Model != "claude-sonnet-4-6" || r.Stream == nil || !*r.Stream || len(r.Messages) != 1 {
 		t.Fatalf("typed fields: %+v", r)
 	}
 	out, err := r.MarshalJSON()
@@ -648,7 +650,8 @@ type ChatRequest struct {
 	Model     string    `json:"model"`
 	Messages  []Message `json:"messages"`
 	MaxTokens *int64    `json:"max_tokens,omitempty"`
-	Stream    bool      `json:"stream,omitempty"`
+	// *bool: 명시적 "stream":false 보존 (omitempty 결함 계열, 리뷰 수정 3d5e050)
+	Stream *bool `json:"stream,omitempty"`
 
 	System     json.RawMessage `json:"system,omitempty"`
 	Tools      json.RawMessage `json:"tools,omitempty"`
@@ -729,10 +732,10 @@ func TestChatResponseRoundTrip(t *testing.T) {
 	if err := r.UnmarshalJSON([]byte(in)); err != nil {
 		t.Fatal(err)
 	}
-	if r.Usage == nil || r.Usage.CacheReadInputTokens != 45000 {
+	if r.Usage == nil || r.Usage.CacheReadInputTokens == nil || *r.Usage.CacheReadInputTokens != 45000 {
 		t.Fatalf("usage not typed: %+v", r.Usage)
 	}
-	if r.Usage.CacheCreation == nil || r.Usage.CacheCreation.Ephemeral5mInputTokens != 1024 {
+	if r.Usage.CacheCreation == nil || r.Usage.CacheCreation.Ephemeral5mInputTokens == nil || *r.Usage.CacheCreation.Ephemeral5mInputTokens != 1024 {
 		t.Fatalf("cache_creation TTL detail not typed: %+v", r.Usage.CacheCreation)
 	}
 	out, err := r.MarshalJSON()
@@ -758,18 +761,22 @@ import "encoding/json"
 
 // Usage — budget 정산의 입력 (§5.3). cache 토큰은 TTL별 단가가 다르므로
 // (5m=1.25x, 1h=2x) 반드시 구분 보존한다.
+// 모든 수치는 *int64: upstream이 보낸 키만 재방출한다. message_delta
+// usage는 output_tokens만 싣는 경우가 있고(no-omitempty면 키 추가 발생),
+// 명시적 0("cache_creation_input_tokens":0)은 보존해야 한다(omitempty
+// 값 타입이면 드랍) — 48d412d/3d5e050과 동일한 결함 계열의 선제 차단.
 type Usage struct {
-	InputTokens              int64          `json:"input_tokens"`
-	OutputTokens             int64          `json:"output_tokens"`
-	CacheReadInputTokens     int64          `json:"cache_read_input_tokens,omitempty"`
-	CacheCreationInputTokens int64          `json:"cache_creation_input_tokens,omitempty"`
+	InputTokens              *int64         `json:"input_tokens,omitempty"`
+	OutputTokens             *int64         `json:"output_tokens,omitempty"`
+	CacheReadInputTokens     *int64         `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens *int64         `json:"cache_creation_input_tokens,omitempty"`
 	CacheCreation            *CacheCreation `json:"cache_creation,omitempty"`
 	Extra map[string]json.RawMessage `json:"-"`
 }
 
 type CacheCreation struct {
-	Ephemeral5mInputTokens int64 `json:"ephemeral_5m_input_tokens"`
-	Ephemeral1hInputTokens int64 `json:"ephemeral_1h_input_tokens"`
+	Ephemeral5mInputTokens *int64 `json:"ephemeral_5m_input_tokens,omitempty"`
+	Ephemeral1hInputTokens *int64 `json:"ephemeral_1h_input_tokens,omitempty"`
 	Extra map[string]json.RawMessage `json:"-"`
 }
 
@@ -1160,3 +1167,11 @@ M2 시작 조건):
 - **플레이스홀더**: 없음 — 모든 스텝에 실제 코드/픽스처/커맨드 포함. ✓
 - **타입 일관성**: `unmarshalWithExtra(data, v, known...)` 시그니처가 Task 2 정의·Task 3~7 사용처 일치, `assertJSONSemanticEqual` Task 2 정의·전역 사용. ✓
 - **알려진 한계 (의도)**: `jsonSemanticEqual`은 키 순서 무시 — Anthropic API는 키 순서 비의존이므로 안전. 블록 **배열 순서**는 슬라이스로 보존되며 이것이 §2.2-1의 본질.
+
+## 구현 중 발견·반영 (리뷰 수정)
+
+- `48d412d` ContentBlock.Text/Thinking/Signature/Data → `*string` (스트리밍 빈 문자열 보존)
+- `3d5e050` ChatRequest.Stream → `*bool` (명시적 false 보존)
+- `ea32a3f` Usage/CacheCreation 수치 → `*int64` (부분 usage·명시적 0 보존)
+- `f8969bb` `unmarshalWithExtra`가 대소문자 변형 키 충돌을 **거부** — `{"model":..,"Model":..}` 류의 파서 차이(smuggling) 차단. M2 인증/라우팅 전에 트러스트 경계 강화.
+- 공통 결함 계열: known key에 omitempty value 타입을 쓰면 명시적 zero가 Extra로도 안 가고 marshal에서도 드랍됨 → 포인터 타입으로 present/absent 구분.
