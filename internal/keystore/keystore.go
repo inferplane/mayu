@@ -1,0 +1,74 @@
+// Package keystore stores virtual API keys (SHA-256 hashed) and the team /
+// model-allow-list metadata behind them. Store is the swappable backend
+// interface; M3 ships SQLite, Postgres is the HA path (v0.2). Only the key
+// HASH is persisted — the plaintext is shown once at Create and never stored.
+package keystore
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base32"
+	"encoding/hex"
+	"strings"
+	"time"
+)
+
+// Principal is the resolved identity behind a virtual key (M3: service-account
+// + team; user/OIDC is M5). It rides in the request context after KeyAuth.
+type Principal struct {
+	KeyID         string // "ik_" + 12-char prefix of the key id; logged, never the secret
+	Team          string
+	AllowedModels []string // "*" allows all; else explicit allow-list (§5.1 policy)
+}
+
+// Allows reports whether this principal may use the given model.
+func (p Principal) Allows(model string) bool {
+	for _, m := range p.AllowedModels {
+		if m == "*" || m == model {
+			return true
+		}
+	}
+	return false
+}
+
+type Store interface {
+	Create(ctx context.Context, team string, allowedModels []string) (plaintext string, p Principal, err error)
+	Resolve(ctx context.Context, plaintext string) (Principal, error)
+	Revoke(ctx context.Context, keyID string) error
+	List(ctx context.Context) ([]Principal, error)
+	Close() error
+}
+
+var b32 = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
+
+// generateKey returns a high-entropy virtual key ("ik_" + 32 random bytes in
+// lowercase base32) and its SHA-256 hash (hex). The key id is a 12-char prefix
+// of the hash — safe to log, not reversible to the secret.
+func generateKey() (plaintext, hashHex, keyID string, err error) {
+	var raw [32]byte
+	if _, err = rand.Read(raw[:]); err != nil {
+		return "", "", "", err
+	}
+	plaintext = "ik_" + b32.EncodeToString(raw[:])
+	sum := sha256.Sum256([]byte(plaintext))
+	hashHex = hex.EncodeToString(sum[:])
+	keyID = "ik_" + hashHex[:12]
+	return plaintext, hashHex, keyID, nil
+}
+
+// hashKey returns the SHA-256 hex of a presented plaintext key for lookup.
+func hashKey(plaintext string) string {
+	sum := sha256.Sum256([]byte(plaintext))
+	return hex.EncodeToString(sum[:])
+}
+
+func joinModels(models []string) string { return strings.Join(models, ",") }
+func splitModels(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return strings.Split(s, ",")
+}
+
+func nowRFC3339() string { return time.Now().UTC().Format(time.RFC3339Nano) }
