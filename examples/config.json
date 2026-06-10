@@ -10,10 +10,12 @@
     "sinks": [ { "type": "stdout" }, { "type": "file", "path": "/var/lib/inferplane/audit.jsonl" } ]
   },
   "providers": {
-    "anthropic-direct": { "type": "anthropic", "base_url": "https://api.anthropic.com", "api_key_ref": { "env": "ANTHROPIC_API_KEY" } }
+    "anthropic-direct": { "type": "anthropic", "base_url": "https://api.anthropic.com", "api_key_ref": { "env": "ANTHROPIC_API_KEY" } },
+    "bedrock-us": { "type": "bedrock", "region": "us-west-2", "auth": { "mode": "irsa" } }
   },
   "models": {
     "claude-sonnet-4-6": { "targets": [ { "provider": "anthropic-direct", "model": "claude-sonnet-4-6" } ] },
-    "claude-opus-4-8": { "targets": [ { "provider": "anthropic-direct", "model": "claude-opus-4-8" } ] }
+    "claude-opus-4-8": { "targets": [ { "provider": "anthropic-direct", "model": "claude-opus-4-8" } ] },
+    "claude-sonnet-4-6-bedrock": { "targets": [ { "provider": "bedrock-us", "model": "anthropic.claude-sonnet-4-6-v1:0", "api": "invoke_model" } ] }
   }
 }

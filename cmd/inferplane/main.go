@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	"github.com/inferplane/inferplane/providers"
 
 	_ "github.com/inferplane/inferplane/providers/anthropic" // register "anthropic"
+	_ "github.com/inferplane/inferplane/providers/bedrock"   // register "bedrock"
 )
 
 func main() {
@@ -87,9 +89,36 @@ func run(cfgPath string) error {
 	}
 	defer aud.Close()
 
+	// model_api[providerName] = {upstreamModelID: api} — gathered from model
+	// targets that name a non-empty api, so the bedrock factory can override
+	// its default invoke/converse routing per upstream model.
+	modelAPIByProvider := map[string]map[string]string{}
+	for _, mc := range cfg.Models {
+		for _, t := range mc.Targets {
+			if t.API != "" {
+				if modelAPIByProvider[t.Provider] == nil {
+					modelAPIByProvider[t.Provider] = map[string]string{}
+				}
+				modelAPIByProvider[t.Provider][t.Model] = t.API
+			}
+		}
+	}
+
 	provs := map[string]providers.Provider{}
 	for name, pc := range cfg.Providers {
-		p, err := providers.New(providers.Config{Type: pc.Type, BaseURL: pc.BaseURL, APIKey: pc.APIKey})
+		var settings map[string]string
+		if pc.Type == "bedrock" {
+			settings = map[string]string{
+				"region":    pc.Region,
+				"auth_mode": pc.Auth.Mode,
+				"profile":   pc.Auth.Profile,
+			}
+			if m := modelAPIByProvider[name]; len(m) > 0 {
+				b, _ := json.Marshal(m)
+				settings["model_api"] = string(b)
+			}
+		}
+		p, err := providers.New(providers.Config{Type: pc.Type, BaseURL: pc.BaseURL, APIKey: pc.APIKey, Settings: settings})
 		if err != nil {
 			return fmt.Errorf("provider %q: %w", name, err)
 		}
