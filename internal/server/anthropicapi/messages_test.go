@@ -10,10 +10,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/inferplane/inferplane/internal/audit"
+	"github.com/inferplane/inferplane/internal/budget"
 	"github.com/inferplane/inferplane/internal/config"
+	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
+	"github.com/inferplane/inferplane/internal/limiter"
+	"github.com/inferplane/inferplane/internal/pricing"
 	"github.com/inferplane/inferplane/internal/principal"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/pkg/schema"
@@ -208,6 +213,68 @@ func TestMessages404UnknownModelAudited(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), `"status":404`) {
 		t.Fatalf("404 must be audited: %s", buf.String())
+	}
+}
+
+// govPricing keys the rate table by (config-provider-name, upstream-model),
+// matching how the router's ResolveProvider returns the pricing provider name.
+// testRouter() uses provider config name "p" and upstream "claude-sonnet-4-6".
+func govPricing() *pricing.Table {
+	return pricing.New(pricing.OnMissingAllow, map[pricing.Key]pricing.Rate{
+		{Provider: "p", Model: "claude-sonnet-4-6"}: {InputPerMTok: 1_000_000, OutputPerMTok: 1_000_000},
+	})
+}
+
+func TestMessagesGovernorQuotaBlocks429(t *testing.T) {
+	lim := limiter.NewMemory()
+	teams := map[string]governance.TeamPolicy{
+		"platform-eng": {TokensPerDay: 1000, QuotaExceeded: "block"},
+	}
+	gov := governance.NewGovernor(teams, lim, budget.NewMemory(), govPricing())
+	// Exhaust the team's daily token quota so the pre-check blocks.
+	lim.DebitQuota("quota:platform-eng", 1000, 24*time.Hour)
+
+	h := NewMessagesHandlerFull(testRouter(), nil, gov)
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}`))
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik", Team: "platform-eng", AllowedModels: []string{"*"}})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != 429 {
+		t.Fatalf("quota-exhausted request must be 429, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "rate_limit_error") {
+		t.Fatalf("expected anthropic rate_limit_error body: %s", rec.Body.String())
+	}
+}
+
+func TestMessagesGovernorSettlesCostIntoAudit(t *testing.T) {
+	var buf bytes.Buffer
+	w, err := audit.NewWriter("inst-1", filepath.Join(t.TempDir(), "a.wal"), []audit.Sink{audit.NewWriterSink("buf", &buf, true)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	teams := map[string]governance.TeamPolicy{
+		"platform-eng": {TokensPerDay: 1_000_000, QuotaExceeded: "block"},
+	}
+	gov := governance.NewGovernor(teams, limiter.NewMemory(), budget.NewMemory(), govPricing())
+	h := NewMessagesHandlerFull(testRouter(), w, gov)
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}`))
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik", Team: "platform-eng", AllowedModels: []string{"*"}})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	w.Close()
+	if rec.Code != 200 {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+	// mock provider reports input=10 output=5 → 10*1 + 5*1 = 15 µUSD.
+	out := buf.String()
+	if !strings.Contains(out, `"amount_usd_micros":15`) {
+		t.Fatalf("audit completed record must carry settled cost: %s", out)
+	}
+	if !strings.Contains(out, `"pricing_missing":false`) {
+		t.Fatalf("pricing present → pricing_missing must be false: %s", out)
 	}
 }
 
