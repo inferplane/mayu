@@ -13,10 +13,13 @@ import (
 
 func toConverseRequest(raw []byte) (ConverseRequest, error) {
 	var body struct {
-		MaxTokens   *int64           `json:"max_tokens"`
-		System      json.RawMessage  `json:"system"`
-		Messages    []schema.Message `json:"messages"`
-		ModelFields map[string]any   `json:"model_fields"`
+		MaxTokens     *int64           `json:"max_tokens"`
+		Temperature   *float64         `json:"temperature"`
+		TopP          *float64         `json:"top_p"`
+		StopSequences []string         `json:"stop_sequences"`
+		System        json.RawMessage  `json:"system"`
+		Messages      []schema.Message `json:"messages"`
+		ModelFields   map[string]any   `json:"model_fields"`
 	}
 	if err := json.Unmarshal(raw, &body); err != nil {
 		return ConverseRequest{}, err
@@ -24,6 +27,17 @@ func toConverseRequest(raw []byte) (ConverseRequest, error) {
 	cr := ConverseRequest{Inference: map[string]any{}, ModelFields: body.ModelFields}
 	if body.MaxTokens != nil {
 		cr.Inference["maxTokens"] = *body.MaxTokens
+	}
+	// Sampling params pass through to InferenceConfig. Keys match the names
+	// buildInference (client.go) reads: temperature, topP, stopSequences.
+	if body.Temperature != nil {
+		cr.Inference["temperature"] = *body.Temperature
+	}
+	if body.TopP != nil {
+		cr.Inference["topP"] = *body.TopP
+	}
+	if len(body.StopSequences) > 0 {
+		cr.Inference["stopSequences"] = body.StopSequences
 	}
 	cr.System = systemText(body.System)
 	for _, m := range body.Messages {
