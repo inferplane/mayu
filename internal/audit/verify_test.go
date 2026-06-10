@@ -29,6 +29,27 @@ func TestVerifyAcceptsIntactChain(t *testing.T) {
 	}
 }
 
+func TestVerifyAcceptsInstanceRestartSegments(t *testing.T) {
+	// Two instances writing to the same file: each starts its own genesis-
+	// anchored chain. A restart (new instance) must verify OK, not BROKEN.
+	var buf bytes.Buffer
+	w1, _ := NewWriter("inst-A", filepath.Join(t.TempDir(), "a.wal"), []Sink{NewWriterSink("b", &buf, true)})
+	w1.Append(Record{SchemaVersion: 1, Event: "request_started", ID: "01A"})
+	w1.Append(Record{SchemaVersion: 1, Event: "request_completed", ID: "01B"})
+	w1.Close()
+	w2, _ := NewWriter("inst-B", filepath.Join(t.TempDir(), "b.wal"), []Sink{NewWriterSink("b", &buf, true)})
+	w2.Append(Record{SchemaVersion: 1, Event: "request_started", ID: "01C"})
+	w2.Close()
+
+	res, err := Verify(strings.NewReader(buf.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK || res.Records != 3 {
+		t.Fatalf("instance-segmented chain must verify OK across restart: %+v", res)
+	}
+}
+
 func TestVerifyDetectsTampering(t *testing.T) {
 	buf := writeChain(t)
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")

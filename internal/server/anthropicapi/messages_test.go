@@ -194,6 +194,23 @@ func TestMessagesNoPrincipal401(t *testing.T) {
 	}
 }
 
+func TestMessages404UnknownModelAudited(t *testing.T) {
+	var buf bytes.Buffer
+	w, _ := audit.NewWriter("i", filepath.Join(t.TempDir(), "a.wal"), []audit.Sink{audit.NewWriterSink("b", &buf, true)})
+	h := NewMessagesHandlerWithAudit(testRouter(), w)
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"ghost-model","messages":[]}`))
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik", Team: "t", AllowedModels: []string{"*"}})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	w.Close()
+	if rec.Code != 404 {
+		t.Fatalf("want 404, got %d", rec.Code)
+	}
+	if !strings.Contains(buf.String(), `"status":404`) {
+		t.Fatalf("404 must be audited: %s", buf.String())
+	}
+}
+
 func TestMessagesEmitsTwoPhaseAudit(t *testing.T) {
 	var buf bytes.Buffer
 	w, err := audit.NewWriter("inst-1", filepath.Join(t.TempDir(), "a.wal"), []audit.Sink{audit.NewWriterSink("buf", &buf, true)})

@@ -27,7 +27,9 @@ CREATE INDEX IF NOT EXISTS idx_keys_hash ON keys(key_hash) WHERE revoked = 0;
 `
 
 func OpenSQLite(path string) (*SQLiteStore, error) {
-	db, err := sql.Open("sqlite", path)
+	// busy_timeout + WAL so the keys CLI and a running serve (two processes on
+	// the same file) back off and retry instead of hard-erroring on contention.
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		return nil, err
 	}

@@ -55,6 +55,9 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	prov, upstream, err := h.r.Resolve(parsed.Model)
 	if err != nil {
+		// Unknown model is recorded as a started record carrying the 404 outcome,
+		// for consistency with the 403 allow-list deny above.
+		h.audit(p, parsed.Model, "", &audit.OutcomeRef{Status: 404})
 		writeErr(w, 404, "not_found_error", "unknown model: "+parsed.Model)
 		return
 	}

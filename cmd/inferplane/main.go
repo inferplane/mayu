@@ -11,12 +11,14 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/config"
 	"github.com/inferplane/inferplane/internal/keystore"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/internal/server"
+	"github.com/inferplane/inferplane/pkg/ulid"
 	"github.com/inferplane/inferplane/providers"
 
 	_ "github.com/inferplane/inferplane/providers/anthropic" // register "anthropic"
@@ -108,8 +110,18 @@ func run(cfgPath string) error {
 
 	select {
 	case <-ctx.Done():
-		_ = dataSrv.Close()
-		_ = adminSrv.Close()
+		grace := 10 * time.Second
+		if cfg.Server.DrainGrace != "" {
+			if d, err := time.ParseDuration(cfg.Server.DrainGrace); err == nil {
+				grace = d
+			}
+		}
+		shutCtx, cancel := context.WithTimeout(context.Background(), grace)
+		defer cancel()
+		// Stop accepting new requests and let in-flight handlers finish so their
+		// request_completed audit records get enqueued before we drain.
+		_ = dataSrv.Shutdown(shutCtx)
+		_ = adminSrv.Shutdown(shutCtx)
 		return nil
 	case err := <-errc:
 		if errors.Is(err, http.ErrServerClosed) {
@@ -140,11 +152,13 @@ func buildSinks(cfgs []config.AuditSink) ([]audit.Sink, error) {
 	return sinks, nil
 }
 
-// instanceID names this gateway instance for the audit hash chain (per-instance
-// chains). Hostname falls back to a fixed name when unavailable.
+// instanceID names this gateway instance for the audit hash chain. Each process
+// run gets a unique id (hostname + per-run nonce) so a restart starts a distinct
+// per-instance chain segment (design §5.4) rather than reading as tampering.
 func instanceID() string {
-	if h, err := os.Hostname(); err == nil && h != "" {
-		return h
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "inferplane"
 	}
-	return "inferplane"
+	return host + "-" + ulid.New() // unique per process run → distinct audit chain segment
 }
