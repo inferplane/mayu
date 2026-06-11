@@ -1,0 +1,27 @@
+image:
+  repository: inferplane
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+replicaCount: 1   # single replica: SQLite key store + instance-local governance (multi-replica HA = Postgres, v0.2)
+service:
+  dataPort: 8080
+  adminPort: 9090
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}   # e.g. eks.amazonaws.com/role-arn for Bedrock IRSA
+# Secrets are referenced, never created by this chart (§7). Provide via existingSecret.
+secrets:
+  existingSecret: inferplane-secrets   # must contain ANTHROPIC_API_KEY, INFERPLANE_ADMIN_TOKEN, ...
+# config.json rendered into a ConfigMap. Secrets use api_key_ref env: from existingSecret.
+config:
+  server: { listen: ":8080", admin_listen: ":9090" }
+  providers:
+    anthropic-direct:
+      type: anthropic
+      base_url: https://api.anthropic.com
+      api_key_ref: { env: ANTHROPIC_API_KEY }
+  models:
+    claude-sonnet-4-6:
+      targets: [ { provider: anthropic-direct, model: claude-sonnet-4-6 } ]
+resources: {}
