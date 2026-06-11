@@ -15,15 +15,20 @@ import (
 	"time"
 
 	"github.com/inferplane/inferplane/internal/audit"
+	"github.com/inferplane/inferplane/internal/budget"
 	"github.com/inferplane/inferplane/internal/config"
+	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
+	"github.com/inferplane/inferplane/internal/limiter"
+	"github.com/inferplane/inferplane/internal/pricing"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/internal/server"
 	"github.com/inferplane/inferplane/pkg/ulid"
 	"github.com/inferplane/inferplane/providers"
 
-	_ "github.com/inferplane/inferplane/providers/anthropic" // register "anthropic"
-	_ "github.com/inferplane/inferplane/providers/bedrock"   // register "bedrock"
+	_ "github.com/inferplane/inferplane/providers/anthropic"    // register "anthropic"
+	_ "github.com/inferplane/inferplane/providers/bedrock"      // register "bedrock"
+	_ "github.com/inferplane/inferplane/providers/openaicompat" // register "openai_compatible"
 )
 
 func main() {
@@ -126,7 +131,39 @@ func run(cfgPath string) error {
 	}
 	r := router.New(provs, cfg.Models)
 
-	dataSrv := &http.Server{Addr: cfg.Server.Listen, Handler: server.DataMux(r, store, aud)}
+	// Governance pipeline: map config → governance/pricing config shapes (which
+	// are decoupled from internal/config to avoid an import cycle), then build
+	// the Governor so /v1/messages enforces rate/quota/budget + records cost.
+	teamCfg := map[string]governance.ConfigTeam{}
+	for name, tc := range cfg.Teams {
+		teamCfg[name] = governance.ConfigTeam{
+			RatePerMin:        tc.RateLimit.RequestsPerMinute,
+			TokensPerMinute:   tc.RateLimit.TokensPerMinute,
+			TokensPerDay:      tc.Quota.TokensPerDay,
+			QuotaExceeded:     tc.Quota.OnExceeded,
+			BudgetUSDPerMonth: tc.Budget.USDPerMonth,
+			BudgetExceeded:    tc.Budget.OnExceeded,
+		}
+	}
+	policies := governance.PoliciesFromConfig(teamCfg)
+
+	overrides := map[string]map[string]pricing.ConfigRate{}
+	for provider, models := range cfg.Pricing.Overrides {
+		overrides[provider] = map[string]pricing.ConfigRate{}
+		for model, rc := range models {
+			overrides[provider][model] = pricing.ConfigRate{
+				InputPerMTok:        rc.InputPerMTok,
+				OutputPerMTok:       rc.OutputPerMTok,
+				CacheReadPerMTok:    rc.CacheReadPerMTok,
+				CacheWrite5mPerMTok: rc.CacheWrite5mPerMTok,
+				CacheWrite1hPerMTok: rc.CacheWrite1hPerMTok,
+			}
+		}
+	}
+	tbl := pricing.FromConfig(cfg.Pricing.OnMissing, overrides)
+	gov := governance.NewGovernor(policies, limiter.NewMemory(), budget.NewMemory(), tbl)
+
+	dataSrv := &http.Server{Addr: cfg.Server.Listen, Handler: server.DataMux(r, store, aud, gov)}
 	adminSrv := &http.Server{Addr: cfg.Server.AdminListen, Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens)}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

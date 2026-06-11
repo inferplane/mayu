@@ -67,6 +67,26 @@ func TestLoadBedrockProviderFields(t *testing.T) {
 	}
 }
 
+func TestLoadTeamsAndPricing(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "c.json")
+	os.WriteFile(f, []byte(`{
+	  "teams": {"platform-eng": {"allowed_models":["claude-sonnet-4-6"],"rate_limit":{"requests_per_minute":300,"tokens_per_minute":2000000},"quota":{"tokens_per_day":50000000,"on_exceeded":"block"},"budget":{"usd_per_month":5000,"on_exceeded":"warn"}}},
+	  "pricing": {"on_missing":"allow","overrides":{"anthropic-direct":{"claude-sonnet-4-6":{"input_per_mtok":3.0,"output_per_mtok":15.0}}}}
+	}`), 0o600)
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tm := cfg.Teams["platform-eng"]
+	if tm.RateLimit.RequestsPerMinute != 300 || tm.Quota.TokensPerDay != 50000000 || tm.Quota.OnExceeded != "block" || tm.Budget.OnExceeded != "warn" {
+		t.Fatalf("team: %+v", tm)
+	}
+	if cfg.Pricing.OnMissing != "allow" {
+		t.Fatalf("pricing on_missing: %q", cfg.Pricing.OnMissing)
+	}
+}
+
 func TestLoadKeyStoreAuditAdmin(t *testing.T) {
 	t.Setenv("ADMIN_TOK", "secret-admin")
 	dir := t.TempDir()

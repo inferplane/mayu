@@ -25,6 +25,23 @@ func TestCanonicalToConverseExtractsTextAndSystem(t *testing.T) {
 	}
 }
 
+func TestToConverseRequestCarriesSamplingParams(t *testing.T) {
+	raw := []byte(`{"model":"kimi","max_tokens":256,"temperature":0.7,"top_p":0.9,"stop_sequences":["END"],"messages":[{"role":"user","content":"hi"}]}`)
+	cr, err := toConverseRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.Inference["temperature"] != 0.7 {
+		t.Fatalf("temperature not carried: %v", cr.Inference["temperature"])
+	}
+	if cr.Inference["topP"] != 0.9 {
+		t.Fatalf("top_p not carried: %v", cr.Inference["topP"])
+	}
+	if ss, ok := cr.Inference["stopSequences"].([]string); !ok || len(ss) != 1 || ss[0] != "END" {
+		t.Fatalf("stop_sequences not carried: %v", cr.Inference["stopSequences"])
+	}
+}
+
 func TestProviderCompleteConverse(t *testing.T) {
 	fc := &fakeConverser{resp: ConverseResponse{Text: "brief answer", StopReason: "end_turn", InputTokens: 5, OutputTokens: 3}}
 	p := &provider{conv: fc, modelAPI: map[string]string{"moonshot.kimi-k2": "converse"}}

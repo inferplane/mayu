@@ -5,6 +5,7 @@ package router
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/inferplane/inferplane/internal/config"
 	"github.com/inferplane/inferplane/providers"
@@ -13,10 +14,59 @@ import (
 type Router struct {
 	provs  map[string]providers.Provider
 	models map[string]config.ModelConfig
+	brk    *breaker
 }
 
 func New(provs map[string]providers.Provider, models map[string]config.ModelConfig) *Router {
-	return &Router{provs: provs, models: models}
+	// 5 consecutive failures → open, 1s base backoff (doubling, capped 30s).
+	return &Router{provs: provs, models: models, brk: newBreaker(5, time.Second)}
+}
+
+// ChainTarget is one resolved fallback target: the provider instance, its
+// CONFIG provider name (pricing/breaker key), and the upstream model id.
+type ChainTarget struct {
+	Provider     providers.Provider
+	ProviderName string
+	Upstream     string
+}
+
+// ResolveChain returns every configured target for a model in priority order,
+// skipping providers whose circuit breaker is open. If ALL breakers are open
+// it returns the full chain anyway (better to try than hard-fail). Targets
+// pointing at an unknown provider are silently skipped.
+func (r *Router) ResolveChain(model string) ([]ChainTarget, error) {
+	mc, ok := r.models[model]
+	if !ok || len(mc.Targets) == 0 {
+		return nil, fmt.Errorf("router: no route for model %q", model)
+	}
+	var allowed, all []ChainTarget
+	for _, t := range mc.Targets {
+		p, ok := r.provs[t.Provider]
+		if !ok {
+			continue // config drift: target points at unknown provider
+		}
+		ct := ChainTarget{Provider: p, ProviderName: t.Provider, Upstream: t.Model}
+		all = append(all, ct)
+		if r.brk.Allow(t.Provider) {
+			allowed = append(allowed, ct)
+		}
+	}
+	if len(all) == 0 {
+		return nil, fmt.Errorf("router: model %q points at unknown provider(s)", model)
+	}
+	if len(allowed) == 0 {
+		return all, nil // all breakers open → try anyway
+	}
+	return allowed, nil
+}
+
+// RecordResult feeds a per-provider call outcome to the circuit breaker.
+func (r *Router) RecordResult(providerName string, ok bool) {
+	if ok {
+		r.brk.RecordSuccess(providerName)
+	} else {
+		r.brk.RecordFailure(providerName)
+	}
 }
 
 // Resolve returns the provider and upstream model id for a requested model.
@@ -31,6 +81,25 @@ func (r *Router) Resolve(model string) (providers.Provider, string, error) {
 		return nil, "", fmt.Errorf("router: model %q points at unknown provider %q", model, t.Provider)
 	}
 	return p, t.Model, nil
+}
+
+// ResolveProvider is like Resolve but also returns the CONFIG provider name
+// (the key under `providers:` in config, e.g. "anthropic-direct"), which is the
+// first element of the pricing table key. The provider's own Name() reports its
+// TYPE ("anthropic"/"bedrock"), not the config name, so callers that key
+// pricing must use this config name to stay consistent with Bundled() and
+// config overrides.
+func (r *Router) ResolveProvider(model string) (prov providers.Provider, providerName, upstream string, err error) {
+	mc, ok := r.models[model]
+	if !ok || len(mc.Targets) == 0 {
+		return nil, "", "", fmt.Errorf("router: no route for model %q", model)
+	}
+	t := mc.Targets[0] // M2: first target only
+	p, ok := r.provs[t.Provider]
+	if !ok {
+		return nil, "", "", fmt.Errorf("router: model %q points at unknown provider %q", model, t.Provider)
+	}
+	return p, t.Provider, t.Model, nil
 }
 
 // AllModels returns every configured model name (for /v1/models in M2; M3

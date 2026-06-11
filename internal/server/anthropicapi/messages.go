@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/inferplane/inferplane/internal/audit"
+	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
+	"github.com/inferplane/inferplane/internal/pricing"
 	"github.com/inferplane/inferplane/internal/principal"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/pkg/schema"
@@ -19,13 +21,21 @@ import (
 
 type MessagesHandler struct {
 	r   *router.Router
-	aud *audit.Writer // nil-safe: unit tests may omit
+	aud *audit.Writer        // nil-safe: unit tests may omit
+	gov *governance.Governor // nil-safe: governance disabled when nil
 }
 
 func NewMessagesHandler(r *router.Router) *MessagesHandler { return &MessagesHandler{r: r} }
 
 func NewMessagesHandlerWithAudit(r *router.Router, aud *audit.Writer) *MessagesHandler {
 	return &MessagesHandler{r: r, aud: aud}
+}
+
+// NewMessagesHandlerFull wires the governance pipeline (rate/quota/budget
+// pre-check + cost settlement) alongside audit. gov may be nil to disable
+// governance.
+func NewMessagesHandlerFull(r *router.Router, aud *audit.Writer, gov *governance.Governor) *MessagesHandler {
+	return &MessagesHandler{r: r, aud: aud, gov: gov}
 }
 
 func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -53,7 +63,7 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 403, "permission_error", "model not allowed for this key: "+parsed.Model)
 		return
 	}
-	prov, upstream, err := h.r.Resolve(parsed.Model)
+	chain, err := h.r.ResolveChain(parsed.Model)
 	if err != nil {
 		// Unknown model is recorded as a started record carrying the 404 outcome,
 		// for consistency with the 403 allow-list deny above.
@@ -61,26 +71,79 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 404, "not_found_error", "unknown model: "+parsed.Model)
 		return
 	}
-	// request_started: the request passed auth + allow-list and resolved a target.
-	h.audit(p, parsed.Model, upstream, nil)
+	// Governance pre-check (rate/quota/budget) BEFORE the upstream call. A block
+	// is recorded as a started record carrying the deny status.
+	if h.gov != nil {
+		dec := h.gov.PreCheck(p.Team, estimateTokens(raw))
+		if !dec.Allowed {
+			h.audit(p, parsed.Model, chain[0].Upstream, &audit.OutcomeRef{Status: dec.Status})
+			writeErr(w, dec.Status, govErrType(dec.Status), dec.Reason)
+			return
+		}
+	}
+	// request_started: the request passed auth + allow-list + governance and
+	// resolved a target (the first in the priority chain).
+	h.audit(p, parsed.Model, chain[0].Upstream, nil)
 	stream := parsed.Stream != nil && *parsed.Stream
-	pr := &providers.ProxyRequest{
-		Model: parsed.Model, Upstream: upstream, Parsed: &parsed,
-		RawBody: raw, Headers: req.Header, Stream: stream,
+
+	// Priority fallback chain (§4.5): try targets in order. A pre-TTFT failure
+	// (Complete error, or Stream() error before the first event) falls back to
+	// the next target, records the breaker result, and sets x-inferplane-fallback.
+	// Once a stream yields its first event the response is committed — no fallback.
+	for i, ct := range chain {
+		pr := &providers.ProxyRequest{
+			Model: parsed.Model, Upstream: ct.Upstream, Parsed: &parsed,
+			RawBody: raw, Headers: req.Header, Stream: stream,
+			IngressProtocol: "anthropic",
+		}
+		last := i == len(chain)-1
+		if i > 0 {
+			// We fell back to this target; advertise it to the client.
+			w.Header().Set("x-inferplane-fallback", ct.ProviderName)
+		}
+		var retriable bool
+		if stream {
+			retriable = h.serveStream(w, req, ct.Provider, pr, p, parsed.Model, ct.ProviderName, ct.Upstream, last)
+		} else {
+			retriable = h.serveComplete(w, req, ct.Provider, pr, p, parsed.Model, ct.ProviderName, ct.Upstream, last)
+		}
+		if !retriable {
+			return // committed (success, or terminal error on the last target)
+		}
+		// Pre-TTFT failure with a next target available → record + fall back.
+		h.r.RecordResult(ct.ProviderName, false)
 	}
-	if stream {
-		h.serveStream(w, req, prov, pr, p, parsed.Model, upstream)
-		return
-	}
-	h.serveComplete(w, req, prov, pr, p, parsed.Model, upstream)
 }
 
-func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, upstream string) {
+// govErrType maps a governance deny status to the Anthropic error `type`.
+func govErrType(status int) string {
+	switch status {
+	case 429:
+		return "rate_limit_error"
+	case 402:
+		return "permission_error"
+	default:
+		return "api_error"
+	}
+}
+
+// serveComplete proxies one non-streaming target. It returns retriable=true
+// when the call failed pre-TTFT (transport error, or an upstream 5xx/429) AND a
+// next target exists (!last) — the caller then falls back. Otherwise it writes
+// the response/error to the client and returns false (committed).
+func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool) (retriable bool) {
 	resp, err := prov.Complete(req.Context(), pr)
 	if err != nil {
+		if !last {
+			return true // transport error → fall back
+		}
 		writeErr(w, 502, "api_error", "upstream error")
-		h.auditCompleted(p, model, upstream, 502, nil)
-		return
+		h.auditCompleted(p, model, upstream, 502, nil, nil)
+		return false
+	}
+	// An upstream 5xx/429 is a retriable failure when a next target exists.
+	if !last && (resp.StatusCode >= 500 || resp.StatusCode == 429) {
+		return true
 	}
 	if resp.Headers != nil {
 		copyUpstreamHeaders(w.Header(), resp.Headers)
@@ -90,17 +153,33 @@ func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request
 	}
 	w.WriteHeader(resp.StatusCode)
 	w.Write(resp.RawBody) // tee verbatim (incl. non-2xx error bodies)
+	// A 2xx is a breaker success; a committed non-2xx on the last target is not
+	// counted (it was teed as the client's real upstream error).
+	if resp.StatusCode < 400 {
+		h.r.RecordResult(providerName, true)
+	}
 	// resp.Parsed.Usage is the observation hook for M3 audit / M5 quota.
 	var usage *audit.UsageRef
+	var cost *audit.CostRef
 	if resp.Parsed != nil {
 		usage = usageRef(resp.Parsed.Usage)
+		cost = h.settle(p.Team, providerName, model, upstream, resp.Parsed.Usage)
 	}
-	h.auditCompleted(p, model, upstream, resp.StatusCode, usage)
+	h.auditCompleted(p, model, upstream, resp.StatusCode, usage, cost)
+	return false
 }
 
-func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, upstream string) {
+// serveStream proxies one streaming target. Fallback is PRE-TTFT ONLY: if
+// Stream() returns an error before any event is yielded AND a next target exists
+// (!last), it returns retriable=true and the caller falls back. Once the first
+// event is teed the response is committed; a mid-stream error terminates the
+// stream (no fallback). Returns false in all committed cases.
+func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool) (retriable bool) {
 	seq, err := prov.Stream(req.Context(), pr)
 	if err != nil {
+		if !last {
+			return true // pre-TTFT failure → fall back
+		}
 		// Tee a non-2xx upstream error verbatim (status/body) so the client
 		// sees Anthropic's real rate-limit/error response, not a fabricated one.
 		var ue *providers.UpstreamError
@@ -111,37 +190,68 @@ func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, 
 			}
 			w.WriteHeader(ue.StatusCode)
 			w.Write(ue.Body)
-			h.auditCompleted(p, model, upstream, ue.StatusCode, nil)
-			return
+			h.auditCompleted(p, model, upstream, ue.StatusCode, nil, nil)
+			return false
 		}
 		writeErr(w, 502, "api_error", "upstream stream error")
-		h.auditCompleted(p, model, upstream, 502, nil)
-		return
+		h.auditCompleted(p, model, upstream, 502, nil, nil)
+		return false
 	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeErr(w, 500, "api_error", "streaming unsupported")
-		h.auditCompleted(p, model, upstream, 500, nil)
-		return
+		h.auditCompleted(p, model, upstream, 500, nil, nil)
+		return false
 	}
+	// Stream() succeeded → the target is healthy (breaker success, post-TTFT).
+	h.r.RecordResult(providerName, true)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(200)
 	var usage *audit.UsageRef
+	var lastUsage *schema.Usage
 	for ev, err := range seq {
 		if err != nil {
 			// upstream broke mid-stream; client sees truncated stream (M5: error event)
 			h.auditCompletedPartial(p, model, upstream, usage)
-			return
+			return false
 		}
 		w.Write(ev.Raw) // tee original bytes verbatim
 		flusher.Flush()
 		// ev.Chunk.Usage on message_delta is the settlement observation point (M3/M5).
 		if ev.Chunk != nil && ev.Chunk.Usage != nil {
 			usage = usageRef(ev.Chunk.Usage)
+			lastUsage = ev.Chunk.Usage
 		}
 	}
-	h.auditCompleted(p, model, upstream, 200, usage)
+	cost := h.settle(p.Team, providerName, model, upstream, lastUsage)
+	h.auditCompleted(p, model, upstream, 200, usage, cost)
+	return false
+}
+
+// settle maps the observed schema.Usage to pricing.Usage and runs the
+// Governor's post-call settlement (quota debit + cost + budget debit), returning
+// the audit CostRef. nil when governance is disabled or there is no usage.
+//
+// M5 mapping notes: schema does not yet split cache_creation by TTL, so the
+// whole cache_creation_input_tokens total maps to CacheWrite5m as a
+// conservative default (the cheaper 5m tier); cache_read maps to CacheRead.
+func (h *MessagesHandler) settle(team, providerName, model, upstream string, u *schema.Usage) *audit.CostRef {
+	if h.gov == nil || u == nil {
+		return nil
+	}
+	pu := pricing.Usage{
+		Input:        deref(u.InputTokens),
+		Output:       deref(u.OutputTokens),
+		CacheRead:    deref(u.CacheReadInputTokens),
+		CacheWrite5m: deref(u.CacheCreationInputTokens),
+	}
+	cost, missing := h.gov.Settle(team, providerName, upstream, pu)
+	return &audit.CostRef{
+		AmountUSDMicros: cost,
+		PricingMissing:  missing,
+		PricingVersion:  h.gov.PricingVersion(),
+	}
 }
 
 // copyUpstreamHeaders tees upstream response headers to the client, skipping
@@ -180,7 +290,7 @@ func (h *MessagesHandler) audit(p keystore.Principal, model, upstream string, ou
 
 // auditCompleted emits a request_completed record with the final status and
 // observed usage. No-op without an audit writer.
-func (h *MessagesHandler) auditCompleted(p keystore.Principal, model, upstream string, status int, usage *audit.UsageRef) {
+func (h *MessagesHandler) auditCompleted(p keystore.Principal, model, upstream string, status int, usage *audit.UsageRef, cost *audit.CostRef) {
 	if h.aud == nil {
 		return
 	}
@@ -193,6 +303,7 @@ func (h *MessagesHandler) auditCompleted(p keystore.Principal, model, upstream s
 		Request:       audit.RequestRef{Ingress: "anthropic", ModelRequested: model, ModelResolved: upstream},
 		Outcome:       &audit.OutcomeRef{Status: status},
 		Usage:         usage,
+		Cost:          cost,
 	})
 }
 

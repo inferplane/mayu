@@ -43,6 +43,16 @@ type LatencyRef struct {
 	TotalMs int64 `json:"total_ms"`
 }
 
+// CostRef is the settled per-request cost in integer µUSD (filled by the M5
+// governance Settle path). PricingMissing marks an on_missing=allow request
+// whose (provider,model) rate was absent (cost reported 0); PricingVersion
+// records the rate table version used.
+type CostRef struct {
+	AmountUSDMicros int64  `json:"amount_usd_micros"`
+	PricingMissing  bool   `json:"pricing_missing"`
+	PricingVersion  string `json:"pricing_version,omitempty"`
+}
+
 // Record is one audit entry. Field order here defines the canonical JSON used
 // for hashing (encoding/json marshals struct fields in declaration order).
 type Record struct {
@@ -55,7 +65,7 @@ type Record struct {
 	Request       RequestRef   `json:"request"`
 	Outcome       *OutcomeRef  `json:"outcome,omitempty"`
 	Usage         *UsageRef    `json:"usage,omitempty"`
-	Cost          *struct{}    `json:"cost,omitempty"` // M3: always nil (M5 fills)
+	Cost          *CostRef     `json:"cost,omitempty"` // nil until settled (M5)
 	Latency       *LatencyRef  `json:"latency,omitempty"`
 	TraceID       *string      `json:"trace_id"` // reserved (v0.2 OTel)
 	PrevHash      string       `json:"prev_hash"`

@@ -21,7 +21,7 @@ func TestDataMuxRoutesAndAuths(t *testing.T) {
 	}
 	r := router.New(provs, models)
 	store := stubStore{key: "dev-key", p: keystore.Principal{KeyID: "ik_abc", Team: "platform-eng", AllowedModels: []string{"*"}}}
-	mux := DataMux(r, store, nil)
+	mux := DataMux(r, store, nil, nil)
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	rec := httptest.NewRecorder()
@@ -36,6 +36,54 @@ func TestDataMuxRoutesAndAuths(t *testing.T) {
 	mux.ServeHTTP(rec2, req2)
 	if rec2.Code != 200 {
 		t.Fatalf("auth /v1/models = %d, want 200", rec2.Code)
+	}
+}
+
+func TestDataMuxModelsContentNegotiation(t *testing.T) {
+	provs := map[string]providers.Provider{"p": mockprovider.New("claude-sonnet-4-6")}
+	models := map[string]config.ModelConfig{
+		"claude-sonnet-4-6": {Targets: []config.Target{{Provider: "p", Model: "claude-sonnet-4-6"}}},
+	}
+	r := router.New(provs, models)
+	store := stubStore{key: "dev-key", p: keystore.Principal{KeyID: "ik_abc", Team: "platform-eng", AllowedModels: []string{"*"}}}
+	mux := DataMux(r, store, nil, nil)
+
+	// OpenAI client (no anthropic-version header) → OpenAI {"object":"list"} shape.
+	reqO := httptest.NewRequest("GET", "/v1/models", nil)
+	reqO.Header.Set("x-api-key", "dev-key")
+	recO := httptest.NewRecorder()
+	mux.ServeHTTP(recO, reqO)
+	if recO.Code != 200 || !strings.Contains(recO.Body.String(), `"object":"list"`) {
+		t.Fatalf("openai /v1/models = %d body %s", recO.Code, recO.Body.String())
+	}
+
+	// Anthropic client (anthropic-version header) → Anthropic {"data":[...],"has_more"} shape.
+	reqA := httptest.NewRequest("GET", "/v1/models", nil)
+	reqA.Header.Set("x-api-key", "dev-key")
+	reqA.Header.Set("anthropic-version", "2023-06-01")
+	recA := httptest.NewRecorder()
+	mux.ServeHTTP(recA, reqA)
+	if recA.Code != 200 || !strings.Contains(recA.Body.String(), `"has_more"`) {
+		t.Fatalf("anthropic /v1/models = %d body %s", recA.Code, recA.Body.String())
+	}
+}
+
+func TestDataMuxChatCompletionsRoutes(t *testing.T) {
+	provs := map[string]providers.Provider{"p": mockprovider.New("claude-sonnet-4-6")}
+	models := map[string]config.ModelConfig{
+		"claude-sonnet-4-6": {Targets: []config.Target{{Provider: "p", Model: "claude-sonnet-4-6"}}},
+	}
+	r := router.New(provs, models)
+	store := stubStore{key: "dev-key", p: keystore.Principal{KeyID: "ik_abc", Team: "platform-eng", AllowedModels: []string{"*"}}}
+	mux := DataMux(r, store, nil, nil)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("x-api-key", "dev-key")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"chat.completion"`) {
+		t.Fatalf("/v1/chat/completions = %d body %s", rec.Code, rec.Body.String())
 	}
 }
 

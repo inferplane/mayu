@@ -82,12 +82,60 @@ type AuditConfig struct {
 	Sinks       []AuditSink `json:"sinks"`
 }
 
+// RateLimitConfig is a team's instance-local token-bucket gate (§5.3): RPM and
+// TPM pre-block thresholds.
+type RateLimitConfig struct {
+	RequestsPerMinute int64 `json:"requests_per_minute"`
+	TokensPerMinute   int64 `json:"tokens_per_minute"`
+}
+
+// QuotaConfig is a team's daily/monthly token window (two-phase optimistic
+// check + post-debit). OnExceeded selects block|warn.
+type QuotaConfig struct {
+	TokensPerDay   int64  `json:"tokens_per_day"`
+	TokensPerMonth int64  `json:"tokens_per_month"`
+	OnExceeded     string `json:"on_exceeded"` // block|warn
+}
+
+// BudgetConfig is a team's monthly spend ceiling. USDPerMonth is a human USD
+// float in config, converted to µUSD at use.
+type BudgetConfig struct {
+	USDPerMonth float64 `json:"usd_per_month"` // converted to µUSD at use
+	OnExceeded  string  `json:"on_exceeded"`
+}
+
+type TeamConfig struct {
+	AllowedModels []string        `json:"allowed_models"`
+	RateLimit     RateLimitConfig `json:"rate_limit"`
+	Quota         QuotaConfig     `json:"quota"`
+	Budget        BudgetConfig    `json:"budget"`
+}
+
+// RateConfig holds per-MTok rates as human USD floats in config, converted to
+// µUSD-per-MTok int64 at load.
+type RateConfig struct {
+	InputPerMTok        float64 `json:"input_per_mtok"`
+	OutputPerMTok       float64 `json:"output_per_mtok"`
+	CacheReadPerMTok    float64 `json:"cache_read_per_mtok"`
+	CacheWrite5mPerMTok float64 `json:"cache_write_5m_per_mtok"`
+	CacheWrite1hPerMTok float64 `json:"cache_write_1h_per_mtok"`
+}
+
+// PricingConfig configures cost computation: on_missing policy (allow|block)
+// and per-(provider,model) rate overrides.
+type PricingConfig struct {
+	OnMissing string                           `json:"on_missing"` // allow|block
+	Overrides map[string]map[string]RateConfig `json:"overrides"`  // provider → model → rate
+}
+
 type Config struct {
 	Server    ServerConfig              `json:"server"`
 	Providers map[string]ProviderConfig `json:"providers"`
 	Models    map[string]ModelConfig    `json:"models"`
 	KeyStore  KeyStoreConfig            `json:"key_store"`
 	Audit     AuditConfig               `json:"audit"`
+	Teams     map[string]TeamConfig     `json:"teams"`
+	Pricing   PricingConfig             `json:"pricing"`
 }
 
 func Load(path string) (*Config, error) {

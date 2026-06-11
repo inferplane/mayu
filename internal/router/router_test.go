@@ -26,6 +26,28 @@ func TestResolveModel(t *testing.T) {
 	}
 }
 
+func TestResolveChainSkipsOpenBreaker(t *testing.T) {
+	provs := map[string]providers.Provider{
+		"a": mockprovider.New("m"), "b": mockprovider.New("m"),
+	}
+	models := map[string]config.ModelConfig{
+		"m": {Targets: []config.Target{{Provider: "a", Model: "m1"}, {Provider: "b", Model: "m2"}}},
+	}
+	r := New(provs, models)
+	// trip provider "a" breaker (5 failures)
+	for i := 0; i < 5; i++ {
+		r.RecordResult("a", false)
+	}
+	chain, err := r.ResolveChain("m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// "a" open → chain should start with "b"
+	if len(chain) == 0 || chain[0].ProviderName != "b" {
+		t.Fatalf("open breaker not skipped: %+v", chain)
+	}
+}
+
 func TestResolveUnknownProvider(t *testing.T) {
 	// model maps to a provider key that isn't in the providers map (config drift).
 	provs := map[string]providers.Provider{} // empty
