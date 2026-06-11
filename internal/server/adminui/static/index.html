@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>inferplane — admin key console</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>inferplane</h1>
+    <p class="sub">admin key console — minimal by design (ADR-001)</p>
+  </header>
+
+  <section id="auth">
+    <h2>Admin token</h2>
+    <p class="hint">Paste the admin Bearer token. It is held in page memory only —
+      never stored, never sent anywhere except this gateway's <code>/admin/keys</code> API.</p>
+    <form id="token-form">
+      <input id="token" type="password" placeholder="admin token" autocomplete="off" required>
+      <button type="submit">Connect</button>
+    </form>
+    <p id="auth-status" class="status"></p>
+  </section>
+
+  <section id="console" hidden>
+    <h2>Issue a key</h2>
+    <form id="create-form">
+      <input id="team" type="text" placeholder="team (e.g. demo)" required>
+      <input id="models" type="text" placeholder="allowed models, comma-separated (* for all)" required>
+      <button type="submit">Create key</button>
+    </form>
+    <div id="plaintext-box" hidden>
+      <p class="warn">Copy this key now — it is shown once and is not recoverable.</p>
+      <code id="plaintext"></code>
+      <button id="copy" type="button">Copy</button>
+    </div>
+
+    <h2>Keys</h2>
+    <table id="keys">
+      <thead><tr><th>key id</th><th>team</th><th>allowed models</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <script src="app.js"></script>
+</body>
+</html>
