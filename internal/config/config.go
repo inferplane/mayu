@@ -51,11 +51,20 @@ type AdminAuth struct {
 	Tokens    []string    `json:"-"` // resolved at load
 }
 
+// TLSConfig optionally terminates TLS on the data plane (non-K8s single binary,
+// design §2.3). Both files must be set, or neither. K8s deployments terminate
+// TLS at the ingress/mesh and leave this empty.
+type TLSConfig struct {
+	CertFile string `json:"cert_file"`
+	KeyFile  string `json:"key_file"`
+}
+
 type ServerConfig struct {
 	Listen      string    `json:"listen"`
 	AdminListen string    `json:"admin_listen"`
 	DrainGrace  string    `json:"drain_grace"`
 	AdminAuth   AdminAuth `json:"admin_auth"`
+	TLS         TLSConfig `json:"tls"`
 }
 
 // KeyStoreConfig selects the virtual-key backend. M3 ships "sqlite";

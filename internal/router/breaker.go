@@ -68,3 +68,18 @@ func (b *breaker) RecordSuccess(provider string) {
 		s.backoff = 0
 	}
 }
+
+// State reports the circuit state for metrics: 0=closed, 1=half-open (open
+// window elapsed, awaiting a trial), 2=open (within the backoff window).
+func (b *breaker) State(provider string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	s := b.state[provider]
+	if s == nil || s.openUntil.IsZero() {
+		return 0 // closed
+	}
+	if b.now().Before(s.openUntil) {
+		return 2 // open
+	}
+	return 1 // half-open (window elapsed; next call is a trial)
+}

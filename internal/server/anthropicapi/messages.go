@@ -11,6 +11,7 @@ import (
 	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
+	"github.com/inferplane/inferplane/internal/metrics"
 	"github.com/inferplane/inferplane/internal/pricing"
 	"github.com/inferplane/inferplane/internal/principal"
 	"github.com/inferplane/inferplane/internal/router"
@@ -19,10 +20,22 @@ import (
 	"github.com/inferplane/inferplane/providers"
 )
 
+const ingressName = "anthropic"
+
+// rejectedModelLabel is the bounded sentinel used as the Prometheus `model`
+// label on pre-resolution rejections (403 allow-list deny / 404 unknown model).
+// At those points the model string is still attacker-controlled and has NOT been
+// validated against config; recording it raw would let a client mint unbounded
+// metric series (a cardinality DoS, §6.2 — team/model labels must come from
+// config-declared values only). The requested model is still kept in the audit
+// record, which is not a Prometheus label and carries no cardinality concern.
+const rejectedModelLabel = "_rejected"
+
 type MessagesHandler struct {
-	r   *router.Router
-	aud *audit.Writer        // nil-safe: unit tests may omit
-	gov *governance.Governor // nil-safe: governance disabled when nil
+	r       *router.Router
+	aud     *audit.Writer        // nil-safe: unit tests may omit
+	gov     *governance.Governor // nil-safe: governance disabled when nil
+	metrics *metrics.Metrics     // nil-safe: no-op when nil
 }
 
 func NewMessagesHandler(r *router.Router) *MessagesHandler { return &MessagesHandler{r: r} }
@@ -38,7 +51,14 @@ func NewMessagesHandlerFull(r *router.Router, aud *audit.Writer, gov *governance
 	return &MessagesHandler{r: r, aud: aud, gov: gov}
 }
 
+// NewMessagesHandlerMetrics is NewMessagesHandlerFull plus the Prometheus
+// metrics sink (request/token/duration/ttft/fallback). m may be nil (no-op).
+func NewMessagesHandlerMetrics(r *router.Router, aud *audit.Writer, gov *governance.Governor, m *metrics.Metrics) *MessagesHandler {
+	return &MessagesHandler{r: r, aud: aud, gov: gov, metrics: m}
+}
+
 func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	start := time.Now()
 	raw, err := io.ReadAll(req.Body)
 	if err != nil {
 		writeErr(w, 400, "invalid_request_error", "could not read request body")
@@ -60,6 +80,8 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if !p.Allows(parsed.Model) {
 		// A deny is recorded as a started record carrying the 403 outcome.
 		h.audit(p, parsed.Model, "", &audit.OutcomeRef{Status: 403})
+		// Pre-resolution reject: model is still attacker-controlled → sentinel label.
+		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 403, time.Since(start).Seconds(), 0)
 		writeErr(w, 403, "permission_error", "model not allowed for this key: "+parsed.Model)
 		return
 	}
@@ -68,6 +90,8 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		// Unknown model is recorded as a started record carrying the 404 outcome,
 		// for consistency with the 403 allow-list deny above.
 		h.audit(p, parsed.Model, "", &audit.OutcomeRef{Status: 404})
+		// Pre-resolution reject: model is still attacker-controlled → sentinel label.
+		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 404, time.Since(start).Seconds(), 0)
 		writeErr(w, 404, "not_found_error", "unknown model: "+parsed.Model)
 		return
 	}
@@ -77,6 +101,7 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		dec := h.gov.PreCheck(p.Team, estimateTokens(raw))
 		if !dec.Allowed {
 			h.audit(p, parsed.Model, chain[0].Upstream, &audit.OutcomeRef{Status: dec.Status})
+			h.metrics.ObserveRequest(ingressName, parsed.Model, chain[0].ProviderName, p.Team, dec.Status, time.Since(start).Seconds(), 0)
 			writeErr(w, dec.Status, govErrType(dec.Status), dec.Reason)
 			return
 		}
@@ -103,15 +128,16 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 		var retriable bool
 		if stream {
-			retriable = h.serveStream(w, req, ct.Provider, pr, p, parsed.Model, ct.ProviderName, ct.Upstream, last)
+			retriable = h.serveStream(w, req, ct.Provider, pr, p, parsed.Model, ct.ProviderName, ct.Upstream, last, start)
 		} else {
-			retriable = h.serveComplete(w, req, ct.Provider, pr, p, parsed.Model, ct.ProviderName, ct.Upstream, last)
+			retriable = h.serveComplete(w, req, ct.Provider, pr, p, parsed.Model, ct.ProviderName, ct.Upstream, last, start)
 		}
 		if !retriable {
 			return // committed (success, or terminal error on the last target)
 		}
 		// Pre-TTFT failure with a next target available → record + fall back.
 		h.r.RecordResult(ct.ProviderName, false)
+		h.metrics.ObserveFallback(parsed.Model, ct.ProviderName, chain[i+1].ProviderName, "upstream_error")
 	}
 }
 
@@ -131,7 +157,7 @@ func govErrType(status int) string {
 // when the call failed pre-TTFT (transport error, or an upstream 5xx/429) AND a
 // next target exists (!last) — the caller then falls back. Otherwise it writes
 // the response/error to the client and returns false (committed).
-func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool) (retriable bool) {
+func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool, start time.Time) (retriable bool) {
 	resp, err := prov.Complete(req.Context(), pr)
 	if err != nil {
 		if !last {
@@ -139,6 +165,7 @@ func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request
 		}
 		writeErr(w, 502, "api_error", "upstream error")
 		h.auditCompleted(p, model, upstream, 502, nil, nil)
+		h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 502, time.Since(start).Seconds(), 0)
 		return false
 	}
 	// An upstream 5xx/429 is a retriable failure when a next target exists.
@@ -164,8 +191,10 @@ func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request
 	if resp.Parsed != nil {
 		usage = usageRef(resp.Parsed.Usage)
 		cost = h.settle(p.Team, providerName, model, upstream, resp.Parsed.Usage)
+		h.observeTokens(model, providerName, p.Team, resp.Parsed.Usage)
 	}
 	h.auditCompleted(p, model, upstream, resp.StatusCode, usage, cost)
+	h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, resp.StatusCode, time.Since(start).Seconds(), 0)
 	return false
 }
 
@@ -174,7 +203,7 @@ func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request
 // (!last), it returns retriable=true and the caller falls back. Once the first
 // event is teed the response is committed; a mid-stream error terminates the
 // stream (no fallback). Returns false in all committed cases.
-func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool) (retriable bool) {
+func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool, start time.Time) (retriable bool) {
 	seq, err := prov.Stream(req.Context(), pr)
 	if err != nil {
 		if !last {
@@ -191,16 +220,19 @@ func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, 
 			w.WriteHeader(ue.StatusCode)
 			w.Write(ue.Body)
 			h.auditCompleted(p, model, upstream, ue.StatusCode, nil, nil)
+			h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, ue.StatusCode, time.Since(start).Seconds(), 0)
 			return false
 		}
 		writeErr(w, 502, "api_error", "upstream stream error")
 		h.auditCompleted(p, model, upstream, 502, nil, nil)
+		h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 502, time.Since(start).Seconds(), 0)
 		return false
 	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeErr(w, 500, "api_error", "streaming unsupported")
 		h.auditCompleted(p, model, upstream, 500, nil, nil)
+		h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 500, time.Since(start).Seconds(), 0)
 		return false
 	}
 	// Stream() succeeded → the target is healthy (breaker success, post-TTFT).
@@ -210,11 +242,16 @@ func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, 
 	w.WriteHeader(200)
 	var usage *audit.UsageRef
 	var lastUsage *schema.Usage
+	var ttft float64
 	for ev, err := range seq {
 		if err != nil {
 			// upstream broke mid-stream; client sees truncated stream (M5: error event)
 			h.auditCompletedPartial(p, model, upstream, usage)
+			h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 200, time.Since(start).Seconds(), ttft)
 			return false
+		}
+		if ttft == 0 {
+			ttft = time.Since(start).Seconds() // first streamed event = time to first token
 		}
 		w.Write(ev.Raw) // tee original bytes verbatim
 		flusher.Flush()
@@ -225,7 +262,9 @@ func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, 
 		}
 	}
 	cost := h.settle(p.Team, providerName, model, upstream, lastUsage)
+	h.observeTokens(model, providerName, p.Team, lastUsage)
 	h.auditCompleted(p, model, upstream, 200, usage, cost)
+	h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 200, time.Since(start).Seconds(), ttft)
 	return false
 }
 
@@ -252,6 +291,20 @@ func (h *MessagesHandler) settle(team, providerName, model, upstream string, u *
 		PricingMissing:  missing,
 		PricingVersion:  h.gov.PricingVersion(),
 	}
+}
+
+// observeTokens records the per-type token usage counters for one settled
+// request. Mirrors the settle() mapping (cache_creation → cache_write_5m). The
+// provider arg is the CONFIG provider name (pricing/metrics key), matching the
+// request metric labels. No-op when usage is nil or metrics is nil.
+func (h *MessagesHandler) observeTokens(model, provider, team string, u *schema.Usage) {
+	if u == nil {
+		return
+	}
+	h.metrics.ObserveTokenUsage("input", model, provider, team, deref(u.InputTokens))
+	h.metrics.ObserveTokenUsage("output", model, provider, team, deref(u.OutputTokens))
+	h.metrics.ObserveTokenUsage("cache_read", model, provider, team, deref(u.CacheReadInputTokens))
+	h.metrics.ObserveTokenUsage("cache_write_5m", model, provider, team, deref(u.CacheCreationInputTokens))
 }
 
 // copyUpstreamHeaders tees upstream response headers to the client, skipping

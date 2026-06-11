@@ -6,7 +6,9 @@ import (
 
 	"github.com/inferplane/inferplane/internal/budget"
 	"github.com/inferplane/inferplane/internal/limiter"
+	"github.com/inferplane/inferplane/internal/metrics"
 	"github.com/inferplane/inferplane/internal/pricing"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func testGovernor() *Governor {
@@ -14,7 +16,7 @@ func testGovernor() *Governor {
 		"t": {RatePerMin: 60, RateBurst: 2, TokensPerDay: 1000, QuotaExceeded: "block", BudgetMicrosPerMonth: 0, BudgetExceeded: "block"},
 	}
 	return NewGovernor(teams, limiter.NewMemory(), budget.NewMemory(),
-		pricing.New(pricing.OnMissingAllow, map[pricing.Key]pricing.Rate{{Provider: "p", Model: "m"}: {InputPerMTok: 1_000_000, OutputPerMTok: 1_000_000}}))
+		pricing.New(pricing.OnMissingAllow, map[pricing.Key]pricing.Rate{{Provider: "p", Model: "m"}: {InputPerMTok: 1_000_000, OutputPerMTok: 1_000_000}}), nil)
 }
 
 func TestGovernorQuotaBlocks(t *testing.T) {
@@ -39,9 +41,29 @@ func TestGovernorSettleComputesCost(t *testing.T) {
 	}
 }
 
+func TestGovernorSettleRecordsMetrics(t *testing.T) {
+	m := metrics.New()
+	teams := map[string]TeamPolicy{"t": {}}
+	// Known rate for (p,m); unknown for (p,ghost) → pricing_miss.
+	g := NewGovernor(teams, limiter.NewMemory(), budget.NewMemory(),
+		pricing.New(pricing.OnMissingAllow, map[pricing.Key]pricing.Rate{
+			{Provider: "p", Model: "m"}: {InputPerMTok: 1_000_000, OutputPerMTok: 1_000_000},
+		}), m)
+
+	g.Settle("t", "p", "m", pricing.Usage{Input: 1000, Output: 500}) // 1500 µUSD → 0.0015 USD
+	if got, err := testutil.GatherAndCount(m.Registry(), "inferplane_budget_spend_usd_total"); err != nil || got == 0 {
+		t.Fatalf("budget_spend not recorded (count=%d err=%v)", got, err)
+	}
+
+	g.Settle("t", "p", "ghost", pricing.Usage{Input: 10}) // no rate → pricing_miss
+	if got, err := testutil.GatherAndCount(m.Registry(), "inferplane_pricing_miss_total"); err != nil || got == 0 {
+		t.Fatalf("pricing_miss not recorded for unknown (provider,model) (count=%d err=%v)", got, err)
+	}
+}
+
 func TestGovernorTPMBlocks(t *testing.T) {
 	teams := map[string]TeamPolicy{"t": {TokensPerMinute: 1000}}
-	g := NewGovernor(teams, limiter.NewMemory(), budget.NewMemory(), pricing.New(pricing.OnMissingAllow, nil))
+	g := NewGovernor(teams, limiter.NewMemory(), budget.NewMemory(), pricing.New(pricing.OnMissingAllow, nil), nil)
 	// first request estimate 800 → ok; second estimate 800 → 1600>1000 burst → block
 	if d := g.PreCheck("t", 800); !d.Allowed {
 		t.Fatalf("first: %+v", d)

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,12 +19,14 @@ import (
 	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
 	"github.com/inferplane/inferplane/internal/limiter"
+	"github.com/inferplane/inferplane/internal/metrics"
 	"github.com/inferplane/inferplane/internal/pricing"
 	"github.com/inferplane/inferplane/internal/principal"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/pkg/schema"
 	"github.com/inferplane/inferplane/providers"
 	"github.com/inferplane/inferplane/providers/testing/mockprovider"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 // allowAll wraps a request with a principal whose allow-list is "*". The
@@ -297,7 +300,7 @@ func TestMessagesGovernorQuotaBlocks429(t *testing.T) {
 	teams := map[string]governance.TeamPolicy{
 		"platform-eng": {TokensPerDay: 1000, QuotaExceeded: "block"},
 	}
-	gov := governance.NewGovernor(teams, lim, budget.NewMemory(), govPricing())
+	gov := governance.NewGovernor(teams, lim, budget.NewMemory(), govPricing(), nil)
 	// Exhaust the team's daily token quota so the pre-check blocks.
 	lim.DebitQuota("quota:platform-eng", 1000, 24*time.Hour)
 
@@ -324,7 +327,7 @@ func TestMessagesGovernorSettlesCostIntoAudit(t *testing.T) {
 	teams := map[string]governance.TeamPolicy{
 		"platform-eng": {TokensPerDay: 1_000_000, QuotaExceeded: "block"},
 	}
-	gov := governance.NewGovernor(teams, limiter.NewMemory(), budget.NewMemory(), govPricing())
+	gov := governance.NewGovernor(teams, limiter.NewMemory(), budget.NewMemory(), govPricing(), nil)
 	h := NewMessagesHandlerFull(testRouter(), w, gov)
 	req := httptest.NewRequest("POST", "/v1/messages",
 		strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}`))
@@ -342,6 +345,57 @@ func TestMessagesGovernorSettlesCostIntoAudit(t *testing.T) {
 	}
 	if !strings.Contains(out, `"pricing_missing":false`) {
 		t.Fatalf("pricing present → pricing_missing must be false: %s", out)
+	}
+}
+
+func TestMessagesRecordsRequestMetric(t *testing.T) {
+	m := metrics.New()
+	h := NewMessagesHandlerMetrics(testRouter(), nil, nil, m)
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}`))
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik", Team: "t", AllowedModels: []string{"*"}})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != 200 {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+	// at least one inferplane_requests_total series recorded
+	got, err := testutil.GatherAndCount(m.Registry(), "inferplane_requests_total")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == 0 {
+		t.Fatal("inferplane_requests_total not recorded")
+	}
+	// token usage recorded too (mock reports input=10 output=5)
+	tok, err := testutil.GatherAndCount(m.Registry(), "gen_ai_client_token_usage_total")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok == 0 {
+		t.Fatal("gen_ai_client_token_usage_total not recorded")
+	}
+}
+
+func TestMessages404DoesNotLeakModelLabel(t *testing.T) {
+	m := metrics.New()
+	h := NewMessagesHandlerMetrics(testRouter(), nil, nil, m)
+	// 50 distinct unknown model names must NOT create 50 distinct metric series
+	for i := 0; i < 50; i++ {
+		body := `{"model":"attacker-` + strconv.Itoa(i) + `","messages":[]}`
+		req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body))
+		ctx := principal.With(req.Context(), keystore.Principal{AllowedModels: []string{"*"}})
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req.WithContext(ctx))
+		if rec.Code != 404 {
+			t.Fatalf("want 404, got %d", rec.Code)
+		}
+	}
+	// inferplane_requests_total must have a BOUNDED number of series (the sentinel),
+	// not 50. CollectAndCount counts series for the named metric.
+	n := testutil.CollectAndCount(m.Registry(), "inferplane_requests_total")
+	if n > 2 { // sentinel "_rejected" (+ possibly the zero-init series) — must be small, NOT ~50
+		t.Fatalf("unbounded model label cardinality: %d series for 50 distinct unknown models", n)
 	}
 }
 

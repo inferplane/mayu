@@ -1,0 +1,6 @@
+.git
+docs
+*.md
+charts
+deploy
+*_test.go

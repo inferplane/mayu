@@ -4,17 +4,20 @@ import (
 	"context"
 	"iter"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/inferplane/inferplane/internal/config"
 	"github.com/inferplane/inferplane/internal/keystore"
+	"github.com/inferplane/inferplane/internal/metrics"
 	"github.com/inferplane/inferplane/internal/openai"
 	"github.com/inferplane/inferplane/internal/principal"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/pkg/schema"
 	"github.com/inferplane/inferplane/providers"
 	"github.com/inferplane/inferplane/providers/testing/mockprovider"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
 func testRouter() *router.Router {
@@ -46,6 +49,26 @@ func TestChatNonStreamingConvertsMockCanonicalToOpenAI(t *testing.T) {
 	}
 }
 
+func TestChatRecordsRequestMetric(t *testing.T) {
+	m := metrics.New()
+	h := NewChatHandlerMetrics(testRouter(), nil, nil, m)
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}`))
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik", Team: "t", AllowedModels: []string{"*"}})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != 200 {
+		t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+	}
+	got, err := testutil.GatherAndCount(m.Registry(), "inferplane_requests_total")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == 0 {
+		t.Fatal("inferplane_requests_total not recorded")
+	}
+}
+
 func TestChatUnknownModel404(t *testing.T) {
 	h := NewChatHandler(testRouter())
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"nope","messages":[]}`))
@@ -54,6 +77,28 @@ func TestChatUnknownModel404(t *testing.T) {
 	h.ServeHTTP(rec, req.WithContext(ctx))
 	if rec.Code != 404 {
 		t.Fatalf("want 404, got %d", rec.Code)
+	}
+}
+
+func TestChat404DoesNotLeakModelLabel(t *testing.T) {
+	m := metrics.New()
+	h := NewChatHandlerMetrics(testRouter(), nil, nil, m)
+	// 50 distinct unknown model names must NOT create 50 distinct metric series.
+	for i := 0; i < 50; i++ {
+		body := `{"model":"attacker-` + strconv.Itoa(i) + `","messages":[]}`
+		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+		ctx := principal.With(req.Context(), keystore.Principal{AllowedModels: []string{"*"}})
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req.WithContext(ctx))
+		if rec.Code != 404 {
+			t.Fatalf("want 404, got %d", rec.Code)
+		}
+	}
+	// inferplane_requests_total must have a BOUNDED number of series (the sentinel),
+	// not 50.
+	n := testutil.CollectAndCount(m.Registry(), "inferplane_requests_total")
+	if n > 2 { // sentinel "_rejected" (+ possibly the zero-init series) — must be small, NOT ~50
+		t.Fatalf("unbounded model label cardinality: %d series for 50 distinct unknown models", n)
 	}
 }
 

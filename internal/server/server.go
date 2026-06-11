@@ -6,6 +6,7 @@ import (
 	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
+	"github.com/inferplane/inferplane/internal/metrics"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/internal/server/adminapi"
 	"github.com/inferplane/inferplane/internal/server/anthropicapi"
@@ -17,12 +18,13 @@ import (
 // store before reaching the router. aud is the audit writer (may be nil) used
 // for the two-phase request_started/request_completed records on /v1/messages.
 // gov is the governance pipeline (rate/quota/budget + cost); when non-nil the
-// /v1/messages handler enforces it, when nil governance is bypassed.
-func DataMux(r *router.Router, store keystore.Store, aud *audit.Writer, gov *governance.Governor) http.Handler {
+// /v1/messages handler enforces it, when nil governance is bypassed. m is the
+// Prometheus metrics sink threaded into the ingress handlers (nil → no-op).
+func DataMux(r *router.Router, store keystore.Store, aud *audit.Writer, gov *governance.Governor, m *metrics.Metrics) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("POST /v1/messages", anthropicapi.NewMessagesHandlerFull(r, aud, gov))
+	mux.Handle("POST /v1/messages", anthropicapi.NewMessagesHandlerMetrics(r, aud, gov, m))
 	mux.Handle("POST /v1/messages/count_tokens", anthropicapi.NewCountTokensHandler(r))
-	mux.Handle("POST /v1/chat/completions", openaiapi.NewChatHandlerFull(r, aud, gov))
+	mux.Handle("POST /v1/chat/completions", openaiapi.NewChatHandlerMetrics(r, aud, gov, m))
 	// Both the Anthropic (Claude Code) and OpenAI (OpenCode) clients hit the
 	// same GET /v1/models path but expect different response shapes, so we
 	// content-negotiate: Anthropic clients send an `anthropic-version` header,
@@ -46,13 +48,17 @@ func negotiateModels(anthropicH, openaiH http.Handler) http.Handler {
 	})
 }
 
-// AdminMux builds the admin-plane (:9090) handler: health + /admin/keys CRUD.
-// /healthz and /readyz are unauthenticated; /admin/keys is guarded by
-// AdminTokenAuth (design doc §5.5 splits metrics/health auth from admin auth).
-func AdminMux(store keystore.Store, adminTokens []string) http.Handler {
+// AdminMux builds the admin-plane (:9090) handler: health + /metrics + /admin/keys
+// CRUD. /healthz, /readyz, and /metrics are unauthenticated; /admin/keys is guarded
+// by AdminTokenAuth (design doc §5.5 splits metrics/health auth from admin auth).
+// When m is nil the /metrics endpoint is omitted.
+func AdminMux(store keystore.Store, adminTokens []string, m *metrics.Metrics) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
+	if m != nil {
+		mux.Handle("GET /metrics", metricsHandler(m)) // unauthenticated (§5.5)
+	}
 	keys := adminapi.NewKeysHandler(store)
 	mux.Handle("/admin/keys", AdminTokenAuth(adminTokens, keys))
 	mux.Handle("/admin/keys/", AdminTokenAuth(adminTokens, keys))

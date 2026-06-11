@@ -20,6 +20,7 @@ import (
 	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
 	"github.com/inferplane/inferplane/internal/limiter"
+	"github.com/inferplane/inferplane/internal/metrics"
 	"github.com/inferplane/inferplane/internal/pricing"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/internal/server"
@@ -76,6 +77,10 @@ func run(cfgPath string) error {
 		return err
 	}
 
+	// Prometheus metrics sink: owned by main, threaded into the audit writer,
+	// router, governor, and ingress handlers, and exposed on the admin /metrics.
+	m := metrics.New()
+
 	// Virtual-key store: KeyAuth resolves client keys against it (§5.1).
 	store, err := keystore.OpenSQLite(cfg.KeyStore.Path)
 	if err != nil {
@@ -92,6 +97,7 @@ func run(cfgPath string) error {
 	if err != nil {
 		return fmt.Errorf("audit: %w", err)
 	}
+	aud.SetMetrics(m) // audit_write_failures / buffer_utilization
 	defer aud.Close()
 
 	// model_api[providerName] = {upstreamModelID: api} — gathered from model
@@ -130,6 +136,7 @@ func run(cfgPath string) error {
 		provs[name] = p
 	}
 	r := router.New(provs, cfg.Models)
+	r.SetMetrics(m) // circuit_state
 
 	// Governance pipeline: map config → governance/pricing config shapes (which
 	// are decoupled from internal/config to avoid an import cycle), then build
@@ -161,16 +168,31 @@ func run(cfgPath string) error {
 		}
 	}
 	tbl := pricing.FromConfig(cfg.Pricing.OnMissing, overrides)
-	gov := governance.NewGovernor(policies, limiter.NewMemory(), budget.NewMemory(), tbl)
+	gov := governance.NewGovernor(policies, limiter.NewMemory(), budget.NewMemory(), tbl, m) // budget_spend / pricing_miss
 
-	dataSrv := &http.Server{Addr: cfg.Server.Listen, Handler: server.DataMux(r, store, aud, gov)}
-	adminSrv := &http.Server{Addr: cfg.Server.AdminListen, Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens)}
+	dataSrv := &http.Server{Addr: cfg.Server.Listen, Handler: server.DataMux(r, store, aud, gov, m)}
+	adminSrv := &http.Server{Addr: cfg.Server.AdminListen, Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, m)}
+
+	// Optional self-TLS for the data plane (design §2.3): non-K8s single-binary
+	// deployments can terminate their own TLS; K8s terminates at ingress/mesh.
+	// The pair must be fully specified or fully empty.
+	if err := server.ValidateTLS(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile); err != nil {
+		return err
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	errc := make(chan error, 2)
-	go func() { errc <- dataSrv.ListenAndServe() }()
+	go func() {
+		if cfg.Server.TLS.CertFile != "" {
+			errc <- dataSrv.ListenAndServeTLS(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile)
+		} else {
+			errc <- dataSrv.ListenAndServe()
+		}
+	}()
+	// Admin plane stays plaintext: /metrics, /healthz, /readyz are typically
+	// cluster-internal (scraped by Prometheus, probed by the kubelet).
 	go func() { errc <- adminSrv.ListenAndServe() }()
 	fmt.Printf("inferplane serving data=%s admin=%s\n", cfg.Server.Listen, cfg.Server.AdminListen)
 

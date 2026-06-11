@@ -8,19 +8,25 @@ import (
 	"time"
 
 	"github.com/inferplane/inferplane/internal/config"
+	"github.com/inferplane/inferplane/internal/metrics"
 	"github.com/inferplane/inferplane/providers"
 )
 
 type Router struct {
-	provs  map[string]providers.Provider
-	models map[string]config.ModelConfig
-	brk    *breaker
+	provs   map[string]providers.Provider
+	models  map[string]config.ModelConfig
+	brk     *breaker
+	metrics *metrics.Metrics // nil-safe: no-op when nil
 }
 
 func New(provs map[string]providers.Provider, models map[string]config.ModelConfig) *Router {
 	// 5 consecutive failures → open, 1s base backoff (doubling, capped 30s).
 	return &Router{provs: provs, models: models, brk: newBreaker(5, time.Second)}
 }
+
+// SetMetrics attaches the Prometheus metrics sink. The circuit-state gauge is
+// updated on every RecordResult. Pass nil (or never call) to disable.
+func (r *Router) SetMetrics(m *metrics.Metrics) { r.metrics = m }
 
 // ChainTarget is one resolved fallback target: the provider instance, its
 // CONFIG provider name (pricing/breaker key), and the upstream model id.
@@ -60,13 +66,15 @@ func (r *Router) ResolveChain(model string) ([]ChainTarget, error) {
 	return allowed, nil
 }
 
-// RecordResult feeds a per-provider call outcome to the circuit breaker.
+// RecordResult feeds a per-provider call outcome to the circuit breaker and
+// reflects the resulting circuit state into the metrics gauge.
 func (r *Router) RecordResult(providerName string, ok bool) {
 	if ok {
 		r.brk.RecordSuccess(providerName)
 	} else {
 		r.brk.RecordFailure(providerName)
 	}
+	r.metrics.SetCircuitState(providerName, r.brk.State(providerName))
 }
 
 // Resolve returns the provider and upstream model id for a requested model.

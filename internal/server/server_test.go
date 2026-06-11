@@ -9,6 +9,7 @@ import (
 
 	"github.com/inferplane/inferplane/internal/config"
 	"github.com/inferplane/inferplane/internal/keystore"
+	"github.com/inferplane/inferplane/internal/metrics"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/providers"
 	"github.com/inferplane/inferplane/providers/testing/mockprovider"
@@ -21,7 +22,7 @@ func TestDataMuxRoutesAndAuths(t *testing.T) {
 	}
 	r := router.New(provs, models)
 	store := stubStore{key: "dev-key", p: keystore.Principal{KeyID: "ik_abc", Team: "platform-eng", AllowedModels: []string{"*"}}}
-	mux := DataMux(r, store, nil, nil)
+	mux := DataMux(r, store, nil, nil, nil)
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	rec := httptest.NewRecorder()
@@ -46,7 +47,7 @@ func TestDataMuxModelsContentNegotiation(t *testing.T) {
 	}
 	r := router.New(provs, models)
 	store := stubStore{key: "dev-key", p: keystore.Principal{KeyID: "ik_abc", Team: "platform-eng", AllowedModels: []string{"*"}}}
-	mux := DataMux(r, store, nil, nil)
+	mux := DataMux(r, store, nil, nil, nil)
 
 	// OpenAI client (no anthropic-version header) → OpenAI {"object":"list"} shape.
 	reqO := httptest.NewRequest("GET", "/v1/models", nil)
@@ -75,7 +76,7 @@ func TestDataMuxChatCompletionsRoutes(t *testing.T) {
 	}
 	r := router.New(provs, models)
 	store := stubStore{key: "dev-key", p: keystore.Principal{KeyID: "ik_abc", Team: "platform-eng", AllowedModels: []string{"*"}}}
-	mux := DataMux(r, store, nil, nil)
+	mux := DataMux(r, store, nil, nil, nil)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}`))
@@ -89,7 +90,7 @@ func TestDataMuxChatCompletionsRoutes(t *testing.T) {
 
 func TestAdminMuxHealthz(t *testing.T) {
 	store := stubStore{}
-	mux := AdminMux(store, []string{"admin-tok"})
+	mux := AdminMux(store, []string{"admin-tok"}, nil)
 	req := httptest.NewRequest("GET", "/healthz", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -105,7 +106,7 @@ func TestAdminMuxKeysRequiresToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	mux := AdminMux(store, []string{"admin-tok"})
+	mux := AdminMux(store, []string{"admin-tok"}, nil)
 
 	// no admin token → 401
 	req := httptest.NewRequest("GET", "/admin/keys", nil)
@@ -122,5 +123,20 @@ func TestAdminMuxKeysRequiresToken(t *testing.T) {
 	mux.ServeHTTP(rec2, req2)
 	if rec2.Code != 200 {
 		t.Fatalf("/admin/keys with token = %d, want 200: %s", rec2.Code, rec2.Body.String())
+	}
+}
+
+func TestAdminMuxMetricsUnauthed(t *testing.T) {
+	m := metrics.New()
+	m.ObserveRequest("anthropic", "claude-sonnet-4-6", "anthropic-direct", "t", 200, 1.0, 0)
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, m)
+	req := httptest.NewRequest("GET", "/metrics", nil) // NO auth
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("/metrics should be unauthenticated 200, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "inferplane_requests_total") {
+		t.Fatalf("/metrics missing exposition: %s", rec.Body.String())
 	}
 }

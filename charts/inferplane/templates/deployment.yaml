@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "inferplane.fullname" . }}
+  labels:
+    {{- include "inferplane.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "inferplane.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "inferplane.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "inferplane.serviceAccountName" . }}
+      containers:
+        - name: inferplane
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["serve", "--config", "/etc/inferplane/config.json"]
+          envFrom:
+            - secretRef:
+                name: {{ .Values.secrets.existingSecret }}
+          ports:
+            - name: data
+              containerPort: {{ .Values.service.dataPort }}
+            - name: admin
+              containerPort: {{ .Values.service.adminPort }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: admin
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: admin
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/inferplane
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "inferplane.fullname" . }}-config
