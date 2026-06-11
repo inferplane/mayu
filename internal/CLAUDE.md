@@ -6,7 +6,7 @@ Packages are leaf-oriented to avoid import cycles (`principal`, `metrics`, `gove
 are leaves that others depend on).
 
 ## Key Packages
-- `server/` — HTTP data plane + admin plane; `anthropicapi/`, `openaiapi/`, `adminapi/` ingress handlers; `auth.go`, `adminauth.go`, `tls.go`, `metricsapi.go`.
+- `server/` — HTTP data plane + admin plane; `anthropicapi/`, `openaiapi/`, `adminapi/` ingress handlers; `adminui/` embedded key console (`/admin/ui/`, data-free static assets, ADR-001); `auth.go`, `adminauth.go`, `tls.go`, `metricsapi.go`.
 - `router/` — model→provider resolution, priority fallback chain, per-provider circuit breaker (`breaker.go`).
 - `governance/` — `Governor` (PreCheck/Settle); `fromconfig.go` maps config → policy (USD→µUSD).
 - `keystore/` — virtual-key `Store` (SQLite), `Principal`, RBAC `Allows()`.

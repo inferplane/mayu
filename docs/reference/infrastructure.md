@@ -22,6 +22,7 @@ wires an optional IRSA ServiceAccount for Bedrock.
 
 ### 3. Key Decisions
 - `CGO_ENABLED=0` static binary so the image can be distroless/nonroot with no libc.
+- The admin key console's static assets (`internal/server/adminui/static/`) ship inside the binary via `go:embed` — no image, chart, or build-pipeline change (ADR-001).
 - Single replica by default (SQLite key store + instance-local governance); multi-replica HA waits for the Postgres/Redis backends in v0.2.
 - The chart references an `existingSecret` and never creates secrets (design §7).
 
@@ -54,6 +55,7 @@ Docker 빌드와, config를 ConfigMap으로 렌더링하고 Bedrock용 선택 IR
 
 ### 3. 주요 결정
 - `CGO_ENABLED=0` 정적 바이너리로 libc 없이 distroless/nonroot 이미지 구성.
+- 관리 키 콘솔의 정적 자산(`internal/server/adminui/static/`)은 `go:embed`로 바이너리에 내장 — 이미지/차트/빌드 파이프라인 변경 없음(ADR-001).
 - 기본 단일 레플리카(SQLite 키 스토어 + 인스턴스 로컬 거버넌스); 다중 레플리카 HA는 v0.2 Postgres/Redis 백엔드 대기.
 - 차트는 `existingSecret`을 참조하며 시크릿을 생성하지 않음(설계 §7).
 

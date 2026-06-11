@@ -120,7 +120,11 @@ docker run -d --name inferplane \
 ```
 
 Port `8080` is the **data plane** (client traffic); `9090` is the **admin plane**
-(`/healthz`, `/readyz`, unauthenticated `/metrics`, and the `/admin/keys` API).
+(`/healthz`, `/readyz`, unauthenticated `/metrics`, the `/admin/keys` API, and the
+minimal admin key console at `http://localhost:9090/admin/ui/` — ADR-001).
+
+For a self-hosted-only setup (Ollama/vLLM, no cloud key), start from
+[`examples/config.selfhosted.json`](examples/config.selfhosted.json).
 
 ### 3. Issue a virtual key
 
@@ -130,6 +134,9 @@ docker exec inferplane inferplane keys create \
   --store /var/lib/inferplane/keys.db
 # → prints ik_... once (never recoverable — copy it now)
 ```
+
+Or use the web console: open `http://localhost:9090/admin/ui/`, paste the admin
+token, and issue/revoke keys from the page (the token stays in page memory only).
 
 ### 4. Point your coding agent at the gateway
 
@@ -336,7 +343,11 @@ docker run -d --name inferplane \
 ```
 
 포트 `8080`은 **데이터 플레인**(클라이언트 트래픽), `9090`은 **관리 플레인**
-(`/healthz`, `/readyz`, 무인증 `/metrics`, `/admin/keys` API)입니다.
+(`/healthz`, `/readyz`, 무인증 `/metrics`, `/admin/keys` API, 그리고
+`http://localhost:9090/admin/ui/`의 최소 관리 키 콘솔 — ADR-001)입니다.
+
+셀프호스팅 전용 구성(Ollama/vLLM, 클라우드 키 불필요)은
+[`examples/config.selfhosted.json`](examples/config.selfhosted.json)에서 시작하세요.
 
 ### 3. 가상 키 발급
 
@@ -346,6 +357,9 @@ docker exec inferplane inferplane keys create \
   --store /var/lib/inferplane/keys.db
 # → ik_... 를 1회만 출력 (복구 불가 — 지금 복사)
 ```
+
+웹 콘솔도 가능합니다: `http://localhost:9090/admin/ui/`를 열고 관리자 토큰을
+붙여넣은 뒤 페이지에서 키 발급/폐기 (토큰은 페이지 메모리에만 유지됩니다).
 
 ### 4. 코딩 에이전트를 게이트웨이에 연결
 
