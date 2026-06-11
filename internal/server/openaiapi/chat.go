@@ -17,6 +17,7 @@ import (
 	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
+	"github.com/inferplane/inferplane/internal/metrics"
 	"github.com/inferplane/inferplane/internal/openai"
 	"github.com/inferplane/inferplane/internal/pricing"
 	"github.com/inferplane/inferplane/internal/principal"
@@ -26,10 +27,13 @@ import (
 	"github.com/inferplane/inferplane/providers"
 )
 
+const ingressName = "openai"
+
 type ChatHandler struct {
-	r   *router.Router
-	aud *audit.Writer        // nil-safe: unit tests may omit
-	gov *governance.Governor // nil-safe: governance disabled when nil
+	r       *router.Router
+	aud     *audit.Writer        // nil-safe: unit tests may omit
+	gov     *governance.Governor // nil-safe: governance disabled when nil
+	metrics *metrics.Metrics     // nil-safe: no-op when nil
 }
 
 func NewChatHandler(r *router.Router) *ChatHandler { return &ChatHandler{r: r} }
@@ -38,6 +42,12 @@ func NewChatHandler(r *router.Router) *ChatHandler { return &ChatHandler{r: r} }
 // + cost settlement) alongside audit. gov may be nil to disable governance.
 func NewChatHandlerFull(r *router.Router, aud *audit.Writer, gov *governance.Governor) *ChatHandler {
 	return &ChatHandler{r: r, aud: aud, gov: gov}
+}
+
+// NewChatHandlerMetrics is NewChatHandlerFull plus the Prometheus metrics sink
+// (request/token/duration/ttft/fallback). m may be nil (no-op).
+func NewChatHandlerMetrics(r *router.Router, aud *audit.Writer, gov *governance.Governor, m *metrics.Metrics) *ChatHandler {
+	return &ChatHandler{r: r, aud: aud, gov: gov, metrics: m}
 }
 
 // providerWire reports the native wire protocol a provider speaks, by name.
@@ -52,6 +62,7 @@ func providerWire(name string) string {
 }
 
 func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	start := time.Now()
 	raw, err := io.ReadAll(req.Body)
 	if err != nil {
 		writeErr(w, 400, "invalid_request_error", "could not read request body")
@@ -74,12 +85,14 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	if !p.Allows(canonical.Model) {
 		h.audit(p, canonical.Model, "", &audit.OutcomeRef{Status: 403})
+		h.metrics.ObserveRequest(ingressName, canonical.Model, "", p.Team, 403, time.Since(start).Seconds(), 0)
 		writeErr(w, 403, "permission_error", "model not allowed for this key: "+canonical.Model)
 		return
 	}
 	chain, err := h.r.ResolveChain(canonical.Model)
 	if err != nil {
 		h.audit(p, canonical.Model, "", &audit.OutcomeRef{Status: 404})
+		h.metrics.ObserveRequest(ingressName, canonical.Model, "", p.Team, 404, time.Since(start).Seconds(), 0)
 		writeErr(w, 404, "not_found_error", "unknown model: "+canonical.Model)
 		return
 	}
@@ -88,6 +101,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		dec := h.gov.PreCheck(p.Team, estimateTokens(raw))
 		if !dec.Allowed {
 			h.audit(p, canonical.Model, chain[0].Upstream, &audit.OutcomeRef{Status: dec.Status})
+			h.metrics.ObserveRequest(ingressName, canonical.Model, chain[0].ProviderName, p.Team, dec.Status, time.Since(start).Seconds(), 0)
 			writeErr(w, dec.Status, govErrType(dec.Status), dec.Reason)
 			return
 		}
@@ -112,21 +126,22 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 		var retriable bool
 		if stream {
-			retriable = h.serveStream(w, req, ct.Provider, pr, p, canonical.Model, ct.ProviderName, ct.Upstream, last)
+			retriable = h.serveStream(w, req, ct.Provider, pr, p, canonical.Model, ct.ProviderName, ct.Upstream, last, start)
 		} else {
-			retriable = h.serveComplete(w, req, ct.Provider, pr, p, canonical.Model, ct.ProviderName, ct.Upstream, last)
+			retriable = h.serveComplete(w, req, ct.Provider, pr, p, canonical.Model, ct.ProviderName, ct.Upstream, last, start)
 		}
 		if !retriable {
 			return
 		}
 		h.r.RecordResult(ct.ProviderName, false)
+		h.metrics.ObserveFallback(canonical.Model, ct.ProviderName, chain[i+1].ProviderName, "upstream_error")
 	}
 }
 
 // serveComplete proxies one non-streaming target. It returns retriable=true on a
 // pre-TTFT failure (transport error or upstream 5xx/429) when a next target
 // exists (!last); otherwise it writes the response/error and returns false.
-func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool) (retriable bool) {
+func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool, start time.Time) (retriable bool) {
 	resp, err := prov.Complete(req.Context(), pr)
 	if err != nil {
 		if !last {
@@ -141,10 +156,12 @@ func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, pr
 			w.WriteHeader(ue.StatusCode)
 			w.Write(ue.Body)
 			h.auditCompleted(p, model, upstream, ue.StatusCode, nil, nil)
+			h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, ue.StatusCode, time.Since(start).Seconds(), 0)
 			return false
 		}
 		writeErr(w, 502, "api_error", "upstream error")
 		h.auditCompleted(p, model, upstream, 502, nil, nil)
+		h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 502, time.Since(start).Seconds(), 0)
 		return false
 	}
 	if !last && (resp.StatusCode >= 500 || resp.StatusCode == 429) {
@@ -173,15 +190,17 @@ func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, pr
 	if resp.Parsed != nil {
 		usage = usageRef(resp.Parsed.Usage)
 		cost = h.settle(p.Team, providerName, upstream, resp.Parsed.Usage)
+		h.observeTokens(model, providerName, p.Team, resp.Parsed.Usage)
 	}
 	h.auditCompleted(p, model, upstream, resp.StatusCode, usage, cost)
+	h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, resp.StatusCode, time.Since(start).Seconds(), 0)
 	return false
 }
 
 // serveStream proxies one streaming target. Fallback is PRE-TTFT ONLY: Stream()
 // erroring before any event with a next target available (!last) returns
 // retriable=true. Once the first event is rendered the response is committed.
-func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool) (retriable bool) {
+func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool, start time.Time) (retriable bool) {
 	seq, err := prov.Stream(req.Context(), pr)
 	if err != nil {
 		if !last {
@@ -195,16 +214,19 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 			w.WriteHeader(ue.StatusCode)
 			w.Write(ue.Body)
 			h.auditCompleted(p, model, upstream, ue.StatusCode, nil, nil)
+			h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, ue.StatusCode, time.Since(start).Seconds(), 0)
 			return false
 		}
 		writeErr(w, 502, "api_error", "upstream stream error")
 		h.auditCompleted(p, model, upstream, 502, nil, nil)
+		h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 502, time.Since(start).Seconds(), 0)
 		return false
 	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeErr(w, 500, "api_error", "streaming unsupported")
 		h.auditCompleted(p, model, upstream, 500, nil, nil)
+		h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 500, time.Since(start).Seconds(), 0)
 		return false
 	}
 	// Stream() succeeded → the target is healthy (breaker success, post-TTFT).
@@ -217,11 +239,16 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 	var st openai.StreamState
 	var usage *audit.UsageRef
 	var lastUsage *schema.Usage
+	var ttft float64
 	for ev, err := range seq {
 		if err != nil {
 			// upstream broke mid-stream; client sees a truncated stream.
 			h.auditCompletedPartial(p, model, upstream, usage)
+			h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 200, time.Since(start).Seconds(), ttft)
 			return false
+		}
+		if ttft == 0 {
+			ttft = time.Since(start).Seconds() // first streamed event = time to first token
 		}
 		if openaiWire {
 			// openai-wire provider: tee the upstream OpenAI SSE bytes verbatim
@@ -248,7 +275,9 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 		flusher.Flush()
 	}
 	cost := h.settle(p.Team, providerName, upstream, lastUsage)
+	h.observeTokens(model, providerName, p.Team, lastUsage)
 	h.auditCompleted(p, model, upstream, 200, usage, cost)
+	h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 200, time.Since(start).Seconds(), ttft)
 	return false
 }
 
@@ -284,6 +313,20 @@ func (h *ChatHandler) settle(team, providerName, upstream string, u *schema.Usag
 		PricingMissing:  missing,
 		PricingVersion:  h.gov.PricingVersion(),
 	}
+}
+
+// observeTokens records the per-type token usage counters for one settled
+// request, mirroring settle()'s cache_creation → cache_write_5m mapping. The
+// provider arg is the CONFIG provider name (pricing/metrics key). No-op when
+// usage is nil or metrics is nil.
+func (h *ChatHandler) observeTokens(model, provider, team string, u *schema.Usage) {
+	if u == nil {
+		return
+	}
+	h.metrics.ObserveTokenUsage("input", model, provider, team, deref(u.InputTokens))
+	h.metrics.ObserveTokenUsage("output", model, provider, team, deref(u.OutputTokens))
+	h.metrics.ObserveTokenUsage("cache_read", model, provider, team, deref(u.CacheReadInputTokens))
+	h.metrics.ObserveTokenUsage("cache_write_5m", model, provider, team, deref(u.CacheCreationInputTokens))
 }
 
 // estimateTokens is the conservative input-token estimate fed to the governance

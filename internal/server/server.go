@@ -18,12 +18,13 @@ import (
 // store before reaching the router. aud is the audit writer (may be nil) used
 // for the two-phase request_started/request_completed records on /v1/messages.
 // gov is the governance pipeline (rate/quota/budget + cost); when non-nil the
-// /v1/messages handler enforces it, when nil governance is bypassed.
-func DataMux(r *router.Router, store keystore.Store, aud *audit.Writer, gov *governance.Governor) http.Handler {
+// /v1/messages handler enforces it, when nil governance is bypassed. m is the
+// Prometheus metrics sink threaded into the ingress handlers (nil → no-op).
+func DataMux(r *router.Router, store keystore.Store, aud *audit.Writer, gov *governance.Governor, m *metrics.Metrics) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("POST /v1/messages", anthropicapi.NewMessagesHandlerFull(r, aud, gov))
+	mux.Handle("POST /v1/messages", anthropicapi.NewMessagesHandlerMetrics(r, aud, gov, m))
 	mux.Handle("POST /v1/messages/count_tokens", anthropicapi.NewCountTokensHandler(r))
-	mux.Handle("POST /v1/chat/completions", openaiapi.NewChatHandlerFull(r, aud, gov))
+	mux.Handle("POST /v1/chat/completions", openaiapi.NewChatHandlerMetrics(r, aud, gov, m))
 	// Both the Anthropic (Claude Code) and OpenAI (OpenCode) clients hit the
 	// same GET /v1/models path but expect different response shapes, so we
 	// content-negotiate: Anthropic clients send an `anthropic-version` header,

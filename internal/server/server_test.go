@@ -22,7 +22,7 @@ func TestDataMuxRoutesAndAuths(t *testing.T) {
 	}
 	r := router.New(provs, models)
 	store := stubStore{key: "dev-key", p: keystore.Principal{KeyID: "ik_abc", Team: "platform-eng", AllowedModels: []string{"*"}}}
-	mux := DataMux(r, store, nil, nil)
+	mux := DataMux(r, store, nil, nil, nil)
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	rec := httptest.NewRecorder()
@@ -47,7 +47,7 @@ func TestDataMuxModelsContentNegotiation(t *testing.T) {
 	}
 	r := router.New(provs, models)
 	store := stubStore{key: "dev-key", p: keystore.Principal{KeyID: "ik_abc", Team: "platform-eng", AllowedModels: []string{"*"}}}
-	mux := DataMux(r, store, nil, nil)
+	mux := DataMux(r, store, nil, nil, nil)
 
 	// OpenAI client (no anthropic-version header) → OpenAI {"object":"list"} shape.
 	reqO := httptest.NewRequest("GET", "/v1/models", nil)
@@ -76,7 +76,7 @@ func TestDataMuxChatCompletionsRoutes(t *testing.T) {
 	}
 	r := router.New(provs, models)
 	store := stubStore{key: "dev-key", p: keystore.Principal{KeyID: "ik_abc", Team: "platform-eng", AllowedModels: []string{"*"}}}
-	mux := DataMux(r, store, nil, nil)
+	mux := DataMux(r, store, nil, nil, nil)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}`))

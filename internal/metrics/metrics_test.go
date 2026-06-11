@@ -44,6 +44,20 @@ func TestCircuitStateGauge(t *testing.T) {
 	}
 }
 
+func TestNilMetricsNoPanic(t *testing.T) {
+	var m *Metrics // nil
+	m.ObserveRequest("a", "b", "c", "d", 200, 1, 0)
+	m.ObserveTokenUsage("input", "m", "p", "t", 10)
+	m.ObserveFallback("m", "from", "to", "reason")
+	m.SetCircuitState("p", 2)
+	m.SetQuotaUtilization("t", "day", 0.5)
+	m.AddBudgetSpend("t", "m", "total", 1.5)
+	m.IncPricingMiss("p", "m")
+	m.IncAuditFailure("file")
+	m.SetAuditBufferUtilization(0.1)
+	// no panic = pass
+}
+
 func gather(t *testing.T, m *Metrics) string {
 	t.Helper()
 	mfs, err := m.reg.Gather()

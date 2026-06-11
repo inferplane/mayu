@@ -79,10 +79,15 @@ func New() *Metrics {
 }
 
 // Registry exposes the registry for the /metrics handler.
-func (m *Metrics) Registry() *prometheus.Registry { return m.reg }
+func (m *Metrics) Registry() *prometheus.Registry {
+	if m == nil {
+		return nil
+	}
+	return m.reg
+}
 
 func (m *Metrics) ObserveTokenUsage(typ, model, provider, team string, tokens int64) {
-	if tokens <= 0 {
+	if m == nil || tokens <= 0 {
 		return
 	}
 	m.tokenUsage.WithLabelValues(typ, model, provider, team).Add(float64(tokens))
@@ -90,6 +95,9 @@ func (m *Metrics) ObserveTokenUsage(typ, model, provider, team string, tokens in
 
 // ObserveRequest records one completed request: counter + duration, and TTFT if >0.
 func (m *Metrics) ObserveRequest(ingress, model, provider, team string, status int, durationSec, ttftSec float64) {
+	if m == nil {
+		return
+	}
 	st := statusClass(status)
 	m.requestsTotal.WithLabelValues(ingress, model, provider, team, st).Inc()
 	m.requestDuration.WithLabelValues(model, provider, ingress, st).Observe(durationSec)
@@ -99,22 +107,47 @@ func (m *Metrics) ObserveRequest(ingress, model, provider, team string, status i
 }
 
 func (m *Metrics) ObserveFallback(model, from, to, reason string) {
+	if m == nil {
+		return
+	}
 	m.fallbackTotal.WithLabelValues(model, from, to, reason).Inc()
 }
 func (m *Metrics) SetCircuitState(provider string, state int) {
+	if m == nil {
+		return
+	}
 	m.circuitState.WithLabelValues(provider).Set(float64(state))
 }
 func (m *Metrics) SetQuotaUtilization(team, window string, ratio float64) {
+	if m == nil {
+		return
+	}
 	m.quotaUtil.WithLabelValues(team, window).Set(ratio)
 }
 func (m *Metrics) AddBudgetSpend(team, model, costType string, usd float64) {
+	if m == nil {
+		return
+	}
 	m.budgetSpend.WithLabelValues(team, model, costType).Add(usd)
 }
 func (m *Metrics) IncPricingMiss(provider, model string) {
+	if m == nil {
+		return
+	}
 	m.pricingMiss.WithLabelValues(provider, model).Inc()
 }
-func (m *Metrics) IncAuditFailure(sink string)         { m.auditFailures.WithLabelValues(sink).Inc() }
-func (m *Metrics) SetAuditBufferUtilization(r float64) { m.auditBufferUtil.Set(r) }
+func (m *Metrics) IncAuditFailure(sink string) {
+	if m == nil {
+		return
+	}
+	m.auditFailures.WithLabelValues(sink).Inc()
+}
+func (m *Metrics) SetAuditBufferUtilization(r float64) {
+	if m == nil {
+		return
+	}
+	m.auditBufferUtil.Set(r)
+}
 
 func statusClass(status int) string {
 	switch {

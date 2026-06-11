@@ -3,6 +3,8 @@ package audit
 import (
 	"crypto/sha256"
 	"encoding/hex"
+
+	"github.com/inferplane/inferplane/internal/metrics"
 )
 
 const genesisHash = "sha256:genesis"
@@ -19,7 +21,14 @@ type Writer struct {
 	sinks    []Sink
 	prevHash string
 	pending  int
+	metrics  *metrics.Metrics // nil-safe: no-op when nil
 }
+
+// SetMetrics attaches the Prometheus metrics sink. On a required-sink write
+// failure the writer bumps audit_write_failures_total; the WAL buffer
+// utilization gauge tracks records persisted-but-not-yet-delivered. Must be
+// called before the writer is busy (e.g. right after NewWriter). nil disables.
+func (w *Writer) SetMetrics(m *metrics.Metrics) { w.metrics = m }
 
 func NewWriter(instance, walPath string, sinks []Sink) (*Writer, error) {
 	wal, err := OpenWAL(walPath)
@@ -66,6 +75,7 @@ func (w *Writer) loop() {
 					writeFailuresTotal.Add(1)
 					bufferedRecords.Add(1)
 					flushedAll = false
+					w.metrics.IncAuditFailure(s.Name())
 				}
 			}
 		}
@@ -79,6 +89,10 @@ func (w *Writer) loop() {
 			_ = w.wal.Truncate()
 			w.pending = 0
 		}
+		// Buffer utilization: records persisted to the WAL but not yet delivered
+		// to all required sinks, over the in-flight queue capacity (observability
+		// approximation of buffer_then_block pressure, §5.4).
+		w.metrics.SetAuditBufferUtilization(float64(w.pending) / float64(cap(w.queue)))
 	}
 }
 

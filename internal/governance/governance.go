@@ -12,6 +12,7 @@ import (
 
 	"github.com/inferplane/inferplane/internal/budget"
 	"github.com/inferplane/inferplane/internal/limiter"
+	"github.com/inferplane/inferplane/internal/metrics"
 	"github.com/inferplane/inferplane/internal/pricing"
 )
 
@@ -29,14 +30,17 @@ type TeamPolicy struct {
 }
 
 type Governor struct {
-	teams map[string]TeamPolicy
-	lim   limiter.LimiterStore
-	bud   budget.BudgetStore
-	price *pricing.Table
+	teams   map[string]TeamPolicy
+	lim     limiter.LimiterStore
+	bud     budget.BudgetStore
+	price   *pricing.Table
+	metrics *metrics.Metrics // nil-safe: no-op when nil
 }
 
-func NewGovernor(teams map[string]TeamPolicy, lim limiter.LimiterStore, bud budget.BudgetStore, price *pricing.Table) *Governor {
-	return &Governor{teams: teams, lim: lim, bud: bud, price: price}
+// NewGovernor builds the Governor. m is the Prometheus metrics sink for
+// budget_spend / pricing_miss; pass nil to disable metrics (unit tests).
+func NewGovernor(teams map[string]TeamPolicy, lim limiter.LimiterStore, bud budget.BudgetStore, price *pricing.Table, m *metrics.Metrics) *Governor {
+	return &Governor{teams: teams, lim: lim, bud: bud, price: price, metrics: m}
 }
 
 // GovDecision is the PreCheck verdict. Status is the HTTP status to return when
@@ -106,6 +110,13 @@ func (g *Governor) Settle(team, provider, model string, u pricing.Usage) (costMi
 	costMicros, pricingMissing = g.price.CostUSDMicros(provider, model, u)
 	if p.BudgetMicrosPerMonth > 0 {
 		g.bud.Debit("budget:"+team, costMicros, 30*24*time.Hour)
+	}
+	// Observability metrics (approximation; the µUSD budget store is the
+	// settlement source of truth). Recorded for every settled request, even an
+	// ungoverned team, so /metrics reflects all traffic.
+	g.metrics.AddBudgetSpend(team, model, "total", float64(costMicros)/1e6)
+	if pricingMissing {
+		g.metrics.IncPricingMiss(provider, model)
 	}
 	return costMicros, pricingMissing
 }
