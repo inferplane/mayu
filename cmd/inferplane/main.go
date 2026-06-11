@@ -20,6 +20,7 @@ import (
 	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
 	"github.com/inferplane/inferplane/internal/limiter"
+	"github.com/inferplane/inferplane/internal/metrics"
 	"github.com/inferplane/inferplane/internal/pricing"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/internal/server"
@@ -163,8 +164,9 @@ func run(cfgPath string) error {
 	tbl := pricing.FromConfig(cfg.Pricing.OnMissing, overrides)
 	gov := governance.NewGovernor(policies, limiter.NewMemory(), budget.NewMemory(), tbl)
 
+	m := metrics.New()
 	dataSrv := &http.Server{Addr: cfg.Server.Listen, Handler: server.DataMux(r, store, aud, gov)}
-	adminSrv := &http.Server{Addr: cfg.Server.AdminListen, Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens)}
+	adminSrv := &http.Server{Addr: cfg.Server.AdminListen, Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, m)}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
