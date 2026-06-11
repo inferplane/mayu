@@ -93,7 +93,7 @@ temp dir, file audit sink in temp dir.
       `ik_`, no admin token, no `key_id` label values appear.
 - [ ] Make all three pass using only existing production code (fix wiring if any
       breaks; zero provider/core behavior change expected).
-- [ ] `go test ./... -race` green. Commit.
+- [ ] `go test ./... -race` green. Commit (DCO sign-off).
 
 ### Task 3: E2E streaming, governance block, audit chain verify
 
@@ -117,7 +117,7 @@ temp dir, file audit sink in temp dir.
 - [ ] Write failing test `TestE2EAuditChainVerifies`: after the above traffic, run
       `audit.Verify` on the emitted file sink — chain valid; tamper one byte → verify
       fails.
-- [ ] Make tests pass. `go test ./... -race` green. Commit.
+- [ ] Make tests pass. `go test ./... -race` green. Commit (DCO sign-off).
 
 ### Task 4: Example configs load-test + self-hosted (Ollama/vLLM) example
 
@@ -142,7 +142,7 @@ that currently has no example.
       optional (`resolveSecret(nil)` returns "", config.go:192-193) and Ollama is
       typically keyless; this also keeps the load-test free of extra env stubs),
       one model route, sqlite keystore, stdout audit sink, one demo team.
-- [ ] Test green. Commit.
+- [ ] Test green. Commit (DCO sign-off).
 
 ### Task 5: ADR-001 — minimal embedded admin key console
 
@@ -161,7 +161,7 @@ that currently has no example.
       server-rendered templates with session auth; postponing to v0.2 entirely),
       consequences (frontend tax capped at 3 static files; self-service OIDC login
       remains v0.2).
-- [ ] Commit.
+- [ ] Commit (DCO sign-off).
 
 ### Task 6: adminui package — embedded static console (TDD)
 
@@ -189,7 +189,7 @@ JS `fetch` with `Authorization: Bearer` header; token kept in a JS variable only
       static files.
 - [ ] Static-asset grep guard in test: assert no `localStorage`, no `document.cookie`
       in app.js (token must not persist).
-- [ ] `go test ./... -race` green. Commit.
+- [ ] `go test ./... -race` green. Commit (DCO sign-off).
 
 ### Task 7: Wire /admin/ui/ into AdminMux + integration tests
 
@@ -207,7 +207,7 @@ JS `fetch` with `Authorization: Bearer` header; token kept in a JS variable only
 - [ ] Wire `adminui.Handler()` into `AdminMux` in `server.go`.
 - [ ] Browser smoke check via Playwright against a locally running gateway
       (create + revoke a key through the page) — manual gate, not CI.
-- [ ] `go test ./... -race` green; `bash tests/run-all.sh` green. Commit.
+- [ ] `go test ./... -race` green; `bash tests/run-all.sh` green. Commit (DCO sign-off).
 
 ### Task 8: Docs sync (Auto-Sync rules)
 
@@ -229,4 +229,4 @@ JS `fetch` with `Authorization: Bearer` header; token kept in a JS variable only
       static binary (no image/chart change).
 - [ ] README: one quickstart line — "open `http://localhost:9090/admin/ui/`"; mention
       `examples/config.selfhosted.json` for Ollama/vLLM.
-- [ ] `bash tests/run-all.sh` green. Commit.
+- [ ] `bash tests/run-all.sh` green. Commit (DCO sign-off).
