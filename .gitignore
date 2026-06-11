@@ -13,3 +13,6 @@ coverage.out
 *.wal
 *.pem
 *.key
+
+# co-agent consensus ephemeral state
+.claude/co-agent-consensus/
