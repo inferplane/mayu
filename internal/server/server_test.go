@@ -140,3 +140,50 @@ func TestAdminMuxMetricsUnauthed(t *testing.T) {
 		t.Fatalf("/metrics missing exposition: %s", rec.Body.String())
 	}
 }
+
+func TestAdminMuxServesUI(t *testing.T) {
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil)
+	req := httptest.NewRequest("GET", "/admin/ui/", nil) // NO auth — data-free static page (ADR-001)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("/admin/ui/ = %d, want 200 without auth", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Fatalf("/admin/ui/ Content-Type = %q", ct)
+	}
+	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'self'") {
+		t.Fatalf("/admin/ui/ CSP = %q", csp)
+	}
+}
+
+func TestAdminMuxUIRedirect(t *testing.T) {
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil)
+	req := httptest.NewRequest("GET", "/admin/ui", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 301 && rec.Code != 308 {
+		t.Fatalf("/admin/ui = %d, want permanent redirect to /admin/ui/", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "/admin/ui/" {
+		t.Fatalf("redirect Location = %q, want /admin/ui/", loc)
+	}
+}
+
+// TestAdminMuxUIDoesNotBypassKeysAuth pins the ADR-001 invariant: wiring the
+// unauthenticated UI must not loosen auth on the keys API.
+func TestAdminMuxUIDoesNotBypassKeysAuth(t *testing.T) {
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil)
+	for _, tc := range []struct{ method, path string }{
+		{"GET", "/admin/keys"},
+		{"POST", "/admin/keys"},
+		{"DELETE", "/admin/keys/ik-123"},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != 401 {
+			t.Fatalf("%s %s without token = %d, want 401 (UI wiring must not bypass auth)", tc.method, tc.path, rec.Code)
+		}
+	}
+}

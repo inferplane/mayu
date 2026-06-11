@@ -9,6 +9,7 @@ import (
 	"github.com/inferplane/inferplane/internal/metrics"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/internal/server/adminapi"
+	"github.com/inferplane/inferplane/internal/server/adminui"
 	"github.com/inferplane/inferplane/internal/server/anthropicapi"
 	"github.com/inferplane/inferplane/internal/server/openaiapi"
 )
@@ -62,5 +63,10 @@ func AdminMux(store keystore.Store, adminTokens []string, m *metrics.Metrics) ht
 	keys := adminapi.NewKeysHandler(store)
 	mux.Handle("/admin/keys", AdminTokenAuth(adminTokens, keys))
 	mux.Handle("/admin/keys/", AdminTokenAuth(adminTokens, keys))
+	// Minimal embedded key console (ADR-001): data-free static assets, served
+	// unauthenticated like /metrics — every data call it makes goes through the
+	// token-gated /admin/keys handlers above.
+	mux.Handle("/admin/ui/", http.StripPrefix("/admin/ui", adminui.Handler()))
+	mux.Handle("/admin/ui", http.RedirectHandler("/admin/ui/", http.StatusMovedPermanently))
 	return mux
 }
