@@ -1,0 +1,25 @@
+{
+  "server": {
+    "listen": ":8080", "admin_listen": ":9090", "drain_grace": "10s",
+    "admin_auth": { "token_refs": [ { "env": "INFERPLANE_ADMIN_TOKEN" } ] }
+  },
+  "key_store": { "type": "sqlite", "path": "/var/lib/inferplane/keys.db" },
+  "audit": {
+    "failure_mode": "buffer_then_block",
+    "buffer": { "path": "/var/lib/inferplane/audit.wal" },
+    "sinks": [ { "type": "stdout" } ]
+  },
+  "providers": {
+    "ollama-local": { "type": "openai_compatible", "base_url": "http://localhost:11434/v1" }
+  },
+  "models": {
+    "llama3.3": { "targets": [ { "provider": "ollama-local", "model": "llama3.3" } ] },
+    "qwen2.5-coder": { "targets": [ { "provider": "ollama-local", "model": "qwen2.5-coder" } ] }
+  },
+  "teams": {
+    "demo": {
+      "allowed_models": [ "llama3.3", "qwen2.5-coder" ],
+      "rate_limit": { "requests_per_minute": 120 }
+    }
+  }
+}
