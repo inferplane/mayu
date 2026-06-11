@@ -1,0 +1,258 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/inferplane/inferplane/internal/audit"
+	"github.com/inferplane/inferplane/internal/budget"
+	"github.com/inferplane/inferplane/internal/config"
+	"github.com/inferplane/inferplane/internal/governance"
+	"github.com/inferplane/inferplane/internal/keystore"
+	"github.com/inferplane/inferplane/internal/limiter"
+	"github.com/inferplane/inferplane/internal/metrics"
+	"github.com/inferplane/inferplane/internal/pricing"
+	"github.com/inferplane/inferplane/internal/router"
+	"github.com/inferplane/inferplane/internal/server"
+	"github.com/inferplane/inferplane/pkg/ulid"
+	"github.com/inferplane/inferplane/providers"
+)
+
+// gateway is the fully wired serve assembly with its listeners already bound.
+// Binding in newGateway (rather than inside serve) makes ":0" configs testable:
+// the OS-chosen ports are discoverable via DataAddr/AdminAddr before traffic.
+type gateway struct {
+	cfg      *config.Config
+	store    keystore.Store
+	aud      *audit.Writer
+	dataLn   net.Listener
+	adminLn  net.Listener
+	dataSrv  *http.Server
+	adminSrv *http.Server
+}
+
+// newGateway loads config and assembles the full serve wiring — metrics,
+// keystore, audit writer, providers, router, governor, both muxes — then binds
+// the data and admin listeners. On error every partially opened resource is
+// closed. The caller must call serve (which owns shutdown + resource closing).
+func newGateway(cfgPath string) (*gateway, error) {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Prometheus metrics sink: owned by main, threaded into the audit writer,
+	// router, governor, and ingress handlers, and exposed on the admin /metrics.
+	m := metrics.New()
+
+	// Virtual-key store: KeyAuth resolves client keys against it (§5.1).
+	store, err := keystore.OpenSQLite(cfg.KeyStore.Path)
+	if err != nil {
+		return nil, fmt.Errorf("keystore: %w", err)
+	}
+
+	// Audit writer: build sinks from config, then the single-writer chain.
+	sinks, err := buildSinks(cfg.Audit.Sinks)
+	if err != nil {
+		store.Close()
+		return nil, fmt.Errorf("audit sinks: %w", err)
+	}
+	aud, err := audit.NewWriter(instanceID(), cfg.Audit.Buffer.Path, sinks)
+	if err != nil {
+		store.Close()
+		return nil, fmt.Errorf("audit: %w", err)
+	}
+	aud.SetMetrics(m) // audit_write_failures / buffer_utilization
+
+	// model_api[providerName] = {upstreamModelID: api} — gathered from model
+	// targets that name a non-empty api, so the bedrock factory can override
+	// its default invoke/converse routing per upstream model.
+	modelAPIByProvider := map[string]map[string]string{}
+	for _, mc := range cfg.Models {
+		for _, t := range mc.Targets {
+			if t.API != "" {
+				if modelAPIByProvider[t.Provider] == nil {
+					modelAPIByProvider[t.Provider] = map[string]string{}
+				}
+				modelAPIByProvider[t.Provider][t.Model] = t.API
+			}
+		}
+	}
+
+	provs := map[string]providers.Provider{}
+	for name, pc := range cfg.Providers {
+		var settings map[string]string
+		if pc.Type == "bedrock" {
+			settings = map[string]string{
+				"region":    pc.Region,
+				"auth_mode": pc.Auth.Mode,
+				"profile":   pc.Auth.Profile,
+			}
+			if m := modelAPIByProvider[name]; len(m) > 0 {
+				b, _ := json.Marshal(m)
+				settings["model_api"] = string(b)
+			}
+		}
+		p, err := providers.New(providers.Config{Type: pc.Type, BaseURL: pc.BaseURL, APIKey: pc.APIKey, Settings: settings})
+		if err != nil {
+			store.Close()
+			aud.Close()
+			return nil, fmt.Errorf("provider %q: %w", name, err)
+		}
+		provs[name] = p
+	}
+	r := router.New(provs, cfg.Models)
+	r.SetMetrics(m) // circuit_state
+
+	// Governance pipeline: map config → governance/pricing config shapes (which
+	// are decoupled from internal/config to avoid an import cycle), then build
+	// the Governor so /v1/messages enforces rate/quota/budget + records cost.
+	teamCfg := map[string]governance.ConfigTeam{}
+	for name, tc := range cfg.Teams {
+		teamCfg[name] = governance.ConfigTeam{
+			RatePerMin:        tc.RateLimit.RequestsPerMinute,
+			TokensPerMinute:   tc.RateLimit.TokensPerMinute,
+			TokensPerDay:      tc.Quota.TokensPerDay,
+			QuotaExceeded:     tc.Quota.OnExceeded,
+			BudgetUSDPerMonth: tc.Budget.USDPerMonth,
+			BudgetExceeded:    tc.Budget.OnExceeded,
+		}
+	}
+	policies := governance.PoliciesFromConfig(teamCfg)
+
+	overrides := map[string]map[string]pricing.ConfigRate{}
+	for provider, models := range cfg.Pricing.Overrides {
+		overrides[provider] = map[string]pricing.ConfigRate{}
+		for model, rc := range models {
+			overrides[provider][model] = pricing.ConfigRate{
+				InputPerMTok:        rc.InputPerMTok,
+				OutputPerMTok:       rc.OutputPerMTok,
+				CacheReadPerMTok:    rc.CacheReadPerMTok,
+				CacheWrite5mPerMTok: rc.CacheWrite5mPerMTok,
+				CacheWrite1hPerMTok: rc.CacheWrite1hPerMTok,
+			}
+		}
+	}
+	tbl := pricing.FromConfig(cfg.Pricing.OnMissing, overrides)
+	gov := governance.NewGovernor(policies, limiter.NewMemory(), budget.NewMemory(), tbl, m) // budget_spend / pricing_miss
+
+	// Optional self-TLS for the data plane (design §2.3): non-K8s single-binary
+	// deployments can terminate their own TLS; K8s terminates at ingress/mesh.
+	// The pair must be fully specified or fully empty.
+	if err := server.ValidateTLS(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile); err != nil {
+		store.Close()
+		aud.Close()
+		return nil, err
+	}
+
+	dataLn, err := net.Listen("tcp", cfg.Server.Listen)
+	if err != nil {
+		store.Close()
+		aud.Close()
+		return nil, fmt.Errorf("data listen %q: %w", cfg.Server.Listen, err)
+	}
+	adminLn, err := net.Listen("tcp", cfg.Server.AdminListen)
+	if err != nil {
+		dataLn.Close()
+		store.Close()
+		aud.Close()
+		return nil, fmt.Errorf("admin listen %q: %w", cfg.Server.AdminListen, err)
+	}
+
+	return &gateway{
+		cfg:      cfg,
+		store:    store,
+		aud:      aud,
+		dataLn:   dataLn,
+		adminLn:  adminLn,
+		dataSrv:  &http.Server{Handler: server.DataMux(r, store, aud, gov, m)},
+		adminSrv: &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, m)},
+	}, nil
+}
+
+// DataAddr is the bound data-plane address (host:port), valid once newGateway
+// returns — usable with ":0" configs to discover the OS-assigned port.
+func (g *gateway) DataAddr() string { return g.dataLn.Addr().String() }
+
+// AdminAddr is the bound admin-plane address (host:port).
+func (g *gateway) AdminAddr() string { return g.adminLn.Addr().String() }
+
+// serve runs both planes until ctx is canceled (graceful drain within
+// drain_grace) or a server fails. It owns closing the keystore and audit
+// writer; the in-flight handlers finish before audit drains (§5.4).
+func (g *gateway) serve(ctx context.Context) error {
+	defer g.store.Close()
+	defer g.aud.Close()
+
+	errc := make(chan error, 2)
+	go func() {
+		if g.cfg.Server.TLS.CertFile != "" {
+			errc <- g.dataSrv.ServeTLS(g.dataLn, g.cfg.Server.TLS.CertFile, g.cfg.Server.TLS.KeyFile)
+		} else {
+			errc <- g.dataSrv.Serve(g.dataLn)
+		}
+	}()
+	// Admin plane stays plaintext: /metrics, /healthz, /readyz are typically
+	// cluster-internal (scraped by Prometheus, probed by the kubelet).
+	go func() { errc <- g.adminSrv.Serve(g.adminLn) }()
+
+	select {
+	case <-ctx.Done():
+		grace := 10 * time.Second
+		if g.cfg.Server.DrainGrace != "" {
+			if d, err := time.ParseDuration(g.cfg.Server.DrainGrace); err == nil {
+				grace = d
+			}
+		}
+		shutCtx, cancel := context.WithTimeout(context.Background(), grace)
+		defer cancel()
+		// Stop accepting new requests and let in-flight handlers finish so their
+		// request_completed audit records get enqueued before we drain.
+		_ = g.dataSrv.Shutdown(shutCtx)
+		_ = g.adminSrv.Shutdown(shutCtx)
+		return nil
+	case err := <-errc:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	}
+}
+
+// instanceID names this gateway instance for the audit hash chain. Each process
+// run gets a unique id (hostname + per-run nonce) so a restart starts a distinct
+// per-instance chain segment (design §5.4) rather than reading as tampering.
+func instanceID() string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "inferplane"
+	}
+	return host + "-" + ulid.New() // unique per process run → distinct audit chain segment
+}
+
+// buildSinks constructs audit sinks from config. "stdout" is best-effort;
+// "file" sinks are required (they gate buffer_then_block durability §5.4).
+func buildSinks(cfgs []config.AuditSink) ([]audit.Sink, error) {
+	var sinks []audit.Sink
+	for _, s := range cfgs {
+		switch s.Type {
+		case "stdout":
+			sinks = append(sinks, audit.NewStdoutSink())
+		case "file":
+			fs, err := audit.NewFileSink(s.Path, true)
+			if err != nil {
+				return nil, fmt.Errorf("file sink %q: %w", s.Path, err)
+			}
+			sinks = append(sinks, fs)
+		default:
+			return nil, fmt.Errorf("unknown sink type %q", s.Type)
+		}
+	}
+	return sinks, nil
+}
