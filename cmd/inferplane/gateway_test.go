@@ -47,10 +47,11 @@ func writeTestConfig(t *testing.T, mutate func(cfg map[string]any, dir string)) 
 // waitHTTP polls url until it returns wantStatus or the deadline passes.
 func waitHTTP(t *testing.T, url string, wantStatus int) {
 	t.Helper()
+	client := &http.Client{Timeout: 2 * time.Second} // a hung listener must fail the poll, not the runner
 	deadline := time.Now().Add(5 * time.Second)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(url)
+		resp, err := client.Get(url)
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == wantStatus {

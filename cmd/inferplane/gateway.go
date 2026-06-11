@@ -218,6 +218,13 @@ func (g *gateway) serve(ctx context.Context) error {
 		_ = g.adminSrv.Shutdown(shutCtx)
 		return nil
 	case err := <-errc:
+		// One plane failed: drain the other gracefully too, so in-flight
+		// handlers finish and their audit records are enqueued before the
+		// deferred writer close (§5.4) — don't leave it to process teardown.
+		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = g.dataSrv.Shutdown(shutCtx)
+		_ = g.adminSrv.Shutdown(shutCtx)
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
