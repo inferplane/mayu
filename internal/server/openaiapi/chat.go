@@ -29,6 +29,15 @@ import (
 
 const ingressName = "openai"
 
+// rejectedModelLabel is the bounded sentinel used as the Prometheus `model`
+// label on pre-resolution rejections (403 allow-list deny / 404 unknown model).
+// At those points the model string is still attacker-controlled and has NOT been
+// validated against config; recording it raw would let a client mint unbounded
+// metric series (a cardinality DoS, §6.2 — team/model labels must come from
+// config-declared values only). The requested model is still kept in the audit
+// record, which is not a Prometheus label and carries no cardinality concern.
+const rejectedModelLabel = "_rejected"
+
 type ChatHandler struct {
 	r       *router.Router
 	aud     *audit.Writer        // nil-safe: unit tests may omit
@@ -85,14 +94,16 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	if !p.Allows(canonical.Model) {
 		h.audit(p, canonical.Model, "", &audit.OutcomeRef{Status: 403})
-		h.metrics.ObserveRequest(ingressName, canonical.Model, "", p.Team, 403, time.Since(start).Seconds(), 0)
+		// Pre-resolution reject: model is still attacker-controlled → sentinel label.
+		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 403, time.Since(start).Seconds(), 0)
 		writeErr(w, 403, "permission_error", "model not allowed for this key: "+canonical.Model)
 		return
 	}
 	chain, err := h.r.ResolveChain(canonical.Model)
 	if err != nil {
 		h.audit(p, canonical.Model, "", &audit.OutcomeRef{Status: 404})
-		h.metrics.ObserveRequest(ingressName, canonical.Model, "", p.Team, 404, time.Since(start).Seconds(), 0)
+		// Pre-resolution reject: model is still attacker-controlled → sentinel label.
+		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 404, time.Since(start).Seconds(), 0)
 		writeErr(w, 404, "not_found_error", "unknown model: "+canonical.Model)
 		return
 	}
