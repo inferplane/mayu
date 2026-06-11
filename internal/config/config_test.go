@@ -87,6 +87,19 @@ func TestLoadTeamsAndPricing(t *testing.T) {
 	}
 }
 
+func TestLoadServerTLS(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "c.json")
+	os.WriteFile(f, []byte(`{"server":{"listen":":8080","admin_listen":":9090","tls":{"cert_file":"/etc/tls/cert.pem","key_file":"/etc/tls/key.pem"}}}`), 0o600)
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.TLS.CertFile != "/etc/tls/cert.pem" || cfg.Server.TLS.KeyFile != "/etc/tls/key.pem" {
+		t.Fatalf("tls: %+v", cfg.Server.TLS)
+	}
+}
+
 func TestLoadKeyStoreAuditAdmin(t *testing.T) {
 	t.Setenv("ADMIN_TOK", "secret-admin")
 	dir := t.TempDir()

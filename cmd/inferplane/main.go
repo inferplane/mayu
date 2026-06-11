@@ -173,11 +173,26 @@ func run(cfgPath string) error {
 	dataSrv := &http.Server{Addr: cfg.Server.Listen, Handler: server.DataMux(r, store, aud, gov, m)}
 	adminSrv := &http.Server{Addr: cfg.Server.AdminListen, Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, m)}
 
+	// Optional self-TLS for the data plane (design §2.3): non-K8s single-binary
+	// deployments can terminate their own TLS; K8s terminates at ingress/mesh.
+	// The pair must be fully specified or fully empty.
+	if err := server.ValidateTLS(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile); err != nil {
+		return err
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	errc := make(chan error, 2)
-	go func() { errc <- dataSrv.ListenAndServe() }()
+	go func() {
+		if cfg.Server.TLS.CertFile != "" {
+			errc <- dataSrv.ListenAndServeTLS(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile)
+		} else {
+			errc <- dataSrv.ListenAndServe()
+		}
+	}()
+	// Admin plane stays plaintext: /metrics, /healthz, /readyz are typically
+	// cluster-internal (scraped by Prometheus, probed by the kubelet).
 	go func() { errc <- adminSrv.ListenAndServe() }()
 	fmt.Printf("inferplane serving data=%s admin=%s\n", cfg.Server.Listen, cfg.Server.AdminListen)
 
