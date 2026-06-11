@@ -34,6 +34,23 @@ func TestToInvokeBodyStripsModelAddsVersionPreservesCachePrefix(t *testing.T) {
 	}
 }
 
+func TestToInvokeBodyStripsStream(t *testing.T) {
+	// Bedrock's Anthropic InvokeModel schema rejects a top-level "stream" key
+	// ("stream: Extra inputs are not permitted" — streaming is selected by the
+	// InvokeModelWithResponseStream OPERATION, not the body). Verified against
+	// the live service 2026-06-12; leaving it in 502s every streaming request.
+	in := []byte(`{"model":"m","stream":true,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	out, err := toInvokeBody(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]json.RawMessage
+	json.Unmarshal(out, &m)
+	if _, has := m["stream"]; has {
+		t.Fatal(`"stream" must be stripped (Bedrock rejects it as an extra input)`)
+	}
+}
+
 func TestToInvokeBodyKeepsExistingAnthropicVersion(t *testing.T) {
 	// if a client already set anthropic_version, don't clobber a beta the user chose
 	in := []byte(`{"model":"m","anthropic_version":"bedrock-2023-05-31","messages":[]}`)
