@@ -4,3 +4,12 @@
 *.db-shm
 .claude/*.local.json
 coverage.out
+
+# Secrets and local runtime artifacts
+.env
+.env.*
+!.env.example
+*.jsonl
+*.wal
+*.pem
+*.key

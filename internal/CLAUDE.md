@@ -1,0 +1,26 @@
+# internal Module
+
+## Role
+Private gateway internals — everything that is not a provider or a public package.
+Packages are leaf-oriented to avoid import cycles (`principal`, `metrics`, `governance`
+are leaves that others depend on).
+
+## Key Packages
+- `server/` — HTTP data plane + admin plane; `anthropicapi/`, `openaiapi/`, `adminapi/` ingress handlers; `auth.go`, `adminauth.go`, `tls.go`, `metricsapi.go`.
+- `router/` — model→provider resolution, priority fallback chain, per-provider circuit breaker (`breaker.go`).
+- `governance/` — `Governor` (PreCheck/Settle); `fromconfig.go` maps config → policy (USD→µUSD).
+- `keystore/` — virtual-key `Store` (SQLite), `Principal`, RBAC `Allows()`.
+- `audit/` — single-writer hash-chain writer, WAL, `verify.go`, metrics hooks.
+- `pricing/` — integer microUSD table, round-half-even (`math/big`), bundled defaults.
+- `limiter/`, `budget/` — in-memory two-phase governance stores with injectable clocks.
+- `metrics/` — Prometheus registry + GenAI collectors + nil-safe hooks.
+- `openai/` — OpenAI ⇄ canonical conversion.
+- `config/` — config loading + secret-ref resolution (inline secrets rejected).
+- `principal/` — request-scoped principal context (leaf, breaks import cycles).
+
+## Rules
+- Pre-check BEFORE billing, settle AFTER. `on_exceeded` block wins on tie.
+- Cost is integer microUSD — never float. Use `math/big` round-half-even.
+- `count_tokens` must never return non-200.
+- Keep `principal`, `metrics`, `governance` import-cycle-free (they are depended on widely).
+- Metric labels are config-bounded; never label with raw client input (use the `_rejected` sentinel on pre-resolution rejects).

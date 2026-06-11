@@ -1,0 +1,68 @@
+# Infrastructure / 인프라 구현 상세
+
+[![English](https://img.shields.io/badge/Language-English-blue)](#english)
+[![한국어](https://img.shields.io/badge/Language-한국어-red)](#korean)
+
+<a id="english"></a>
+## English
+
+### 1. Overview
+Packaging and deployment for the single static binary: a multi-stage Docker build
+producing a distroless image, and a Helm chart that renders config into a ConfigMap and
+wires an optional IRSA ServiceAccount for Bedrock.
+
+### 2. Components
+| Component | Path | Purpose |
+|---|---|---|
+| Dockerfile | `Dockerfile` | Multi-stage `CGO_ENABLED=0` build → `distroless/static:nonroot` |
+| Docker ignore | `.dockerignore` | Excludes tests/docs/charts from the build context |
+| Helm chart | `charts/inferplane/` | Deployment, Service (data+admin), ServiceAccount, ConfigMap |
+| Chart values | `charts/inferplane/values.yaml` | Image, replicaCount (1, SQLite), existingSecret, IRSA annotation |
+| Grafana dashboard | `deploy/grafana/inferplane.json` | 9-panel Prometheus dashboard |
+
+### 3. Key Decisions
+- `CGO_ENABLED=0` static binary so the image can be distroless/nonroot with no libc.
+- Single replica by default (SQLite key store + instance-local governance); multi-replica HA waits for the Postgres/Redis backends in v0.2.
+- The chart references an `existingSecret` and never creates secrets (design §7).
+
+### 4. Code Pointers
+- `Dockerfile` — build + runtime stages
+- `charts/inferplane/templates/deployment.yaml` — pod spec, ports 8080/9090
+- `charts/inferplane/templates/configmap.yaml` — rendered `config.json`
+
+### 5. Cross-references
+- Related modules: [docs/architecture.md](../architecture.md) (Infrastructure section)
+- Related ADRs: docs/decisions/ (none yet)
+- Related runbooks: docs/runbooks/ (create `deploy-production.md`)
+
+<a id="korean"></a>
+## 한국어
+
+### 1. 개요
+단일 정적 바이너리의 패키징·배포 계층입니다. distroless 이미지를 만드는 멀티스테이지
+Docker 빌드와, config를 ConfigMap으로 렌더링하고 Bedrock용 선택 IRSA ServiceAccount를
+연결하는 Helm 차트로 구성됩니다.
+
+### 2. 구성요소
+| 구성요소 | 경로 | 목적 |
+|---|---|---|
+| Dockerfile | `Dockerfile` | 멀티스테이지 `CGO_ENABLED=0` 빌드 → `distroless/static:nonroot` |
+| Docker ignore | `.dockerignore` | 빌드 컨텍스트에서 tests/docs/charts 제외 |
+| Helm 차트 | `charts/inferplane/` | Deployment, Service(data+admin), ServiceAccount, ConfigMap |
+| 차트 values | `charts/inferplane/values.yaml` | 이미지, replicaCount(1, SQLite), existingSecret, IRSA 어노테이션 |
+| Grafana 대시보드 | `deploy/grafana/inferplane.json` | 9패널 Prometheus 대시보드 |
+
+### 3. 주요 결정
+- `CGO_ENABLED=0` 정적 바이너리로 libc 없이 distroless/nonroot 이미지 구성.
+- 기본 단일 레플리카(SQLite 키 스토어 + 인스턴스 로컬 거버넌스); 다중 레플리카 HA는 v0.2 Postgres/Redis 백엔드 대기.
+- 차트는 `existingSecret`을 참조하며 시크릿을 생성하지 않음(설계 §7).
+
+### 4. 코드 포인터
+- `Dockerfile` — 빌드 + 런타임 스테이지
+- `charts/inferplane/templates/deployment.yaml` — 파드 스펙, 포트 8080/9090
+- `charts/inferplane/templates/configmap.yaml` — 렌더링된 `config.json`
+
+### 5. 상호 참조
+- 관련 모듈: [docs/architecture.md](../architecture.md) (인프라 섹션)
+- 관련 ADR: docs/decisions/ (아직 없음)
+- 관련 런북: docs/runbooks/ (`deploy-production.md` 작성)

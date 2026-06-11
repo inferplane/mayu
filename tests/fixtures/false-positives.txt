@@ -1,0 +1,6 @@
+# False-positive samples (must NOT be detected by secret-scan.sh).
+dGhpcyBpcyBhIHRlc3Q=
+password = ""
+"api_key_ref": { "env": "ANTHROPIC_API_KEY" }
+"token_refs": [ { "env": "INFERPLANE_ADMIN_TOKEN" } ]
+AKIA_NOT_A_REAL_KEY_lowercase
