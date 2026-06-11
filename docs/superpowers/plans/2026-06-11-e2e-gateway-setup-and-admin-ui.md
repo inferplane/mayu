@@ -59,10 +59,14 @@ behavior (TLS branch, drain grace, graceful shutdown) preserved.
 **Steps:**
 
 - [ ] Write failing test: `TestGatewayBootsAndShutsDown` — start with a minimal temp
-      config on `127.0.0.1:0`, assert `DataAddr`/`AdminAddr` are reachable
-      (`/healthz` 200), cancel ctx, assert clean exit within drain grace.
+      config on `127.0.0.1:0`; assert admin plane `/healthz` 200 (healthz exists on the
+      admin mux only) and data-plane reachability via `GET /v1/models` returning 401
+      without a key (proves the listener + auth stack are up); cancel ctx, assert clean
+      exit within drain grace.
 - [ ] Extract the serve wiring from `main.go` into `gateway.go` (`run`/`gateway`
-      struct), switching `ListenAndServe` → `net.Listen` + `srv.Serve(ln)`.
+      struct), switching `ListenAndServe` → `net.Listen` + `srv.Serve(ln)`. TLS branch
+      (currently `ListenAndServeTLS`, main.go:189) becomes
+      `srv.ServeTLS(ln, certFile, keyFile)` — behavior preserved.
 - [ ] `go test ./... -race` green; `go vet ./...`; `gofmt -l .` clean.
 - [ ] Commit (DCO sign-off).
 
@@ -103,9 +107,13 @@ temp dir, file audit sink in temp dir.
       the tee'd stream verbatim through the gateway (cache invariant §4.4 — byte-equal
       frames for same-protocol passthrough).
 - [ ] Write failing test `TestE2EGovernanceBlocks`: team config with tiny
-      `rate_limit.rpm` and `budget.usd_per_month` (`on_exceeded: block`) — second
-      request 429 (rate) and a budget-exhausted request 402; `warn` mode passes with
-      audit annotation.
+      `rate_limit.requests_per_minute` (actual JSON tag, config.go:97 — NOT `rpm`) and
+      `budget.usd_per_month` + `on_exceeded: "block"` (config.go:112-113) — second
+      request 429 (rate) and a budget-exhausted request 402 (messages.go:149); with
+      `on_exceeded: "warn"` the request passes (200). The test config MUST include a
+      `pricing.overrides` rate for the mock model: the default
+      `pricing.on_missing=allow` prices unknown models at 0 µUSD, so budget would
+      never debit and the 402 path could not trigger.
 - [ ] Write failing test `TestE2EAuditChainVerifies`: after the above traffic, run
       `audit.Verify` on the emitted file sink — chain valid; tamper one byte → verify
       fails.
@@ -130,7 +138,9 @@ that currently has no example.
       `t.Setenv` the referenced env vars, `config.Load` each — no error, ≥1 provider,
       ≥1 model route each.
 - [ ] Write `examples/config.selfhosted.json`: `openaicompat` provider
-      (`base_url: http://localhost:11434/v1`, `api_key_ref: {env: OLLAMA_API_KEY}`),
+      (`base_url: http://localhost:11434/v1`, **no `api_key_ref`** — the field is
+      optional (`resolveSecret(nil)` returns "", config.go:192-193) and Ollama is
+      typically keyless; this also keeps the load-test free of extra env stubs),
       one model route, sqlite keystore, stdout audit sink, one demo team.
 - [ ] Test green. Commit.
 
