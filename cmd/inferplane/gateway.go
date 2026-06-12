@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/inferplane/inferplane/internal/adminauth"
 	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/budget"
 	"github.com/inferplane/inferplane/internal/config"
@@ -172,7 +173,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 		dataLn:   dataLn,
 		adminLn:  adminLn,
 		dataSrv:  &http.Server{Handler: server.DataMux(r, store, aud, gov, m)},
-		adminSrv: &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, aud, m)},
+		adminSrv: &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), aud, m)},
 	}, nil
 }
 
@@ -230,6 +231,36 @@ func (g *gateway) serve(ctx context.Context) error {
 		}
 		return err
 	}
+}
+
+// oidcVerifier builds the admin-plane ID-token verifier from config, or nil
+// when the oidc block is absent (static break-glass only — back-compat).
+// Construction is lazy and does no I/O: an unreachable IdP at boot must not
+// block startup (ADR-004 break-glass invariant).
+func oidcVerifier(cfg *config.Config) server.OIDCVerifier {
+	o := cfg.Server.AdminAuth.OIDC
+	if o == nil {
+		return nil
+	}
+	return adminauth.NewVerifier(adminauth.VerifierConfig{
+		Issuer:      o.Issuer,
+		ClientID:    o.ClientID,
+		GroupsClaim: o.GroupsClaim,
+	})
+}
+
+// oidcMapping converts the config mapping rules into the adminauth shape
+// (decoupled types — same pattern as governance.ConfigTeam).
+func oidcMapping(cfg *config.Config) adminauth.MappingConfig {
+	o := cfg.Server.AdminAuth.OIDC
+	if o == nil {
+		return adminauth.MappingConfig{}
+	}
+	mc := adminauth.MappingConfig{AdminGroups: o.AdminGroups}
+	for _, gm := range o.GroupMappings {
+		mc.GroupMappings = append(mc.GroupMappings, adminauth.GroupMapping{Group: gm.Group, Teams: gm.Teams})
+	}
+	return mc
 }
 
 // instanceID names this gateway instance for the audit hash chain. Each process

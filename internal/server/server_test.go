@@ -3,10 +3,13 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/inferplane/inferplane/internal/adminauth"
+	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/config"
 	"github.com/inferplane/inferplane/internal/keystore"
 	"github.com/inferplane/inferplane/internal/metrics"
@@ -90,7 +93,7 @@ func TestDataMuxChatCompletionsRoutes(t *testing.T) {
 
 func TestAdminMuxHealthz(t *testing.T) {
 	store := stubStore{}
-	mux := AdminMux(store, []string{"admin-tok"}, nil, nil)
+	mux := AdminMux(store, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, nil, nil)
 	req := httptest.NewRequest("GET", "/healthz", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -106,7 +109,7 @@ func TestAdminMuxKeysRequiresToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	mux := AdminMux(store, []string{"admin-tok"}, nil, nil)
+	mux := AdminMux(store, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, nil, nil)
 
 	// no admin token → 401
 	req := httptest.NewRequest("GET", "/admin/keys", nil)
@@ -129,7 +132,7 @@ func TestAdminMuxKeysRequiresToken(t *testing.T) {
 func TestAdminMuxMetricsUnauthed(t *testing.T) {
 	m := metrics.New()
 	m.ObserveRequest("anthropic", "claude-sonnet-4-6", "anthropic-direct", "t", 200, 1.0, 0)
-	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, m)
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, nil, m)
 	req := httptest.NewRequest("GET", "/metrics", nil) // NO auth
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -142,7 +145,7 @@ func TestAdminMuxMetricsUnauthed(t *testing.T) {
 }
 
 func TestAdminMuxServesUI(t *testing.T) {
-	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, nil)
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, nil, nil)
 	req := httptest.NewRequest("GET", "/admin/ui/", nil) // NO auth — data-free static page (ADR-001)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -158,7 +161,7 @@ func TestAdminMuxServesUI(t *testing.T) {
 }
 
 func TestAdminMuxUIRedirect(t *testing.T) {
-	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, nil)
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, nil, nil)
 	req := httptest.NewRequest("GET", "/admin/ui", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -173,7 +176,7 @@ func TestAdminMuxUIRedirect(t *testing.T) {
 // TestAdminMuxUIDoesNotBypassKeysAuth pins the ADR-001 invariant: wiring the
 // unauthenticated UI must not loosen auth on the keys API.
 func TestAdminMuxUIDoesNotBypassKeysAuth(t *testing.T) {
-	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, nil)
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, nil, nil)
 	for _, tc := range []struct{ method, path string }{
 		{"GET", "/admin/keys"},
 		{"POST", "/admin/keys"},
@@ -185,5 +188,94 @@ func TestAdminMuxUIDoesNotBypassKeysAuth(t *testing.T) {
 		if rec.Code != 401 {
 			t.Fatalf("%s %s without token = %d, want 401 (UI wiring must not bypass auth)", tc.method, tc.path, rec.Code)
 		}
+	}
+}
+
+// --- OIDC wiring into AdminMux (plan 2026-06-12 task 7) ---
+
+// TestAdminMuxOIDCWiring: with a verifier configured, both credential kinds
+// reach /admin/keys, and an OIDC team-member is IMMEDIATELY subject to the
+// task-6 entitlement + audit (cross-team create => 403 AND audited).
+func TestAdminMuxOIDCWiring(t *testing.T) {
+	store, err := keystore.OpenSQLite(filepath.Join(t.TempDir(), "k.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	dir := t.TempDir()
+	auditFile := filepath.Join(dir, "audit.jsonl")
+	fsink, err := audit.NewFileSink(auditFile, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aud, err := audit.NewWriter("test-instance", filepath.Join(dir, "wal"), []audit.Sink{fsink})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	v := &fakeVerifier{claims: adminauth.Claims{Subject: "u-alpha", Groups: []string{"team-alpha"}}}
+	mapping := adminauth.MappingConfig{GroupMappings: []adminauth.GroupMapping{{Group: "team-alpha", Teams: []string{"alpha"}}}}
+	mux := AdminMux(store, []string{"admin-tok"}, v, mapping, aud, nil)
+
+	do := func(bearer, method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// static break-glass still works
+	if rec := do("admin-tok", "POST", "/admin/keys", `{"team":"any","allowed_models":["*"]}`); rec.Code != 200 {
+		t.Fatalf("break-glass create = %d", rec.Code)
+	}
+	// OIDC member: own team OK
+	if rec := do(jwtShaped, "POST", "/admin/keys", `{"team":"alpha","allowed_models":["*"]}`); rec.Code != 200 {
+		t.Fatalf("oidc own-team create = %d: %s", rec.Code, rec.Body.String())
+	}
+	// OIDC member: cross-team 403
+	if rec := do(jwtShaped, "POST", "/admin/keys", `{"team":"beta","allowed_models":["*"]}`); rec.Code != 403 {
+		t.Fatalf("oidc cross-team create = %d, want 403", rec.Code)
+	}
+
+	aud.Close()
+	raw, err := os.ReadFile(auditFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"event":"admin_denied"`, `"user":"u-alpha"`, `"auth_method":"oidc"`, `"auth_method":"break_glass"`,
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("audit missing %s:\n%s", want, raw)
+		}
+	}
+	res, err := audit.Verify(strings.NewReader(string(raw)))
+	if err != nil || !res.OK {
+		t.Fatalf("chain: %+v %v", res, err)
+	}
+}
+
+// TestAdminMuxNilOIDCUnchanged: without a verifier the mux behaves exactly as
+// the task-6 static-only state; UI/metrics/health stay unauthenticated.
+func TestAdminMuxNilOIDCUnchanged(t *testing.T) {
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, nil, nil)
+	for path, want := range map[string]int{
+		"/healthz": 200, "/readyz": 200, "/admin/ui/": 200,
+	} {
+		req := httptest.NewRequest("GET", path, nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != want {
+			t.Fatalf("%s = %d, want %d", path, rec.Code, want)
+		}
+	}
+	req := httptest.NewRequest("GET", "/admin/keys", nil)
+	req.Header.Set("Authorization", "Bearer "+jwtShaped) // shaped bearer, nil verifier → static path → 401
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Fatalf("shaped bearer with nil verifier = %d, want 401", rec.Code)
 	}
 }

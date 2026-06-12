@@ -54,11 +54,12 @@ func negotiateModels(anthropicH, openaiH http.Handler) http.Handler {
 
 // AdminMux builds the admin-plane (:9090) handler: health + /metrics + /admin/keys
 // CRUD. /healthz, /readyz, and /metrics are unauthenticated; /admin/keys is guarded
-// by AdminAuth (static break-glass tokens; the OIDC verifier is threaded in by the
-// serve wiring when configured — ADR-004). aud receives admin-action audit records
-// (key create/revoke + denials, §5.5 "admin API calls are audit events"); nil skips.
-// When m is nil the /metrics endpoint is omitted.
-func AdminMux(store keystore.Store, adminTokens []string, aud *audit.Writer, m *metrics.Metrics) http.Handler {
+// by AdminAuth — static break-glass tokens always, plus OIDC ID tokens when
+// verifier is non-nil (ADR-004; mapping carries the groups→team rules). aud
+// receives admin-action audit records (key create/revoke + denials, §5.5
+// "admin API calls are audit events"); nil skips. When m is nil the /metrics
+// endpoint is omitted.
+func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier, mapping adminauth.MappingConfig, aud *audit.Writer, m *metrics.Metrics) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
@@ -73,7 +74,7 @@ func AdminMux(store keystore.Store, adminTokens []string, aud *audit.Writer, m *
 	// Middleware-level denial audit (authenticated 403s only — 401s never grow
 	// the chain): the middleware knows no team, so Team stays empty.
 	denied := adminDenialEmitter(emit)
-	guard := AdminAuth(adminTokens, nil, adminauth.MappingConfig{}, denied, keys)
+	guard := AdminAuth(adminTokens, verifier, mapping, denied, keys)
 	mux.Handle("/admin/keys", guard)
 	mux.Handle("/admin/keys/", guard)
 	// Minimal embedded key console (ADR-001): data-free static assets, served
