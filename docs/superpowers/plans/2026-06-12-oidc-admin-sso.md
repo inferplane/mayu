@@ -72,10 +72,30 @@ hot-reload, userinfo calls.
   `a.b.c`) goes to the OIDC path and gets a clean 401 there — it is NEVER
   compared against static hashes; non-3-segment bearers never reach the
   verifier. No fallthrough in either direction.
+- **One shared predicate** (panel r3 + chair): the bearer-shape test is a
+  single exported function `adminauth.IsOIDCBearerShape` used by BOTH the
+  config load guard and the middleware — the two can never drift (drift
+  reopens the break-glass lockout). Segments must be non-empty base64url
+  (no padding); `a..b`, `.a.b`, `a.b.`, padded, whitespace-bearing,
+  non-base64url-segment, and 4/5-segment (JWE) inputs are NOT JWT-shaped.
+- **Bearer size cap** (panel r3, both models + chair): bearers over 8 KiB are
+  rejected 401 BEFORE any splitting/parsing and are never audited (DoS guard).
 - Empty `client_id` in config with an OIDC block present is a config LOAD
-  error; so is a JWT-shaped static token_ref.
-- Admin-plane denials are governance events too: a 403'd create/revoke
-  attempt emits an audit record (no secrets, no PII).
+  error; so is a JWT-shaped static token_ref; so is an issuer that is not an
+  absolute `https` URL or carries query/fragment/userinfo (panel r3 — MITM
+  JWKS substitution / SSRF-by-config; tests construct the Verifier directly
+  with an httptest issuer, bypassing config.Load, so the rule is
+  unconditional).
+- Admin-plane denials are governance events too — at EVERY layer (panel r3
+  CRITICAL): an authenticated-but-unauthorized request (valid JWT, no group
+  mapping ⇒ middleware 403; or team-entitlement failure ⇒ handler 403) emits
+  an audit record (sub + method/path target, no secrets, no PII).
+  **401s are NEVER audited** (unauthenticated flood must not grow the hash
+  chain/WAL).
+- `groups_claim` names a TOP-LEVEL claim only: value must be a JSON string
+  array (a single string is accepted as a one-element list); dotted names are
+  literal keys — no nested traversal (panel r3 — traversal surprises are an
+  authz risk).
 - Non-admin identities can create/revoke keys only for their mapped teams —
   enforced in the handler, not just the middleware (else authZ is cosmetic).
 - No email/groups in audit records by default; `/metrics` stays leak-free.
@@ -98,9 +118,12 @@ hot-reload, userinfo calls.
       (block present + empty client_id/issuer ⇒ load error);
       `TestOIDCConfigRejectsDuplicateGroupKeys`;
       `TestOIDCConfigRejectsJWTShapedStaticToken` (oidc block present + a
-      token_ref resolving to a 3-segment JWT-shaped value ⇒ load error naming
-      the offending ref — preserves the break-glass invariant; without the
-      oidc block, any token shape loads as before).
+      token_ref resolving to a JWT-shaped value ⇒ load error naming the
+      offending ref — the check calls `adminauth.IsOIDCBearerShape`, the SAME
+      function the middleware uses; preserves the break-glass invariant;
+      without the oidc block, any token shape loads as before);
+      `TestOIDCConfigRejectsNonHTTPSIssuer` (http://, query/fragment/userinfo
+      ⇒ load error).
 - [ ] Add `OIDCConfig` under `AdminAuth` (json `oidc`, pointer — nil = absent).
       Pure schema + validation; NO network at load.
 - [ ] `go test ./internal/config/ -race` green. Commit (DCO sign-off).
@@ -135,8 +158,12 @@ hot-reload, userinfo calls.
       `*` wildcard mapping; `admin_groups` ⇒ isAdmin + all-teams; empty groups
       claim ⇒ `ok=false`; no mapping matches ⇒ `ok=false` (NOT a default team
       — silent privilege grant is banned); duplicate teams deduped.
+- [ ] Failing predicate tests for `IsOIDCBearerShape` (this package owns the
+      single shared function): `a.b.c` ✓-shaped; `a..b`, `.a.b`, `a.b.`,
+      padded (`=`) segments, whitespace, non-base64url chars, 2 and 4 and 5
+      segments (JWE), >8 KiB input ⇒ NOT shaped.
 - [ ] Implement `Resolve(groups []string, cfg MappingConfig) (teams []string,
-      isAdmin, ok bool)`.
+      isAdmin, ok bool)` and `IsOIDCBearerShape(bearer string) bool`.
 - [ ] `go test ./internal/adminauth/ -race` green. Commit (DCO sign-off).
 
 ### Task 4: JWT verifier wrapper (go-oidc, adversarial suite)
@@ -168,7 +195,11 @@ hot-reload, userinfo calls.
       down at boot ≠ startup failure) with negative cache + backoff,
       `SupportedSigningAlgs=[RS256,ES256]`, built-in expiry check replaced by
       skew-aware wrapper checks, aud/azp rule above, claims extraction with
-      configurable groups_claim.
+      configurable groups_claim — **top-level claim only, string array (single
+      string ⇒ one-element list), dotted names are literal keys, scalar/mixed
+      non-string values rejected with tests** (panel r3). Constructor takes
+      the issuer directly so tests can point it at an httptest IdP without
+      config.Load (which enforces https unconditionally).
 - [ ] `go mod tidy`; confirm CGO-free (`CGO_ENABLED=0 go build ./...`).
 - [ ] `go test ./internal/adminauth/ -race` green. Commit (DCO sign-off).
 
@@ -193,10 +224,18 @@ hot-reload, userinfo calls.
       `{Subject:"break-glass", IsAdmin:true, AuthMethod:"break_glass"}`;
       **JWKS server down + OIDC configured ⇒ static token still 200, JWT 401**
       (break-glass invariant).
-- [ ] Implement `AdminAuth(staticTokens, verifier, next)`: total shape rule —
-      OIDC configured AND bearer has exactly 3 dot-separated base64url
-      segments ⇒ OIDC path (no header sniffing; `alg` enforcement lives in
-      the verifier); else static path. Mutually exclusive, 401/403 semantics.
+- [ ] Additional failing tests (panel r3): bearer >8 KiB ⇒ 401 before any
+      parsing, no audit; `adminauth.IsOIDCBearerShape` is the literal function
+      called by the middleware (compile-time shared symbol, not a re-derived
+      rule); with verifier present, an authenticated valid-JWT-but-unmapped
+      request ⇒ 403 AND emits a denial audit record via the middleware's
+      emitter (nil emitter in this task ⇒ skip-emit; wired in Task 6);
+      401s emit NOTHING.
+- [ ] Implement `AdminAuth(staticTokens, verifier, auditEmit, next)`: total
+      shape rule — OIDC configured AND `IsOIDCBearerShape(bearer)` ⇒ OIDC
+      path (no header sniffing; `alg` enforcement lives in the verifier);
+      else static path. Size cap first. Mutually exclusive, 401/403
+      semantics; authenticated 403s audited, 401s never.
 - [ ] `go test ./internal/server/ -race` green. Commit (DCO sign-off).
 
 ### Task 6: Per-team key authZ + admin-action audit records (BEFORE OIDC wiring)
@@ -242,8 +281,11 @@ no audit record).
 - [ ] E2E: `TestE2EAdminActionsAudited` — boot gateway, create+revoke via
       admin API, audit chain verifies and contains both admin events.
 - [ ] Wire the audit writer into `adminapi.NewKeysHandler` (signature change)
-      and switch `AdminMux` to `AdminAuth(staticTokens, nil, keys)` in
-      `server.go` — static-only until Task 7.
+      and switch `AdminMux` to `AdminAuth(staticTokens, nil, auditEmit, keys)`
+      in `server.go` — static-only until Task 7, with the middleware's denial
+      emitter wired to the same audit writer (covers the future middleware-403
+      path the moment OIDC lands; panel r3 CRITICAL — middleware denials must
+      not bypass the audit promise).
 - [ ] Full `go test ./... -race` green. Commit (DCO sign-off).
 
 ### Task 7: Wire OIDC verifier into AdminMux (enforcement already live)
