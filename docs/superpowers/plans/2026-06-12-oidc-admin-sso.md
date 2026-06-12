@@ -38,10 +38,15 @@ hot-reload, userinfo calls.
   flood must not hammer the IdP nor add admin-plane latency).
 - **Mapping**: exact group match + explicit `*`; multi-group ⇒ team **union**;
   `admin_groups` ⇒ all teams; **no match ⇒ 403** (authenticated, unauthorized).
-- **Composition**: ONE middleware; total bearer-shape discriminator (3
-  base64url segments + JSON header w/ `alg` ⇒ OIDC path, else static path);
-  paths mutually exclusive — a malformed JWT must NEVER fall through to the
-  static comparison (auth-bypass/timing-oracle risk).
+- **Composition**: ONE middleware; **total** bearer-shape discriminator pinned
+  (panel r2): when OIDC is configured, ANY bearer consisting of 3
+  dot-separated base64url segments routes to the OIDC path — no JSON-header
+  sniffing (a non-JSON header must not demote a token to the static path);
+  everything else routes to static. `alg` enforcement happens INSIDE the
+  verifier. The Task-1 load guard makes a 3-segment static token impossible,
+  so the rule is total and unambiguous; with OIDC absent, everything routes
+  to static (back-compat). Paths mutually exclusive — no fallthrough in
+  either direction (auth-bypass/timing-oracle risk).
 - **Identity**: new `principal.AdminIdentity` under a separate ctx key from the
   data-plane Principal; break-glass injects sentinel `{Subject: "break-glass",
   IsAdmin: true}`. PII-minimal by construction (panel r1): the type carries
@@ -63,9 +68,14 @@ hot-reload, userinfo calls.
 - Break-glass static token works with OIDC configured AND the JWKS/IdP
   unreachable (no network on the static path).
 - `alg: none` and HS256 (public-key-as-HMAC confusion) tokens are rejected.
-- A static token shaped like `a.b.c` and a JWT with garbage signature each get
-  a clean 401 from their own path — no fallthrough in either direction.
-- Empty `audience` in config with an OIDC block present is a config LOAD error.
+- With OIDC configured, ANY 3-dot-segment bearer (even a garbage one like
+  `a.b.c`) goes to the OIDC path and gets a clean 401 there — it is NEVER
+  compared against static hashes; non-3-segment bearers never reach the
+  verifier. No fallthrough in either direction.
+- Empty `client_id` in config with an OIDC block present is a config LOAD
+  error; so is a JWT-shaped static token_ref.
+- Admin-plane denials are governance events too: a 403'd create/revoke
+  attempt emits an audit record (no secrets, no PII).
 - Non-admin identities can create/revoke keys only for their mapped teams —
   enforced in the handler, not just the middleware (else authZ is cosmetic).
 - No email/groups in audit records by default; `/metrics` stays leak-free.
@@ -147,6 +157,8 @@ hot-reload, userinfo calls.
       `azp` ✗; multi-audience with `azp == client_id` ✓; `azp != client_id`
       ✗** (OIDC Core §3.1.3.7); expired ✗; `iat` 5min future ✗ (skew leeway
       ±60s: 30s future ✓ — wrapper-side checks, go-oidc has no leeway knob);
+      **`nbf` 30s future ✓ (within skew); `nbf` 5min future ✗** (panel r2 —
+      same ±60s policy across exp/iat/nbf);
       unknown `kid` after key rotation ⇒ one refetch then ✓; refetch
       rate-limited (forged-kid flood does not hammer the JWKS endpoint);
       **discovery/JWKS outage: repeated JWT attempts hit the negative cache —
@@ -170,50 +182,42 @@ hot-reload, userinfo calls.
 **Steps:**
 
 - [ ] Failing adversarial tests: static token still works (back-compat, nil
-      verifier); static token shaped `a.b.c` ⇒ 401 from static path, never
-      parsed as JWT... wait — shape says JWT path: assert it gets a clean 401
-      and is NEVER compared against static hashes (mutual exclusivity, both
-      directions); JWT with garbage signature ⇒ 401, never static-compared;
+      verifier ⇒ everything routes static); with OIDC configured: a garbage
+      3-segment bearer (`a.b.c`, and one with a non-JSON header) ⇒ 401 from
+      the OIDC path and NEVER compared against static hashes (instrumented
+      fake verifier asserts the call; static comparison spy asserts no call);
+      a JWT with garbage signature ⇒ 401, never static-compared; a non-3-
+      segment bearer never reaches the verifier (spy asserts zero calls);
       valid JWT + no group match ⇒ **403**; valid JWT + match ⇒ 200 +
       `AdminIdentity` in context with mapped teams; static token ⇒ sentinel
       `{Subject:"break-glass", IsAdmin:true, AuthMethod:"break_glass"}`;
       **JWKS server down + OIDC configured ⇒ static token still 200, JWT 401**
       (break-glass invariant).
-- [ ] Implement `AdminAuth(staticTokens, verifier, next)`: total shape
-      discriminator (3 dot-separated base64url segments + JSON header with
-      `alg` ⇒ OIDC; else static), mutually exclusive paths, 401/403 semantics.
+- [ ] Implement `AdminAuth(staticTokens, verifier, next)`: total shape rule —
+      OIDC configured AND bearer has exactly 3 dot-separated base64url
+      segments ⇒ OIDC path (no header sniffing; `alg` enforcement lives in
+      the verifier); else static path. Mutually exclusive, 401/403 semantics.
 - [ ] `go test ./internal/server/ -race` green. Commit (DCO sign-off).
 
-### Task 6: Wire into AdminMux (back-compat when OIDC absent)
+### Task 6: Per-team key authZ + admin-action audit records (BEFORE OIDC wiring)
 
-**Files:**
+Sequencing pinned by panel r2 (CRITICAL): entitlement enforcement and admin
+audit MUST be live before any OIDC identity can reach `/admin/keys` — else an
+intermediate commit lets mapped non-admin users create/revoke arbitrary teams
+unaudited. This task lands with the AdminMux switched to the new `AdminAuth`
+middleware with a **nil verifier** (static-only): behavior is unchanged for
+operators (break-glass sentinel IsAdmin ⇒ all teams) but identity injection,
+per-team enforcement, and audit are already in force.
 
-- Modify: `internal/server/server.go`
-- Modify: `internal/server/server_test.go`
-- Modify: `cmd/inferplane/gateway.go`
-
-**Steps:**
-
-- [ ] Failing tests: AdminMux with nil OIDC config behaves byte-identically to
-      today (static-only); with OIDC config, both credential kinds reach
-      `/admin/keys`; `/metrics`, `/healthz`, `/admin/ui/` remain
-      unauthenticated.
-- [ ] Build verifier from config in `gateway.go` (nil when `oidc` absent);
-      thread through `AdminMux` signature.
-- [ ] Full `go test ./... -race` green. Commit (DCO sign-off).
-
-### Task 7: Per-team key authZ + admin-action audit records
-
-Closes the pre-existing §5.5 gap (admin key create/revoke currently emit no
-audit record) — without this, OIDC identity in audit is a field nothing
-populates, and team mapping is cosmetic (any authenticated user could create
-keys for any team).
+Also closes the pre-existing §5.5 gap (admin key create/revoke currently emit
+no audit record).
 
 **Files:**
 
 - Modify: `internal/server/adminapi/keys.go`
 - Modify: `internal/server/adminapi/keys_test.go`
 - Modify: `internal/server/server.go`
+- Modify: `internal/server/server_test.go`
 - Modify: `internal/audit/record.go`
 - Modify: `internal/audit/record_test.go`
 - Modify: `cmd/inferplane/e2e_test.go`
@@ -223,18 +227,43 @@ keys for any team).
 - [ ] Failing tests: team-member (mapped to team A) creating a key for team A
       ⇒ 201; for team B ⇒ **403**; admin ⇒ any team; revoke symmetric
       (team-member revokes only own-team keys); break-glass sentinel ⇒ any
-      team (IsAdmin).
+      team (IsAdmin); request with NO AdminIdentity in context ⇒ 403
+      (fail-closed default).
 - [ ] Failing audit tests: key create/revoke emit an audit record with
       `PrincipalRef.User = sub` (opaque — never email), `Team`, new additive
-      `auth_method` field; record appended at END of PrincipalRef (hash chain
-      is line-byte based — old records still verify). Mixed-version verify
-      test uses a **raw JSONL byte fixture captured from a pre-change audit
-      log** (checked into testdata) interleaved with new-format records —
-      byte-exact, not re-serialized (panel r1).
+      `auth_method` field; **denied attempts (403) also emit an audit record**
+      (outcome: denied; no secrets, no PII — §5.5 "admin API calls are audit
+      events" covers denials, panel r2); record appended at END of
+      PrincipalRef (hash chain is line-byte based — old records still
+      verify). Mixed-version verify test uses a **raw JSONL byte fixture
+      captured from a pre-change audit log** (checked into testdata)
+      interleaved with new-format records — byte-exact, not re-serialized
+      (panel r1).
 - [ ] E2E: `TestE2EAdminActionsAudited` — boot gateway, create+revoke via
       admin API, audit chain verifies and contains both admin events.
-- [ ] Wire the audit writer into `adminapi.NewKeysHandler` (signature change,
-      callers updated in `server.go`).
+- [ ] Wire the audit writer into `adminapi.NewKeysHandler` (signature change)
+      and switch `AdminMux` to `AdminAuth(staticTokens, nil, keys)` in
+      `server.go` — static-only until Task 7.
+- [ ] Full `go test ./... -race` green. Commit (DCO sign-off).
+
+### Task 7: Wire OIDC verifier into AdminMux (enforcement already live)
+
+**Files:**
+
+- Modify: `internal/server/server.go`
+- Modify: `internal/server/server_test.go`
+- Modify: `cmd/inferplane/gateway.go`
+
+**Steps:**
+
+- [ ] Failing tests: AdminMux with nil OIDC config behaves identically to
+      Task 6 state (static-only); with OIDC config, both credential kinds
+      reach `/admin/keys` and a mapped team-member is immediately subject to
+      the Task-6 entitlement + audit (integration test: OIDC team-member
+      cross-team create ⇒ 403 AND audited); `/metrics`, `/healthz`,
+      `/admin/ui/` remain unauthenticated.
+- [ ] Build verifier from config in `gateway.go` (nil when `oidc` absent);
+      thread through `AdminMux` signature.
 - [ ] Full `go test ./... -race` green. Commit (DCO sign-off).
 
 ### Task 8: Console paste-field + ADR-004 + docs sync
