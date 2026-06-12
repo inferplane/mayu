@@ -27,6 +27,7 @@ backends are a swap, not a rewrite.
 ### 3. Key Decisions
 - SQLite (`modernc.org/sqlite`, cgo-free) default → static binary, 5-minute boot.
 - Per-instance audit hash chain so restarts segment cleanly instead of reading as tampering.
+- Admin-plane events (`admin_key_created` / `admin_key_revoked` / `admin_denied`, ADR-004) carry `principal.user` (opaque OIDC `sub` — never email) and `principal.auth_method` (`oidc` | `break_glass`); `auth_method` is appended at the END of `PrincipalRef` so pre-change chains still verify byte-exactly (mixed-version fixture test).
 - Two-phase stores (check then debit) so a denied request never charges the team.
 
 ### 4. Code Pointers

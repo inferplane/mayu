@@ -168,7 +168,31 @@ Secrets are referenced, never inlined. Operational environment variables:
 |----------|-------------|---------|
 | `ANTHROPIC_API_KEY` | Upstream Anthropic key (referenced by an `api_key_ref`) | — |
 | `VLLM_API_KEY` | Key for an OpenAI-compatible upstream | — |
-| `INFERPLANE_ADMIN_TOKEN` | Bearer token for the `/admin/keys` API | — |
+| `INFERPLANE_ADMIN_TOKEN` | Bearer token for the `/admin/keys` API (break-glass; opaque — JWT-shaped values are rejected when OIDC is enabled) | — |
+
+### Optional: OIDC SSO for the admin plane (free, ADR-004)
+
+Admins can authenticate with an ID token from your IdP (Dex/Keycloak/Okta)
+instead of the static token — the gateway validates it offline against the
+IdP's JWKS and maps the `groups` claim to teams. The static token keeps
+working as break-glass even with the IdP down.
+
+```json
+"admin_auth": {
+  "token_refs": [ { "env": "INFERPLANE_ADMIN_TOKEN" } ],
+  "oidc": {
+    "issuer": "https://idp.example.com/realms/dev",
+    "client_id": "inferplane-admin",
+    "admin_groups": ["platform-admins"],
+    "group_mappings": [ { "group": "team-alpha", "teams": ["alpha"] } ]
+  }
+}
+```
+
+Members mapped to a team can issue/revoke keys for that team only;
+`admin_groups` members for any team. Every admin action — including denied
+attempts — lands in the tamper-evident audit chain with the opaque OIDC
+`sub` (never email).
 | `CLAUDE_NOTIFY_WEBHOOK` | Optional webhook for dev notifications | unset |
 
 TLS: for non-Kubernetes deployments set `server.tls.cert_file` / `server.tls.key_file`

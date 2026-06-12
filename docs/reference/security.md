@@ -15,7 +15,8 @@ are non-negotiable invariants (see CLAUDE.md → Security mandates).
 | Component | Path | Purpose |
 |---|---|---|
 | Data-plane auth | `internal/server/auth.go` | `KeyAuth` resolves `ik_...` → Principal |
-| Admin auth | `internal/server/adminauth.go` | bearer-token guard for `/admin/keys` |
+| Admin auth | `internal/server/adminauth.go` | `AdminAuth`: static break-glass tokens + OIDC ID tokens on one Bearer header (ADR-004); total shape-predicate routing, 401 vs 403, denial audit |
+| OIDC verify | `internal/adminauth/` | shared `IsOIDCBearerShape`, groups→team `Resolve`, go-oidc verifier (alg pin, aud/azp, ±60s skew, JWKS negative cache) |
 | RBAC | `internal/keystore/keystore.go` | `Principal.Allows()` (team + allowed models) |
 | Key hashing | `internal/keystore/sqlite.go` | SHA-256 at rest; plaintext shown once |
 | TLS validation | `internal/server/tls.go` | rejects half-specified cert/key pairs |
@@ -49,7 +50,8 @@ are non-negotiable invariants (see CLAUDE.md → Security mandates).
 | 구성요소 | 경로 | 목적 |
 |---|---|---|
 | 데이터 플레인 auth | `internal/server/auth.go` | `KeyAuth`가 `ik_...` → Principal 해석 |
-| 관리 auth | `internal/server/adminauth.go` | `/admin/keys` 베어러 토큰 가드 |
+| 관리 auth | `internal/server/adminauth.go` | `AdminAuth`: 정적 break-glass 토큰 + OIDC ID 토큰을 단일 Bearer 헤더로 (ADR-004); total 술어 라우팅, 401/403, 거부 감사 |
+| OIDC 검증 | `internal/adminauth/` | 공유 `IsOIDCBearerShape`, groups→team `Resolve`, go-oidc 검증기 (alg 고정, aud/azp, ±60s 스큐, JWKS negative cache) |
 | RBAC | `internal/keystore/keystore.go` | `Principal.Allows()` (팀 + 허용 모델) |
 | 키 해싱 | `internal/keystore/sqlite.go` | 저장 시 SHA-256; 평문은 1회만 표시 |
 | TLS 검증 | `internal/server/tls.go` | 반쪽만 지정된 cert/key 쌍 거부 |

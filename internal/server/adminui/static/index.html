@@ -15,14 +15,16 @@
       <div class="wordmark"><span class="glyph">▰▰</span> inferplane</div>
       <p class="tagline">LLM consumption governance — control plane</p>
       <form id="token-form">
-        <label class="microlabel" for="token">admin bearer token</label>
+        <label class="microlabel" for="token">admin token · or OIDC ID token</label>
         <input id="token" type="password" autocomplete="off" spellcheck="false"
-               placeholder="paste token" required>
+               placeholder="paste admin token, or an ID token from your IdP CLI" required>
         <button type="submit">UNLOCK CONSOLE</button>
       </form>
       <p id="auth-status" class="status"></p>
-      <p class="lock-note">Token is held in page memory only — never stored,
-        never sent anywhere except this gateway's <code>/admin/keys</code> API.</p>
+      <p class="lock-note">Either credential works (ADR-004): the static
+        break-glass admin token, or an OIDC ID token minted by your IdP's
+        CLI/device flow. It is held in page memory only — never stored, never
+        sent anywhere except this gateway's <code>/admin/keys</code> API.</p>
     </div>
   </div>
 

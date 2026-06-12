@@ -15,7 +15,8 @@ are leaves that others depend on).
 - `limiter/`, `budget/` — in-memory two-phase governance stores with injectable clocks.
 - `metrics/` — Prometheus registry + GenAI collectors + nil-safe hooks.
 - `openai/` — OpenAI ⇄ canonical conversion.
-- `config/` — config loading + secret-ref resolution (inline secrets rejected).
+- `adminauth/` — admin-plane identity leaf (ADR-004): shared `IsOIDCBearerShape` predicate (config guard == middleware routing), groups→team `Resolve`, go-oidc ID-token `Verifier` (lazy discovery, negative cache, alg pin, aud/azp, ±60s skew).
+- `config/` — config loading + secret-ref resolution (inline secrets rejected); OIDC block validation (https issuer, mandatory client_id, JWT-shaped static tokens rejected).
 - `principal/` — request-scoped principal context (leaf, breaks import cycles).
 
 ## Rules
