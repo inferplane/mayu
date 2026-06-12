@@ -172,7 +172,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 		dataLn:   dataLn,
 		adminLn:  adminLn,
 		dataSrv:  &http.Server{Handler: server.DataMux(r, store, aud, gov, m)},
-		adminSrv: &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, m)},
+		adminSrv: &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, aud, m)},
 	}, nil
 }
 

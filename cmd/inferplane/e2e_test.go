@@ -426,3 +426,44 @@ func TestE2EAuditChainVerifies(t *testing.T) {
 		t.Fatal("tampered chain verified OK — tamper-evidence broken")
 	}
 }
+
+// TestE2EAdminActionsAudited (plan 2026-06-12 task 6): admin key create and
+// revoke are governance events — they land in the tamper-evident chain with
+// the break-glass identity and auth_method, and the chain still verifies.
+func TestE2EAdminActionsAudited(t *testing.T) {
+	up := newAnthropicUpstream(t)
+	var auditPath string
+	_, adminURL, shutdown := bootGateway(t, func(cfg map[string]any, dir string) {
+		withAnthropicProvider(up.srv.URL)(cfg, dir)
+		auditPath = cfg["audit"].(map[string]any)["sinks"].([]any)[0].(map[string]any)["path"].(string)
+	})
+
+	keyID, _ := createKey(t, adminURL, "demo", []string{"*"})
+	req, _ := http.NewRequest(http.MethodDelete, adminURL+"/admin/keys/"+keyID, nil)
+	req.Header.Set("Authorization", "Bearer "+e2eAdminToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("revoke: %v %d", err, resp.StatusCode)
+	}
+	resp.Body.Close()
+	shutdown()
+
+	raw, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := audit.Verify(bytes.NewReader(raw))
+	if err != nil || !res.OK {
+		t.Fatalf("chain: %+v %v", res, err)
+	}
+	for _, want := range []string{
+		`"event":"admin_key_created"`,
+		`"event":"admin_key_revoked"`,
+		`"user":"break-glass"`,
+		`"auth_method":"break_glass"`,
+	} {
+		if !bytes.Contains(raw, []byte(want)) {
+			t.Fatalf("audit log missing %s:\n%s", want, raw)
+		}
+	}
+}

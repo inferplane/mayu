@@ -1,33 +1,72 @@
 // Package adminapi implements the admin-plane key management endpoints,
-// guarded by AdminTokenAuth (§5.5). Create returns the plaintext key ONCE.
+// guarded by AdminAuth (§5.5, ADR-004). Create returns the plaintext key
+// ONCE. Every mutation — including denied attempts — is a governance event
+// and emits an audit record; the handler enforces per-team entitlement
+// itself (enforcing only in the middleware would make authZ cosmetic).
 package adminapi
 
 import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/keystore"
+	"github.com/inferplane/inferplane/internal/principal"
+	"github.com/inferplane/inferplane/pkg/ulid"
 )
 
-type KeysHandler struct{ store keystore.Store }
+type KeysHandler struct {
+	store keystore.Store
+	emit  func(audit.Record) // nil-safe; wired to the audit writer in server.go
+}
 
-func NewKeysHandler(store keystore.Store) *KeysHandler { return &KeysHandler{store: store} }
+// NewKeysHandler builds the handler. emit receives admin-action audit records
+// (admin_key_created / admin_key_revoked / admin_denied); pass nil to skip.
+func NewKeysHandler(store keystore.Store, emit func(audit.Record)) *KeysHandler {
+	return &KeysHandler{store: store, emit: emit}
+}
 
 func (h *KeysHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Fail-closed: a request that reached us without the AdminAuth middleware
+	// (no identity in context) is denied — never silently trusted.
+	id, ok := principal.AdminFrom(r.Context())
+	if !ok {
+		http.Error(w, `{"error":"no admin identity"}`, http.StatusForbidden)
+		return
+	}
 	switch {
 	case r.Method == http.MethodPost:
-		h.create(w, r)
+		h.create(w, r, id)
 	case r.Method == http.MethodGet:
 		h.list(w, r)
 	case r.Method == http.MethodDelete:
-		h.revoke(w, r)
+		h.revoke(w, r, id)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
-func (h *KeysHandler) create(w http.ResponseWriter, r *http.Request) {
+// adminEvent emits one admin-plane audit record. The User field carries the
+// opaque subject (never email — PII stays out of the chain, ADR-003/004);
+// keyID is empty for denials.
+func (h *KeysHandler) adminEvent(event string, id principal.AdminIdentity, team, keyID string) {
+	if h.emit == nil {
+		return
+	}
+	sub, method := id.Subject, id.AuthMethod
+	h.emit(audit.Record{
+		SchemaVersion: 1,
+		Event:         event,
+		ID:            ulid.New(),
+		TS:            time.Now().UTC().Format(time.RFC3339Nano),
+		Principal:     audit.PrincipalRef{KeyID: keyID, Team: team, User: &sub, AuthMethod: &method},
+		Request:       audit.RequestRef{Ingress: "admin"},
+	})
+}
+
+func (h *KeysHandler) create(w http.ResponseWriter, r *http.Request, id principal.AdminIdentity) {
 	var body struct {
 		Team          string   `json:"team"`
 		AllowedModels []string `json:"allowed_models"`
@@ -36,11 +75,17 @@ func (h *KeysHandler) create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"team required"}`, http.StatusBadRequest)
 		return
 	}
+	if !id.Entitled(body.Team) {
+		h.adminEvent("admin_denied", id, body.Team, "")
+		http.Error(w, `{"error":"not entitled to team"}`, http.StatusForbidden)
+		return
+	}
 	plaintext, p, err := h.store.Create(r.Context(), body.Team, body.AllowedModels)
 	if err != nil {
 		http.Error(w, `{"error":"create failed"}`, http.StatusInternalServerError)
 		return
 	}
+	h.adminEvent("admin_key_created", id, p.Team, p.KeyID)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"key_id": p.KeyID, "team": p.Team, "allowed_models": p.AllowedModels, "plaintext": plaintext})
 }
@@ -59,15 +104,40 @@ func (h *KeysHandler) list(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{"data": out})
 }
 
-func (h *KeysHandler) revoke(w http.ResponseWriter, r *http.Request) {
+func (h *KeysHandler) revoke(w http.ResponseWriter, r *http.Request, id principal.AdminIdentity) {
 	keyID := strings.TrimPrefix(r.URL.Path, "/admin/keys/")
 	if keyID == "" || keyID == r.URL.Path {
 		http.Error(w, `{"error":"key_id required in path"}`, http.StatusBadRequest)
+		return
+	}
+	// Entitlement needs the key's team: look it up before revoking. The list
+	// is small (an admin-plane operation). Non-entitled callers get an
+	// explicit 403 (and the denial is audited) — key IDs are not secret
+	// material, so the existence signal is acceptable and the audit trail
+	// is worth more.
+	team, found := h.teamOf(r, keyID)
+	if found && !id.Entitled(team) {
+		h.adminEvent("admin_denied", id, team, keyID)
+		http.Error(w, `{"error":"not entitled to team"}`, http.StatusForbidden)
 		return
 	}
 	if err := h.store.Revoke(r.Context(), keyID); err != nil {
 		http.Error(w, `{"error":"revoke failed"}`, http.StatusNotFound)
 		return
 	}
+	h.adminEvent("admin_key_revoked", id, team, keyID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *KeysHandler) teamOf(r *http.Request, keyID string) (string, bool) {
+	ps, err := h.store.List(r.Context())
+	if err != nil {
+		return "", false
+	}
+	for _, p := range ps {
+		if p.KeyID == keyID {
+			return p.Team, true
+		}
+	}
+	return "", false
 }

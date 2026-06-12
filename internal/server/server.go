@@ -2,7 +2,9 @@ package server
 
 import (
 	"net/http"
+	"time"
 
+	"github.com/inferplane/inferplane/internal/adminauth"
 	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
@@ -12,6 +14,7 @@ import (
 	"github.com/inferplane/inferplane/internal/server/adminui"
 	"github.com/inferplane/inferplane/internal/server/anthropicapi"
 	"github.com/inferplane/inferplane/internal/server/openaiapi"
+	"github.com/inferplane/inferplane/pkg/ulid"
 )
 
 // DataMux builds the data-plane (:8080) handler: Anthropic ingress endpoints
@@ -51,22 +54,52 @@ func negotiateModels(anthropicH, openaiH http.Handler) http.Handler {
 
 // AdminMux builds the admin-plane (:9090) handler: health + /metrics + /admin/keys
 // CRUD. /healthz, /readyz, and /metrics are unauthenticated; /admin/keys is guarded
-// by AdminTokenAuth (design doc §5.5 splits metrics/health auth from admin auth).
+// by AdminAuth (static break-glass tokens; the OIDC verifier is threaded in by the
+// serve wiring when configured — ADR-004). aud receives admin-action audit records
+// (key create/revoke + denials, §5.5 "admin API calls are audit events"); nil skips.
 // When m is nil the /metrics endpoint is omitted.
-func AdminMux(store keystore.Store, adminTokens []string, m *metrics.Metrics) http.Handler {
+func AdminMux(store keystore.Store, adminTokens []string, aud *audit.Writer, m *metrics.Metrics) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	if m != nil {
 		mux.Handle("GET /metrics", metricsHandler(m)) // unauthenticated (§5.5)
 	}
-	keys := adminapi.NewKeysHandler(store)
-	mux.Handle("/admin/keys", AdminTokenAuth(adminTokens, keys))
-	mux.Handle("/admin/keys/", AdminTokenAuth(adminTokens, keys))
+	var emit func(audit.Record)
+	if aud != nil {
+		emit = aud.Append
+	}
+	keys := adminapi.NewKeysHandler(store, emit)
+	// Middleware-level denial audit (authenticated 403s only — 401s never grow
+	// the chain): the middleware knows no team, so Team stays empty.
+	denied := adminDenialEmitter(emit)
+	guard := AdminAuth(adminTokens, nil, adminauth.MappingConfig{}, denied, keys)
+	mux.Handle("/admin/keys", guard)
+	mux.Handle("/admin/keys/", guard)
 	// Minimal embedded key console (ADR-001): data-free static assets, served
 	// unauthenticated like /metrics — every data call it makes goes through the
 	// token-gated /admin/keys handlers above.
 	mux.Handle("/admin/ui/", http.StripPrefix("/admin/ui", adminui.Handler()))
 	mux.Handle("/admin/ui", http.RedirectHandler("/admin/ui/", http.StatusMovedPermanently))
 	return mux
+}
+
+// adminDenialEmitter adapts the audit emit func to the AdminAuth denial hook:
+// an authenticated identity that maps to no team is a governance event
+// (admin_denied) even though it never reaches a handler (P2 gate r3).
+func adminDenialEmitter(emit func(audit.Record)) func(r *http.Request, subject string) {
+	if emit == nil {
+		return nil
+	}
+	return func(_ *http.Request, subject string) {
+		method := "oidc" // middleware denials only occur on the OIDC path
+		emit(audit.Record{
+			SchemaVersion: 1,
+			Event:         "admin_denied",
+			ID:            ulid.New(),
+			TS:            time.Now().UTC().Format(time.RFC3339Nano),
+			Principal:     audit.PrincipalRef{User: &subject, AuthMethod: &method},
+			Request:       audit.RequestRef{Ingress: "admin"},
+		})
+	}
 }

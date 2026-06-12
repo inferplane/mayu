@@ -90,7 +90,7 @@ func TestDataMuxChatCompletionsRoutes(t *testing.T) {
 
 func TestAdminMuxHealthz(t *testing.T) {
 	store := stubStore{}
-	mux := AdminMux(store, []string{"admin-tok"}, nil)
+	mux := AdminMux(store, []string{"admin-tok"}, nil, nil)
 	req := httptest.NewRequest("GET", "/healthz", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -106,7 +106,7 @@ func TestAdminMuxKeysRequiresToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	mux := AdminMux(store, []string{"admin-tok"}, nil)
+	mux := AdminMux(store, []string{"admin-tok"}, nil, nil)
 
 	// no admin token → 401
 	req := httptest.NewRequest("GET", "/admin/keys", nil)
@@ -129,7 +129,7 @@ func TestAdminMuxKeysRequiresToken(t *testing.T) {
 func TestAdminMuxMetricsUnauthed(t *testing.T) {
 	m := metrics.New()
 	m.ObserveRequest("anthropic", "claude-sonnet-4-6", "anthropic-direct", "t", 200, 1.0, 0)
-	mux := AdminMux(stubStore{}, []string{"admin-tok"}, m)
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, m)
 	req := httptest.NewRequest("GET", "/metrics", nil) // NO auth
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -142,7 +142,7 @@ func TestAdminMuxMetricsUnauthed(t *testing.T) {
 }
 
 func TestAdminMuxServesUI(t *testing.T) {
-	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil)
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, nil)
 	req := httptest.NewRequest("GET", "/admin/ui/", nil) // NO auth — data-free static page (ADR-001)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -158,7 +158,7 @@ func TestAdminMuxServesUI(t *testing.T) {
 }
 
 func TestAdminMuxUIRedirect(t *testing.T) {
-	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil)
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, nil)
 	req := httptest.NewRequest("GET", "/admin/ui", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -173,7 +173,7 @@ func TestAdminMuxUIRedirect(t *testing.T) {
 // TestAdminMuxUIDoesNotBypassKeysAuth pins the ADR-001 invariant: wiring the
 // unauthenticated UI must not loosen auth on the keys API.
 func TestAdminMuxUIDoesNotBypassKeysAuth(t *testing.T) {
-	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil)
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, nil)
 	for _, tc := range []struct{ method, path string }{
 		{"GET", "/admin/keys"},
 		{"POST", "/admin/keys"},

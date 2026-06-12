@@ -7,10 +7,17 @@ package audit
 
 import "encoding/json"
 
+// PrincipalRef identifies the acting principal. For data-plane records KeyID
+// is the virtual key; for admin-plane records (ADR-004) User carries the
+// opaque OIDC `sub` (never email — PII stays out of the chain) and AuthMethod
+// records "oidc" vs "break_glass". AuthMethod is appended at the END of the
+// struct: the hash chain verifies exact line bytes, and an omitempty pointer
+// keeps pre-change records byte-identical (mixed-version chains still verify).
 type PrincipalRef struct {
-	KeyID string  `json:"key_id"`
-	Team  string  `json:"team"`
-	User  *string `json:"user,omitempty"` // OIDC, M5
+	KeyID      string  `json:"key_id"`
+	Team       string  `json:"team"`
+	User       *string `json:"user,omitempty"` // OIDC sub (admin plane) — opaque, never email
+	AuthMethod *string `json:"auth_method,omitempty"`
 }
 
 type RequestRef struct {
@@ -57,7 +64,7 @@ type CostRef struct {
 // for hashing (encoding/json marshals struct fields in declaration order).
 type Record struct {
 	SchemaVersion int          `json:"schema_version"`
-	Event         string       `json:"event"` // request_started | request_completed
+	Event         string       `json:"event"` // request_started | request_completed | admin_key_created | admin_key_revoked | admin_denied
 	ID            string       `json:"id"`    // ULID
 	TS            string       `json:"ts"`
 	Instance      string       `json:"instance"`
