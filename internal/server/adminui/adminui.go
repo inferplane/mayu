@@ -16,9 +16,10 @@ var static embed.FS
 // contentTypes pins the served types explicitly (with nosniff, the browser
 // must not have to guess).
 var contentTypes = map[string]string{
-	"index.html": "text/html; charset=utf-8",
-	"app.js":     "text/javascript; charset=utf-8",
-	"style.css":  "text/css; charset=utf-8",
+	"index.html":  "text/html; charset=utf-8",
+	"app.js":      "text/javascript; charset=utf-8",
+	"style.css":   "text/css; charset=utf-8",
+	"favicon.svg": "image/svg+xml",
 }
 
 // Handler serves the console at the mount root: "/" (and "/index.html"),

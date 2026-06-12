@@ -3,45 +3,156 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>inferplane — admin key console</title>
+  <title>inferplane — control plane</title>
   <link rel="stylesheet" href="style.css">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
 </head>
-<body>
-  <header>
-    <h1>inferplane</h1>
-    <p class="sub">admin key console — minimal by design (ADR-001)</p>
-  </header>
+<body class="locked">
 
-  <section id="auth">
-    <h2>Admin token</h2>
-    <p class="hint">Paste the admin Bearer token. It is held in page memory only —
-      never stored, never sent anywhere except this gateway's <code>/admin/keys</code> API.</p>
-    <form id="token-form">
-      <input id="token" type="password" placeholder="admin token" autocomplete="off" required>
-      <button type="submit">Connect</button>
-    </form>
-    <p id="auth-status" class="status"></p>
-  </section>
-
-  <section id="console" hidden>
-    <h2>Issue a key</h2>
-    <form id="create-form">
-      <input id="team" type="text" placeholder="team (e.g. demo)" required>
-      <input id="models" type="text" placeholder="allowed models, comma-separated (* for all)" required>
-      <button type="submit">Create key</button>
-    </form>
-    <div id="plaintext-box" hidden>
-      <p class="warn">Copy this key now — it is shown once and is not recoverable.</p>
-      <code id="plaintext"></code>
-      <button id="copy" type="button">Copy</button>
+  <!-- ============ token gate ============ -->
+  <div id="lock">
+    <div class="lock-card">
+      <div class="wordmark"><span class="glyph">▰▰</span> inferplane</div>
+      <p class="tagline">LLM consumption governance — control plane</p>
+      <form id="token-form">
+        <label class="microlabel" for="token">admin bearer token</label>
+        <input id="token" type="password" autocomplete="off" spellcheck="false"
+               placeholder="paste token" required>
+        <button type="submit">UNLOCK CONSOLE</button>
+      </form>
+      <p id="auth-status" class="status"></p>
+      <p class="lock-note">Token is held in page memory only — never stored,
+        never sent anywhere except this gateway's <code>/admin/keys</code> API.</p>
     </div>
+  </div>
 
-    <h2>Keys</h2>
-    <table id="keys">
-      <thead><tr><th>key id</th><th>team</th><th>allowed models</th><th></th></tr></thead>
-      <tbody></tbody>
-    </table>
-  </section>
+  <!-- ============ dashboard shell ============ -->
+  <div id="shell" hidden>
+    <aside id="side">
+      <div class="wordmark sm"><span class="glyph">▰▰</span> inferplane</div>
+      <nav>
+        <button class="nav active" data-view="overview">⌂&ensp;Overview</button>
+        <button class="nav" data-view="keys">⚿&ensp;Virtual keys</button>
+        <button class="nav" data-view="quickstart">▸&ensp;Quickstart</button>
+      </nav>
+      <div class="side-foot">
+        <div class="led-row"><span id="conn-led" class="led on"></span>session active</div>
+        <button id="disconnect" class="ghost">LOCK</button>
+      </div>
+    </aside>
+
+    <main id="main">
+      <header id="topbar">
+        <h1 id="view-title">Overview</h1>
+        <div class="top-right">
+          <span class="chip mono" id="origin-chip">…</span>
+          <span class="led-row"><span id="health-led" class="led"></span><span id="health-text">checking</span></span>
+        </div>
+      </header>
+
+      <!-- ===== overview ===== -->
+      <section id="view-overview" class="view">
+        <div class="cards">
+          <div class="card stat">
+            <div class="microlabel">requests · total</div>
+            <div class="big" id="stat-requests">—</div>
+            <div class="sub" id="stat-requests-sub">from /metrics</div>
+          </div>
+          <div class="card stat">
+            <div class="microlabel">active keys</div>
+            <div class="big" id="stat-keys">—</div>
+            <div class="sub">issued &amp; not revoked</div>
+          </div>
+          <div class="card stat">
+            <div class="microlabel">teams seen</div>
+            <div class="big" id="stat-teams">—</div>
+            <div class="sub" id="stat-teams-sub">across traffic</div>
+          </div>
+          <div class="card stat">
+            <div class="microlabel">budget spend</div>
+            <div class="big" id="stat-spend">—</div>
+            <div class="sub">µUSD settled this window</div>
+          </div>
+        </div>
+
+        <div class="twocol">
+          <div class="card">
+            <div class="microlabel">traffic by model · provider</div>
+            <table class="data" id="traffic-table">
+              <thead><tr><th>model</th><th>provider</th><th>status</th><th class="num">req</th></tr></thead>
+              <tbody><tr><td colspan="4" class="empty">no traffic yet — issue a key and send a request</td></tr></tbody>
+            </table>
+          </div>
+          <div class="card">
+            <div class="microlabel">recent keys</div>
+            <table class="data" id="recent-keys">
+              <thead><tr><th>key id</th><th>team</th></tr></thead>
+              <tbody><tr><td colspan="2" class="empty">none yet</td></tr></tbody>
+            </table>
+            <button class="linklike" data-view="keys">manage keys →</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== keys ===== -->
+      <section id="view-keys" class="view" hidden>
+        <div class="card" id="issue-card">
+          <div class="microlabel">issue a virtual key</div>
+          <form id="create-form" class="row">
+            <input id="team" type="text" placeholder="team (e.g. demo)" required>
+            <input id="models" type="text" placeholder="allowed models — comma-separated, * for all" required>
+            <button type="submit">ISSUE KEY</button>
+          </form>
+          <div id="plaintext-box" hidden>
+            <div class="microlabel warn-label">⚠ shown once — copy now, not recoverable</div>
+            <div class="row">
+              <code id="plaintext" class="reveal"></code>
+              <button id="copy" type="button" class="ghost">COPY</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="microlabel">issued keys</div>
+          <table class="data" id="keys">
+            <thead><tr><th>key id</th><th>team</th><th>allowed models</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ===== quickstart ===== -->
+      <section id="view-quickstart" class="view" hidden>
+        <p class="hint">Point a coding agent at this gateway with a virtual key.
+          Issue a key in <b>Virtual keys</b> and these snippets fill in with live values.
+          <span class="ko">키를 발급하면 아래 예시에 실제 값이 채워집니다.</span></p>
+
+        <div class="card">
+          <div class="snippet-head"><span class="microlabel">claude code</span>
+            <button class="ghost copy-snippet" data-target="usage-claude">COPY</button></div>
+          <pre class="snippet"><code id="usage-claude">export ANTHROPIC_BASE_URL=&lt;this gateway&gt;
+export ANTHROPIC_API_KEY=&lt;issue a key first&gt;
+claude</code></pre>
+        </div>
+
+        <div class="card">
+          <div class="snippet-head"><span class="microlabel">curl · anthropic messages</span>
+            <button class="ghost copy-snippet" data-target="usage-curl">COPY</button></div>
+          <pre class="snippet"><code id="usage-curl">« issue a key to render a ready-to-run example »</code></pre>
+        </div>
+
+        <div class="card">
+          <div class="snippet-head"><span class="microlabel">openai-compatible clients · opencode</span>
+            <button class="ghost copy-snippet" data-target="usage-openai">COPY</button></div>
+          <pre class="snippet"><code id="usage-openai">base URL: &lt;this gateway&gt;/v1
+api key:  the same virtual key</code></pre>
+        </div>
+
+        <p class="hint">routable models: <code id="usage-models" class="mono">issue a key to load…</code><br>
+          health <code>/healthz</code> · metrics <code>/metrics</code> · keys API <code>/admin/keys</code> (Bearer)</p>
+      </section>
+    </main>
+  </div>
 
   <script src="app.js"></script>
 </body>

@@ -44,8 +44,9 @@ func TestServesIndex(t *testing.T) {
 
 func TestServesAssets(t *testing.T) {
 	for path, wantCT := range map[string]string{
-		"/app.js":    "text/javascript",
-		"/style.css": "text/css",
+		"/app.js":      "text/javascript",
+		"/style.css":   "text/css",
+		"/favicon.svg": "image/svg+xml",
 	} {
 		resp, _ := get(t, path)
 		if resp.StatusCode != http.StatusOK {

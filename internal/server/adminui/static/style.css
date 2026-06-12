@@ -1,54 +1,220 @@
-/* inferplane admin key console — minimal by design (ADR-001). */
+/* inferplane control plane — industrial ops-console aesthetic (ADR-002).
+   Dark slate, monospace-forward, signal LEDs. CSP default-src 'self' means
+   no webfonts/images: texture is pure CSS, type is the system mono stack. */
+
 :root {
-  --fg: #1a1f29;
-  --bg: #f7f8fa;
-  --accent: #3b5bdb;
-  --warn: #b54708;
-  --err: #b42318;
-  --ok: #067647;
-  --border: #d0d5dd;
+  --bg: #0b0e12;
+  --panel: #11161d;
+  --panel-2: #0e1319;
+  --line: #1e2733;
+  --text: #c9d4e3;
+  --dim: #5d6b7e;
+  --green: #3ddc97;
+  --amber: #ffb454;
+  --red: #ff5d5d;
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
 }
+
 * { box-sizing: border-box; }
+html, body { height: 100%; }
+
 body {
-  margin: 0 auto;
-  max-width: 56rem;
-  padding: 1.5rem;
-  font: 15px/1.5 system-ui, sans-serif;
-  color: var(--fg);
-  background: var(--bg);
+  margin: 0;
+  font: 14px/1.55 var(--mono);
+  color: var(--text);
+  background:
+    radial-gradient(1100px 500px at 85% -10%, rgba(61, 220, 151, 0.05), transparent 60%),
+    radial-gradient(900px 600px at -10% 110%, rgba(255, 180, 84, 0.04), transparent 60%),
+    var(--bg);
 }
-header h1 { margin: 0; font-size: 1.6rem; }
-.sub { margin-top: 0.2rem; color: #475467; }
-h2 { font-size: 1.1rem; margin: 1.6rem 0 0.5rem; }
-.hint { color: #475467; font-size: 0.9rem; }
-form { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+/* faint scanlines over everything — the CRT/ops texture */
+body::after {
+  content: "";
+  position: fixed; inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(0deg, rgba(255,255,255,0.015) 0 1px, transparent 1px 3px);
+}
+
+code, .mono { font-family: var(--mono); }
+
+/* ---------- wordmark ---------- */
+.wordmark {
+  font-size: 1.5rem; font-weight: 700; letter-spacing: 0.04em;
+}
+.wordmark.sm { font-size: 1.05rem; }
+.glyph { color: var(--green); letter-spacing: -0.18em; margin-right: 0.35em; }
+
+.microlabel {
+  font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--dim); margin-bottom: 0.55rem;
+}
+
+/* ---------- lock screen ---------- */
+#lock {
+  position: fixed; inset: 0; display: grid; place-items: center; padding: 1rem;
+  background:
+    linear-gradient(rgba(11,14,18,0.6), rgba(11,14,18,0.9)),
+    repeating-linear-gradient(90deg, transparent 0 47px, rgba(255,255,255,0.02) 47px 48px),
+    repeating-linear-gradient(0deg, transparent 0 47px, rgba(255,255,255,0.02) 47px 48px);
+}
+body:not(.locked) #lock { display: none; }
+.lock-card {
+  width: min(30rem, 92vw);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-top: 2px solid var(--green);
+  border-radius: 10px;
+  padding: 2rem 2.2rem 1.6rem;
+  box-shadow: 0 30px 80px rgba(0,0,0,0.55);
+  animation: rise 0.5s cubic-bezier(0.2, 0.9, 0.3, 1) both;
+}
+.tagline { color: var(--dim); margin: 0.3rem 0 1.6rem; font-size: 0.85rem; }
+.lock-note { color: var(--dim); font-size: 0.75rem; margin-top: 1.2rem; line-height: 1.6; }
+
+label { display: block; }
 input {
-  flex: 1 1 14rem;
-  padding: 0.45rem 0.6rem;
-  border: 1px solid var(--border);
+  width: 100%;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
   border-radius: 6px;
+  color: var(--text);
+  padding: 0.6rem 0.75rem;
+  font: inherit;
+  margin-bottom: 0.7rem;
 }
+input:focus { outline: none; border-color: var(--green); box-shadow: 0 0 0 3px rgba(61,220,151,0.12); }
+
 button {
-  padding: 0.45rem 0.9rem;
-  border: 0;
-  border-radius: 6px;
-  background: var(--accent);
-  color: #fff;
-  cursor: pointer;
+  font: inherit; font-size: 0.78rem; letter-spacing: 0.1em;
+  background: var(--green); color: #06281a;
+  border: 0; border-radius: 6px;
+  padding: 0.6rem 1.1rem; cursor: pointer; font-weight: 700;
 }
-button:hover { filter: brightness(1.1); }
-.status.ok { color: var(--ok); }
-.status.err { color: var(--err); }
-.warn { color: var(--warn); font-weight: 600; }
+button:hover { filter: brightness(1.12); }
+button.ghost {
+  background: transparent; color: var(--dim);
+  border: 1px solid var(--line);
+}
+button.ghost:hover { color: var(--text); border-color: var(--dim); filter: none; }
+button.linklike {
+  background: none; border: 0; color: var(--green);
+  padding: 0.4rem 0; letter-spacing: 0.02em; font-weight: 400;
+}
+
+.status { font-size: 0.8rem; min-height: 1.2em; margin: 0.4rem 0 0; }
+.status.ok { color: var(--green); }
+.status.err { color: var(--red); }
+
+/* ---------- shell ---------- */
+#shell { display: flex; min-height: 100vh; }
+body.locked #shell { display: none; }
+
+#side {
+  width: 13.5rem; flex: none;
+  display: flex; flex-direction: column; gap: 1.4rem;
+  padding: 1.3rem 1rem;
+  background: var(--panel-2);
+  border-right: 1px solid var(--line);
+}
+#side nav { display: flex; flex-direction: column; gap: 0.25rem; }
+button.nav {
+  background: none; border: 0; border-left: 2px solid transparent; border-radius: 0 6px 6px 0;
+  color: var(--dim); text-align: left; font-weight: 400; letter-spacing: 0.02em;
+  padding: 0.55rem 0.8rem; font-size: 0.85rem;
+}
+button.nav:hover { color: var(--text); background: rgba(255,255,255,0.025); filter: none; }
+button.nav.active { color: var(--green); border-left-color: var(--green); background: rgba(61,220,151,0.06); }
+.side-foot { margin-top: auto; display: flex; flex-direction: column; gap: 0.7rem; font-size: 0.75rem; color: var(--dim); }
+
+.led { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); display: inline-block; }
+.led.on { background: var(--green); box-shadow: 0 0 8px rgba(61,220,151,0.8); animation: pulse 2.2s ease-in-out infinite; }
+.led.bad { background: var(--red); box-shadow: 0 0 8px rgba(255,93,93,0.8); }
+.led-row { display: inline-flex; align-items: center; gap: 0.45rem; }
+
+#main { flex: 1; padding: 1.4rem 2rem 3rem; max-width: 75rem; }
+#topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding-bottom: 1rem; border-bottom: 1px solid var(--line); margin-bottom: 1.4rem;
+}
+#topbar h1 { font-size: 1.15rem; margin: 0; letter-spacing: 0.03em; }
+.top-right { display: flex; align-items: center; gap: 1.1rem; font-size: 0.78rem; color: var(--dim); }
+.chip {
+  border: 1px solid var(--line); border-radius: 99px;
+  padding: 0.2rem 0.7rem; font-size: 0.72rem; color: var(--dim);
+  max-width: 24rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ---------- cards ---------- */
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0.9rem; }
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1rem 1.1rem;
+  animation: rise 0.45s cubic-bezier(0.2, 0.9, 0.3, 1) both;
+}
+/* staggered reveal — CSP (default-src 'self') bans inline style attrs, so the
+   delays live here as nth-child rules instead of per-element --i vars */
+.cards .card:nth-child(2), .twocol .card:nth-child(1), #view-quickstart .card:nth-child(3) { animation-delay: 60ms; }
+.cards .card:nth-child(3), .twocol .card:nth-child(2), #view-quickstart .card:nth-child(4) { animation-delay: 120ms; }
+.cards .card:nth-child(4) { animation-delay: 180ms; }
+.card .big { font-size: 1.9rem; font-weight: 700; letter-spacing: -0.02em; }
+.card .sub { color: var(--dim); font-size: 0.72rem; margin-top: 0.2rem; }
+.twocol { display: grid; grid-template-columns: 3fr 2fr; gap: 0.9rem; margin-top: 0.9rem; }
+@media (max-width: 56rem) { .twocol { grid-template-columns: 1fr; } #side { width: 10.5rem; } }
+
+/* ---------- tables ---------- */
+table.data { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+table.data th {
+  text-align: left; font-size: 0.65rem; letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--dim); font-weight: 500; padding: 0.4rem 0.55rem; border-bottom: 1px solid var(--line);
+}
+table.data td { padding: 0.5rem 0.55rem; border-bottom: 1px solid rgba(255,255,255,0.04); }
+table.data td.num, table.data th.num { text-align: right; }
+td.empty { color: var(--dim); font-size: 0.78rem; }
+td .pill {
+  border-radius: 99px; padding: 0.05rem 0.55rem; font-size: 0.7rem;
+  background: rgba(61,220,151,0.12); color: var(--green);
+}
+td .pill.err { background: rgba(255,93,93,0.12); color: var(--red); }
+td button { padding: 0.25rem 0.6rem; font-size: 0.68rem; background: transparent; color: var(--red); border: 1px solid rgba(255,93,93,0.4); }
+td button:hover { background: rgba(255,93,93,0.12); filter: none; }
+
+/* ---------- keys view ---------- */
+.row { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
+.row input { flex: 1 1 12rem; margin-bottom: 0; }
+#issue-card { margin-bottom: 0.9rem; }
 #plaintext-box {
-  margin: 0.8rem 0;
-  padding: 0.8rem;
-  border: 1px solid var(--warn);
-  border-radius: 6px;
-  background: #fffaf5;
+  margin-top: 1rem; padding: 0.9rem 1rem;
+  border: 1px solid rgba(255,180,84,0.5); border-radius: 8px;
+  background: rgba(255,180,84,0.06);
 }
-#plaintext-box code { word-break: break-all; user-select: all; }
-table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
-th, td { text-align: left; padding: 0.45rem 0.6rem; border-bottom: 1px solid var(--border); }
-th { font-size: 0.8rem; text-transform: uppercase; color: #475467; }
-td button { background: var(--err); padding: 0.25rem 0.6rem; font-size: 0.85rem; }
+.warn-label { color: var(--amber); }
+code.reveal {
+  flex: 1 1 18rem; word-break: break-all; user-select: all;
+  color: var(--amber); font-size: 0.85rem;
+}
+
+/* ---------- quickstart ---------- */
+#view-quickstart .card { margin-bottom: 0.9rem; }
+.snippet-head { display: flex; justify-content: space-between; align-items: center; }
+.snippet-head .microlabel { margin-bottom: 0; }
+pre.snippet {
+  margin: 0.7rem 0 0; padding: 0.85rem 1rem;
+  background: var(--panel-2);
+  border: 1px solid var(--line); border-left: 2px solid var(--green);
+  border-radius: 6px;
+  overflow-x: auto; font-size: 0.8rem; line-height: 1.5;
+}
+pre.snippet code { user-select: all; }
+.hint { color: var(--dim); font-size: 0.82rem; }
+.hint b { color: var(--text); }
+.ko { color: var(--dim); font-size: 0.9em; }
+
+/* ---------- motion ---------- */
+@keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+@media (prefers-reduced-motion: reduce) {
+  .card, .lock-card { animation: none; }
+  .led.on { animation: none; }
+}
