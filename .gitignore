@@ -16,3 +16,6 @@ coverage.out
 
 # co-agent consensus ephemeral state
 .claude/co-agent-consensus/
+
+# operator-local notes (never commit)
+/secrets
