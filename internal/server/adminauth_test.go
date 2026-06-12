@@ -63,9 +63,9 @@ func (f *fakeVerifier) Verify(_ context.Context, _ string) (adminauth.Claims, er
 // adminAuthHarness wires AdminAuth with a capture handler; returns the
 // recorder factory plus captured identity/denial state.
 type adminAuthHarness struct {
-	identity  *principal.AdminIdentity
-	denials   []string
-	handler   http.Handler
+	identity *principal.AdminIdentity
+	denials  []string
+	handler  http.Handler
 }
 
 func newAdminAuthHarness(tokens []string, v OIDCVerifier, mapping adminauth.MappingConfig) *adminAuthHarness {
