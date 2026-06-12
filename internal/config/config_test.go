@@ -123,3 +123,128 @@ func TestLoadKeyStoreAuditAdmin(t *testing.T) {
 		t.Fatalf("audit: %+v", cfg.Audit)
 	}
 }
+
+// --- OIDC admin auth (plan 2026-06-12, tasks 1) ---
+
+// writeOIDCConfig writes a minimal config with the given oidc block (raw JSON,
+// empty string = omit) and admin token env ref, returning its path.
+func writeOIDCConfig(t *testing.T, oidcJSON string) string {
+	t.Helper()
+	t.Setenv("TEST_ADMIN_TOKEN", testAdminTokenValue)
+	oidcField := ""
+	if oidcJSON != "" {
+		oidcField = `, "oidc": ` + oidcJSON
+	}
+	cfg := `{
+	  "server": {
+	    "listen": ":8080", "admin_listen": ":9090",
+	    "admin_auth": { "token_refs": [ { "env": "TEST_ADMIN_TOKEN" } ]` + oidcField + ` }
+	  },
+	  "key_store": { "type": "sqlite", "path": "/tmp/k.db" },
+	  "audit": { "buffer": { "path": "/tmp/a.wal" }, "sinks": [ { "type": "stdout" } ] }
+	}`
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(p, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+var testAdminTokenValue = "opaque-static-token"
+
+func TestOIDCConfigLoads(t *testing.T) {
+	cfg, err := Load(writeOIDCConfig(t, `{
+	  "issuer": "https://idp.example.com/realms/dev",
+	  "client_id": "inferplane-admin",
+	  "admin_groups": ["platform-admins"],
+	  "group_mappings": [
+	    {"group": "team-alpha", "teams": ["alpha"]},
+	    {"group": "*", "teams": ["sandbox"]}
+	  ]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := cfg.Server.AdminAuth.OIDC
+	if o == nil {
+		t.Fatal("oidc block not parsed")
+	}
+	if o.Issuer != "https://idp.example.com/realms/dev" || o.ClientID != "inferplane-admin" {
+		t.Fatalf("issuer/client_id: %+v", o)
+	}
+	if o.GroupsClaim != "groups" {
+		t.Fatalf("groups_claim default = %q, want groups", o.GroupsClaim)
+	}
+	if len(o.GroupMappings) != 2 || o.GroupMappings[0].Teams[0] != "alpha" {
+		t.Fatalf("group_mappings: %+v", o.GroupMappings)
+	}
+}
+
+func TestOIDCConfigAbsentIsNil(t *testing.T) {
+	cfg, err := Load(writeOIDCConfig(t, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.AdminAuth.OIDC != nil {
+		t.Fatal("oidc must be nil when absent")
+	}
+}
+
+func TestOIDCConfigRejectsMissingClientID(t *testing.T) {
+	for name, block := range map[string]string{
+		"empty client_id": `{"issuer": "https://idp.example.com", "client_id": ""}`,
+		"empty issuer":    `{"issuer": "", "client_id": "x"}`,
+	} {
+		if _, err := Load(writeOIDCConfig(t, block)); err == nil {
+			t.Fatalf("%s: want load error", name)
+		}
+	}
+}
+
+func TestOIDCConfigRejectsNonHTTPSIssuer(t *testing.T) {
+	for name, issuer := range map[string]string{
+		"http":       "http://idp.example.com",
+		"query":      "https://idp.example.com/?x=1",
+		"fragment":   "https://idp.example.com/#frag",
+		"userinfo":   "https://user:pw@idp.example.com",
+		"not a url":  "idp.example.com",
+		"empty host": "https://",
+	} {
+		block := `{"issuer": "` + issuer + `", "client_id": "x"}`
+		if _, err := Load(writeOIDCConfig(t, block)); err == nil {
+			t.Fatalf("%s (%s): want load error", name, issuer)
+		}
+	}
+}
+
+func TestOIDCConfigRejectsDuplicateGroupKeys(t *testing.T) {
+	block := `{"issuer": "https://idp.example.com", "client_id": "x",
+	  "group_mappings": [
+	    {"group": "team-a", "teams": ["a"]},
+	    {"group": "team-a", "teams": ["b"]}
+	  ]}`
+	if _, err := Load(writeOIDCConfig(t, block)); err == nil {
+		t.Fatal("duplicate group keys: want load error")
+	}
+}
+
+// TestOIDCConfigRejectsJWTShapedStaticToken pins the break-glass invariant
+// (P2 gate, triple-confirmed): a static admin token that the shared shape
+// predicate would route to the OIDC path can never be configured alongside an
+// oidc block — it would be unverifiable and lock operators out during an IdP
+// outage.
+func TestOIDCConfigRejectsJWTShapedStaticToken(t *testing.T) {
+	old := testAdminTokenValue
+	testAdminTokenValue = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln" // JWT-shaped
+	defer func() { testAdminTokenValue = old }()
+
+	block := `{"issuer": "https://idp.example.com", "client_id": "x"}`
+	if _, err := Load(writeOIDCConfig(t, block)); err == nil {
+		t.Fatal("JWT-shaped static token with oidc enabled: want load error")
+	}
+
+	// Without the oidc block the same token loads fine (back-compat).
+	if _, err := Load(writeOIDCConfig(t, "")); err != nil {
+		t.Fatalf("JWT-shaped token without oidc must load: %v", err)
+	}
+}

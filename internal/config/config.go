@@ -6,8 +6,11 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
+
+	"github.com/inferplane/inferplane/internal/adminauth"
 )
 
 type SecretRef struct {
@@ -46,9 +49,31 @@ type ModelConfig struct {
 
 // AdminAuth guards the admin plane (§5.5). Tokens are referenced via
 // SecretRef (env/file) and resolved into Tokens at load — never inline.
+// OIDC (v0.2, ADR-004) promotes the admin API to IdP-group authorization;
+// the static tokens remain as break-glass.
 type AdminAuth struct {
 	TokenRefs []SecretRef `json:"token_refs,omitempty"`
 	Tokens    []string    `json:"-"` // resolved at load
+	OIDC      *OIDCConfig `json:"oidc,omitempty"`
+}
+
+// OIDCConfig connects the Identity layer (§5.1): the gateway validates
+// externally-acquired ID tokens against the issuer's JWKS and owns only the
+// groups→team mapping rules. Issuer must be an absolute https URL (MITM-JWKS
+// / SSRF-by-config guard); client_id is the mandatory expected audience —
+// leaving it optional is the classic cross-app token-reuse hole.
+type OIDCConfig struct {
+	Issuer        string         `json:"issuer"`
+	ClientID      string         `json:"client_id"`
+	GroupsClaim   string         `json:"groups_claim,omitempty"` // default "groups"; top-level claim, no traversal
+	AdminGroups   []string       `json:"admin_groups,omitempty"`
+	GroupMappings []GroupMapping `json:"group_mappings,omitempty"`
+}
+
+// GroupMapping maps one IdP group to gateway teams ("*" = explicit wildcard).
+type GroupMapping struct {
+	Group string   `json:"group"`
+	Teams []string `json:"teams"`
 }
 
 // TLSConfig optionally terminates TLS on the data plane (non-K8s single binary,
@@ -185,7 +210,47 @@ func Load(path string) (*Config, error) {
 		}
 		cfg.Server.AdminAuth.Tokens = append(cfg.Server.AdminAuth.Tokens, tok)
 	}
+	if err := validateOIDC(&cfg.Server.AdminAuth); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+// validateOIDC enforces the ADR-004 load-time rules when the oidc block is
+// present: mandatory issuer (absolute https, no query/fragment/userinfo) and
+// client_id, unique group keys, default groups_claim, and — the break-glass
+// invariant — no static admin token may be JWT-shaped, because AdminAuth
+// routes every JWT-shaped bearer to the OIDC path and a shaped static token
+// would lock operators out during an IdP outage. The shape check is
+// adminauth.IsOIDCBearerShape, the SAME function the middleware routes with.
+func validateOIDC(aa *AdminAuth) error {
+	o := aa.OIDC
+	if o == nil {
+		return nil
+	}
+	if o.ClientID == "" {
+		return fmt.Errorf("config: oidc.client_id is required (it is the expected token audience)")
+	}
+	u, err := url.Parse(o.Issuer)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return fmt.Errorf("config: oidc.issuer must be an absolute https URL without query/fragment/userinfo, got %q", o.Issuer)
+	}
+	if o.GroupsClaim == "" {
+		o.GroupsClaim = "groups"
+	}
+	seen := map[string]bool{}
+	for _, m := range o.GroupMappings {
+		if seen[m.Group] {
+			return fmt.Errorf("config: oidc.group_mappings has duplicate group %q", m.Group)
+		}
+		seen[m.Group] = true
+	}
+	for i, tok := range aa.Tokens {
+		if adminauth.IsOIDCBearerShape(tok) {
+			return fmt.Errorf("config: admin token_refs[%d] resolves to a JWT-shaped value; with oidc enabled it would be routed to the OIDC path and break the break-glass invariant — use an opaque token", i)
+		}
+	}
+	return nil
 }
 
 func resolveSecret(ref *SecretRef) (string, error) {
