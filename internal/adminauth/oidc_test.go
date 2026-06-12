@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -345,5 +346,53 @@ func TestVerifierIsLazyAtConstruction(t *testing.T) {
 	}
 	if v.discoveryAttempts.Load() != 0 {
 		t.Fatal("constructor must not attempt discovery")
+	}
+}
+
+// TestVerifyAzpOnSingleAudience (P4 gate): azp, when PRESENT, must name us —
+// even on a single-audience token (OIDC Core 3.1.3.7 applies to azp presence,
+// not just multi-audience).
+func TestVerifyAzpOnSingleAudience(t *testing.T) {
+	idp := newFakeIdP(t)
+	v := newTestVerifier(idp, cid)
+	if _, err := v.Verify(context.Background(), idp.mint(t, "RS256", "r1", cid, map[string]any{"azp": "other-app"})); err == nil {
+		t.Fatal("single-aud token with foreign azp must be rejected")
+	}
+	if _, err := v.Verify(context.Background(), idp.mint(t, "RS256", "r1", cid, map[string]any{"azp": cid})); err != nil {
+		t.Fatalf("single-aud token with our azp must verify: %v", err)
+	}
+}
+
+// slowFailingKeySet fails verification after a delay and counts entries —
+// the concurrency probe for the miss limiter's single-flight gate.
+type slowFailingKeySet struct {
+	entered atomic.Int64
+	delay   time.Duration
+}
+
+func (s *slowFailingKeySet) VerifySignature(ctx context.Context, _ string) ([]byte, error) {
+	s.entered.Add(1)
+	time.Sleep(s.delay)
+	return nil, context.DeadlineExceeded
+}
+
+// TestMissLimiterSingleFlight (P4 gate): a concurrent forged-kid burst must
+// reach the inner (network-backed) key set at most once — concurrent callers
+// fail fast instead of racing past an un-armed lastMiss.
+func TestMissLimiterSingleFlight(t *testing.T) {
+	inner := &slowFailingKeySet{delay: 100 * time.Millisecond}
+	l := &missLimitedKeySet{inner: inner, window: time.Second}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			l.VerifySignature(context.Background(), "a.b.c")
+		}()
+	}
+	wg.Wait()
+	if got := inner.entered.Load(); got != 1 {
+		t.Fatalf("inner key set entered %d times during concurrent burst, want 1", got)
 	}
 }

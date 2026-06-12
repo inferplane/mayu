@@ -442,8 +442,11 @@ func TestE2EAdminActionsAudited(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodDelete, adminURL+"/admin/keys/"+keyID, nil)
 	req.Header.Set("Authorization", "Bearer "+e2eAdminToken)
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil || resp.StatusCode != http.StatusNoContent {
-		t.Fatalf("revoke: %v %d", err, resp.StatusCode)
+	if err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("revoke: status %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 	shutdown()

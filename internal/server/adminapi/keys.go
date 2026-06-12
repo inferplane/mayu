@@ -114,8 +114,13 @@ func (h *KeysHandler) revoke(w http.ResponseWriter, r *http.Request, id principa
 	// is small (an admin-plane operation). Non-entitled callers get an
 	// explicit 403 (and the denial is audited) — key IDs are not secret
 	// material, so the existence signal is acceptable and the audit trail
-	// is worth more.
-	team, found := h.teamOf(r, keyID)
+	// is worth more. A lookup ERROR fails closed (P4 gate): proceeding
+	// without a team would skip the entitlement check entirely.
+	team, found, err := h.teamOf(r, keyID)
+	if err != nil {
+		http.Error(w, `{"error":"team lookup failed"}`, http.StatusInternalServerError)
+		return
+	}
 	if found && !id.Entitled(team) {
 		h.adminEvent("admin_denied", id, team, keyID)
 		http.Error(w, `{"error":"not entitled to team"}`, http.StatusForbidden)
@@ -129,15 +134,15 @@ func (h *KeysHandler) revoke(w http.ResponseWriter, r *http.Request, id principa
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *KeysHandler) teamOf(r *http.Request, keyID string) (string, bool) {
+func (h *KeysHandler) teamOf(r *http.Request, keyID string) (string, bool, error) {
 	ps, err := h.store.List(r.Context())
 	if err != nil {
-		return "", false
+		return "", false, err
 	}
 	for _, p := range ps {
 		if p.KeyID == keyID {
-			return p.Team, true
+			return p.Team, true, nil
 		}
 	}
-	return "", false
+	return "", false, nil
 }

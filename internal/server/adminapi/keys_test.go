@@ -220,3 +220,27 @@ func TestListFailClosedWithoutIdentity(t *testing.T) {
 		t.Fatalf("member list = %d, want 200", rec.Code)
 	}
 }
+
+// erroringStore wraps a Store and fails List — the P4-gate probe for the
+// revoke fail-closed path.
+type erroringStore struct{ keystore.Store }
+
+func (erroringStore) List(context.Context) ([]keystore.Principal, error) {
+	return nil, context.DeadlineExceeded
+}
+
+// TestRevokeFailsClosedOnLookupError (P4 gate): if the team lookup errors,
+// revoke must 500 — proceeding would skip the entitlement check (fail-open).
+func TestRevokeFailsClosedOnLookupError(t *testing.T) {
+	store := newTestStore(t)
+	_, p, _ := store.Create(context.Background(), "alpha", []string{"*"})
+	h := NewKeysHandler(erroringStore{store}, nil)
+	if rec := doAs(t, h, &memberID, "DELETE", "/admin/keys/"+p.KeyID, ""); rec.Code != 500 {
+		t.Fatalf("revoke with failing lookup = %d, want 500 (fail-closed)", rec.Code)
+	}
+	// The key must still exist (revoke must not have run).
+	ps, err := store.List(context.Background())
+	if err != nil || len(ps) != 1 {
+		t.Fatalf("key was revoked despite failed entitlement lookup: %v %v", ps, err)
+	}
+}

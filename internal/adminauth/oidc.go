@@ -128,13 +128,22 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (Claims, error) {
 	if err := idt.Claims(&extra); err != nil {
 		return Claims{}, fmt.Errorf("oidc verify: claims: %w", err)
 	}
-	if extra.Nbf != 0 && time.Unix(int64(extra.Nbf), 0).After(now.Add(skew)) {
-		return Claims{}, errors.New("oidc verify: token not yet valid (nbf)")
+	if extra.Nbf != 0 {
+		// Preserve fractional NumericDate seconds — truncation would grant up
+		// to ~1s beyond the skew window (P4 gate).
+		secs := int64(extra.Nbf)
+		nanos := int64((extra.Nbf - float64(secs)) * 1e9)
+		if time.Unix(secs, nanos).After(now.Add(skew)) {
+			return Claims{}, errors.New("oidc verify: token not yet valid (nbf)")
+		}
 	}
-	// OIDC Core §3.1.3.7: with multiple audiences the authorized party must
-	// be us — otherwise a token minted for another app verifies here.
-	if len(idt.Audience) > 1 && extra.Azp != v.cfg.ClientID {
-		return Claims{}, errors.New("oidc verify: multi-audience token requires azp == client_id")
+	// OIDC Core §3.1.3.7 (P4 gate): when azp is PRESENT it must name us —
+	// regardless of audience count; and a multi-audience token must carry it.
+	if extra.Azp != "" && extra.Azp != v.cfg.ClientID {
+		return Claims{}, errors.New("oidc verify: azp does not match client_id")
+	}
+	if len(idt.Audience) > 1 && extra.Azp == "" {
+		return Claims{}, errors.New("oidc verify: multi-audience token requires azp")
 	}
 
 	groups, err := extractGroups(idt, v.cfg.GroupsClaim)
@@ -187,21 +196,34 @@ type missLimitedKeySet struct {
 
 	mu       sync.Mutex
 	lastMiss time.Time
+	inFlight bool
 }
 
 func (l *missLimitedKeySet) VerifySignature(ctx context.Context, jwt string) ([]byte, error) {
+	// Single-flight gate (P4 gate): without it, a concurrent forged-kid burst
+	// all passes the empty lastMiss check before the first failure arms the
+	// window — N parallel verifications reach the network-backed key set.
 	l.mu.Lock()
 	if !l.lastMiss.IsZero() && time.Since(l.lastMiss) < l.window {
 		l.mu.Unlock()
 		return nil, errors.New("jwks: verification rate-limited after recent failure")
 	}
+	if l.inFlight {
+		l.mu.Unlock()
+		return nil, errors.New("jwks: verification already in flight, retry shortly")
+	}
+	l.inFlight = true
 	l.mu.Unlock()
 
 	payload, err := l.inner.VerifySignature(ctx, jwt)
+
+	l.mu.Lock()
+	l.inFlight = false
 	if err != nil {
-		l.mu.Lock()
 		l.lastMiss = time.Now()
-		l.mu.Unlock()
+	}
+	l.mu.Unlock()
+	if err != nil {
 		return nil, err
 	}
 	return payload, nil
