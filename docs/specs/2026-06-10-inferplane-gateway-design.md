@@ -818,11 +818,21 @@ MAINTAINERS.md, SECURITY.md, CODE_OF_CONDUCT.md, 공개 로드맵.
 
 ### v0.2 — 거버넌스 완성
 
-- 감사로그 외부 앵커링 (S3 Object Lock) — v0.1 해시 체인의 보증 상향
-- OIDC SSO (Dex/Keycloak/Okta) — Identity 계층 연결, groups → team 매핑
+엔터프라이즈 채택 임팩트 기준 우선순위 (2026-06-12, ADR-003 —
+경쟁사 유료벽의 정중앙부터 친다):
+
+1. OIDC SSO **무료** (Dex/Keycloak/Okta) — Identity 계층 연결, groups → team 매핑
+2. 콘솔 거버넌스 뷰 — 팀별 쿼터/예산 게이지(기존 `quota_utilization`/`budget_spend`
+   메트릭 재활용) + 원클릭 audit verify 버튼 (변조감지 시연)
+3. 차지백 리포트 — `inferplane report` 서브커맨드: audit의 팀·모델·µUSD에서
+   월별 CSV 생성 (재무팀 락인)
+4. PII 마스킹 플러그인 (캐시 파괴 명시 opt-in + 비용 경고)
+5. 감사로그 외부 앵커링 (S3 Object Lock) — v0.1 해시 체인의 보증 상향
+
+후순위 (순서 무관):
+
 - OTel trace (GenAI conventions)
-- 키 발급 셀프서비스 페이지 (최소 UI — 로그인 → 내 키 발급)
-- PII 마스킹 플러그인 (캐시 파괴 명시 opt-in + 비용 경고)
+- 키 발급 셀프서비스 페이지 (최소 UI — 로그인 → 내 키 발급; ADR-002 콘솔 위에 구축)
 - Redis/Valkey quota 스토어 HA 검증, Postgres key store (다중 레플리카 필수 경로)
 - 분산 rate limit (Redis/Valkey — 다중 레플리카 합산 집행)
 - 팀별 upstream 자격 오버라이드 (Role ARN — Bedrock noisy-neighbor 분산)
