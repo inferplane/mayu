@@ -27,9 +27,15 @@ hot-reload, userinfo calls.
 - **Dependency**: `coreos/go-oidc/v3` + `golang.org/x/oauth2` (pure-Go, CNCF
   ecosystem standard; CGO_ENABLED=0 preserved).
 - **Validation**: ID token; `alg` hard-pinned to {RS256, ES256}; `iss`;
-  **mandatory** `aud`/client_id (empty config ⇒ load error — the classic OIDC
-  hole); `exp`/`nbf`/`iat` with ±60s skew; JWKS lazy fetch + TTL cache +
-  rate-limited rollover refetch on unknown `kid`.
+  audience semantics pinned (panel r1): **`aud` must contain the configured
+  `client_id` (mandatory, empty ⇒ load error)**, and a token with MULTIPLE
+  audiences is rejected unless `azp` is present and equals `client_id`
+  (OIDC Core §3.1.3.7 — prevents cross-app token reuse); `exp`/`nbf`/`iat`
+  with ±60s skew — go-oidc exposes no leeway knob, so the wrapper does its own
+  skew-aware checks (built-in expiry check disabled, replaced); JWKS lazy
+  fetch + TTL cache + rate-limited rollover refetch on unknown `kid` +
+  **negative cache with backoff for discovery/JWKS failures** (an IdP outage
+  flood must not hammer the IdP nor add admin-plane latency).
 - **Mapping**: exact group match + explicit `*`; multi-group ⇒ team **union**;
   `admin_groups` ⇒ all teams; **no match ⇒ 403** (authenticated, unauthorized).
 - **Composition**: ONE middleware; total bearer-shape discriminator (3
@@ -38,7 +44,15 @@ hot-reload, userinfo calls.
   static comparison (auth-bypass/timing-oracle risk).
 - **Identity**: new `principal.AdminIdentity` under a separate ctx key from the
   data-plane Principal; break-glass injects sentinel `{Subject: "break-glass",
-  IsAdmin: true}`.
+  IsAdmin: true}`. PII-minimal by construction (panel r1): the type carries
+  **only `{Subject, Teams, IsAdmin, AuthMethod}`** — email and raw IdP groups
+  never enter the request context; groups are consumed inside the middleware's
+  mapping step and dropped.
+- **Static-token collision guard** (chair + both panels, r1): a static admin
+  token that happens to be JWT-shaped (3 dot-separated base64url segments)
+  would be routed to the OIDC path and locked out — breaking break-glass
+  during an IdP outage. Config load REJECTS JWT-shaped values in
+  `admin_auth.token_refs` whenever the `oidc` block is present.
 - **Audit**: `sub` (opaque) into existing `PrincipalRef.User` — **never email,
   never raw groups** (PII / ADR-003 content-free posture); new additive
   `auth_method` field. Also closes a pre-existing §5.5 gap: admin key
@@ -69,10 +83,14 @@ hot-reload, userinfo calls.
 **Steps:**
 
 - [ ] Failing tests: `TestOIDCConfigLoads` (full block parses: issuer,
-      client_id, audience, groups_claim default `"groups"`, admin_groups,
-      group_mappings[]{group, teams[]}); `TestOIDCConfigRejectsMissingAudience`
-      (block present + empty audience/client_id/issuer ⇒ load error);
-      `TestOIDCConfigRejectsDuplicateGroupKeys`.
+      client_id, groups_claim default `"groups"`, admin_groups,
+      group_mappings[]{group, teams[]}); `TestOIDCConfigRejectsMissingClientID`
+      (block present + empty client_id/issuer ⇒ load error);
+      `TestOIDCConfigRejectsDuplicateGroupKeys`;
+      `TestOIDCConfigRejectsJWTShapedStaticToken` (oidc block present + a
+      token_ref resolving to a 3-segment JWT-shaped value ⇒ load error naming
+      the offending ref — preserves the break-glass invariant; without the
+      oidc block, any token shape loads as before).
 - [ ] Add `OIDCConfig` under `AdminAuth` (json `oidc`, pointer — nil = absent).
       Pure schema + validation; NO network at load.
 - [ ] `go test ./internal/config/ -race` green. Commit (DCO sign-off).
@@ -89,8 +107,9 @@ hot-reload, userinfo calls.
 - [ ] Failing tests: `TestWithAdminAndAdminFrom` (round-trip, separate ctx key
       — storing AdminIdentity does NOT shadow the data-plane Principal and
       vice versa); `TestAdminFromAbsent`.
-- [ ] Add `AdminIdentity{Subject, Email string; Groups, Teams []string;
-      IsAdmin bool; AuthMethod string}` + `WithAdmin`/`AdminFrom` (new key).
+- [ ] Add `AdminIdentity{Subject string; Teams []string; IsAdmin bool;
+      AuthMethod string}` + `WithAdmin`/`AdminFrom` (new key). No email, no
+      raw groups — PII never enters the request context (panel r1).
 - [ ] `go test ./internal/principal/ -race` green. Commit (DCO sign-off).
 
 ### Task 3: groups→team mapping resolver (new leaf package)
@@ -124,13 +143,20 @@ hot-reload, userinfo calls.
       in-test RS256/ES256 keys; helper to mint arbitrary-claim JWTs.
 - [ ] Failing adversarial tests: valid RS256 ✓; valid ES256 ✓; `alg: none` ✗;
       HS256 signed with the RSA public key as HMAC secret ✗ (confusion);
-      wrong `iss` ✗; wrong/missing `aud` ✗; expired ✗; `iat` 5min future ✗
-      (skew leeway ±60s: 30s future ✓); unknown `kid` after key rotation ⇒
-      one refetch then ✓; refetch rate-limited (forged-kid flood does not
-      hammer the JWKS endpoint).
+      wrong `iss` ✗; `aud` missing client_id ✗; **multi-audience without
+      `azp` ✗; multi-audience with `azp == client_id` ✓; `azp != client_id`
+      ✗** (OIDC Core §3.1.3.7); expired ✗; `iat` 5min future ✗ (skew leeway
+      ±60s: 30s future ✓ — wrapper-side checks, go-oidc has no leeway knob);
+      unknown `kid` after key rotation ⇒ one refetch then ✓; refetch
+      rate-limited (forged-kid flood does not hammer the JWKS endpoint);
+      **discovery/JWKS outage: repeated JWT attempts hit the negative cache —
+      at most one outbound attempt per backoff window, request latency stays
+      bounded, and recovery works after the window** (outage flood test).
 - [ ] Implement `Verifier` wrapping `coreos/go-oidc/v3`: lazy discovery (IdP
-      down at boot ≠ startup failure), `SupportedSigningAlgs=[RS256,ES256]`,
-      mandatory audience, claims extraction with configurable groups_claim.
+      down at boot ≠ startup failure) with negative cache + backoff,
+      `SupportedSigningAlgs=[RS256,ES256]`, built-in expiry check replaced by
+      skew-aware wrapper checks, aud/azp rule above, claims extraction with
+      configurable groups_claim.
 - [ ] `go mod tidy`; confirm CGO-free (`CGO_ENABLED=0 go build ./...`).
 - [ ] `go test ./internal/adminauth/ -race` green. Commit (DCO sign-off).
 
@@ -201,8 +227,10 @@ keys for any team).
 - [ ] Failing audit tests: key create/revoke emit an audit record with
       `PrincipalRef.User = sub` (opaque — never email), `Team`, new additive
       `auth_method` field; record appended at END of PrincipalRef (hash chain
-      is line-byte based — old records still verify; add a mixed-version
-      verify test in `record_test.go`).
+      is line-byte based — old records still verify). Mixed-version verify
+      test uses a **raw JSONL byte fixture captured from a pre-change audit
+      log** (checked into testdata) interleaved with new-format records —
+      byte-exact, not re-serialized (panel r1).
 - [ ] E2E: `TestE2EAdminActionsAudited` — boot gateway, create+revoke via
       admin API, audit chain verifies and contains both admin events.
 - [ ] Wire the audit writer into `adminapi.NewKeysHandler` (signature change,
