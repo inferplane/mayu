@@ -59,6 +59,20 @@ func (b *breaker) RecordFailure(provider string) {
 	}
 }
 
+// Retain drops breaker entries whose key is not in keep, so stale state for a
+// removed/re-pointed provider does not linger across reloads. Guarded by the
+// same mutex as every other breaker op, so it is safe against concurrent
+// Allow/RecordResult.
+func (b *breaker) Retain(keep map[string]bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for k := range b.state {
+		if !keep[k] {
+			delete(b.state, k)
+		}
+	}
+}
+
 func (b *breaker) RecordSuccess(provider string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

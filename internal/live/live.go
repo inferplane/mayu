@@ -67,6 +67,29 @@ func (s *State) Models() map[string]config.ModelConfig {
 // Pricing returns the generation's pricing table (immutable).
 func (s *State) Pricing() *pricing.Table { return s.pricing }
 
+// Route returns the model's config (read-only — callers must not mutate the
+// returned Targets). Hot-path accessor: no copy, safe because a published
+// State is never mutated. Use Models() when a mutable copy is needed.
+func (s *State) Route(model string) (config.ModelConfig, bool) {
+	mc, ok := s.models[model]
+	return mc, ok
+}
+
+// Provider returns the built provider for a config name (read-only).
+func (s *State) Provider(name string) (providers.Provider, bool) {
+	p, ok := s.providers[name]
+	return p, ok
+}
+
+// ModelNames returns every configured model name (order unspecified).
+func (s *State) ModelNames() []string {
+	out := make([]string, 0, len(s.models))
+	for name := range s.models {
+		out = append(out, name)
+	}
+	return out
+}
+
 // Identities returns a copy of the config-name → identity (type+base_url) map.
 func (s *State) Identities() map[string]string {
 	out := make(map[string]string, len(s.identities))

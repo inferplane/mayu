@@ -10,6 +10,7 @@ import (
 
 	"github.com/inferplane/inferplane/internal/config"
 	"github.com/inferplane/inferplane/internal/keystore"
+	"github.com/inferplane/inferplane/internal/live"
 	"github.com/inferplane/inferplane/internal/metrics"
 	"github.com/inferplane/inferplane/internal/openai"
 	"github.com/inferplane/inferplane/internal/principal"
@@ -25,7 +26,7 @@ func testRouter() *router.Router {
 	models := map[string]config.ModelConfig{
 		"gpt-x": {Targets: []config.Target{{Provider: "p", Model: "gpt-x"}}},
 	}
-	return router.New(provs, models)
+	return router.New(holderFor(provs, models))
 }
 
 func TestChatNonStreamingConvertsMockCanonicalToOpenAI(t *testing.T) {
@@ -178,7 +179,7 @@ func TestChatNonStreamingFallsBackPreTTFT(t *testing.T) {
 			{Provider: "good", Model: "gpt-x"},
 		}},
 	}
-	h := NewChatHandler(router.New(provs, models))
+	h := NewChatHandler(router.New(holderFor(provs, models)))
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}`))
 	ctx := principal.With(req.Context(), keystore.Principal{AllowedModels: []string{"*"}})
@@ -229,7 +230,7 @@ func oaiWireRouter() *router.Router {
 	models := map[string]config.ModelConfig{
 		"qwen": {Targets: []config.Target{{Provider: "p", Model: "qwen"}}},
 	}
-	return router.New(provs, models)
+	return router.New(holderFor(provs, models))
 }
 
 func TestChatTeesOpenAIProviderVerbatim(t *testing.T) {
@@ -258,4 +259,14 @@ func TestChatTeesOpenAIProviderStreamVerbatim(t *testing.T) {
 	if !strings.Contains(body, `"v"`) || !strings.Contains(body, "data: [DONE]") {
 		t.Fatalf("openai-wire stream not teed verbatim: %s", body)
 	}
+}
+
+func holderFor(provs map[string]providers.Provider, models map[string]config.ModelConfig) *live.Holder {
+	ids := make(map[string]string, len(provs))
+	for n := range provs {
+		ids[n] = n
+	}
+	h := &live.Holder{}
+	h.Swap(live.NewState(provs, models, nil, ids))
+	return h
 }

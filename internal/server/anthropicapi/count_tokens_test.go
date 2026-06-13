@@ -18,7 +18,7 @@ func estimatorRouter() *router.Router {
 	models := map[string]config.ModelConfig{
 		"claude-sonnet-4-6": {Targets: []config.Target{{Provider: "p", Model: "claude-sonnet-4-6"}}},
 	}
-	return router.New(provs, models)
+	return router.New(holderFor(provs, models))
 }
 
 func TestCountTokensAlwaysValidJSON(t *testing.T) {

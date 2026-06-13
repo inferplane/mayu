@@ -85,7 +85,7 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 403, "permission_error", "model not allowed for this key: "+parsed.Model)
 		return
 	}
-	chain, err := h.r.ResolveChain(parsed.Model)
+	chain, _, err := h.r.ResolveChain(parsed.Model)
 	if err != nil {
 		// Unknown model is recorded as a started record carrying the 404 outcome,
 		// for consistency with the 403 allow-list deny above.

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -17,13 +16,13 @@ import (
 	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
 	"github.com/inferplane/inferplane/internal/limiter"
+	"github.com/inferplane/inferplane/internal/live"
 	"github.com/inferplane/inferplane/internal/metrics"
 	"github.com/inferplane/inferplane/internal/pricing"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/internal/server"
 	"github.com/inferplane/inferplane/internal/server/configapi"
 	"github.com/inferplane/inferplane/pkg/ulid"
-	"github.com/inferplane/inferplane/providers"
 )
 
 // gateway is the fully wired serve assembly with its listeners already bound.
@@ -33,6 +32,8 @@ type gateway struct {
 	cfg      *config.Config
 	store    keystore.Store
 	aud      *audit.Writer
+	holder   *live.Holder
+	router   *router.Router
 	dataLn   net.Listener
 	adminLn  net.Listener
 	dataSrv  *http.Server
@@ -72,44 +73,18 @@ func newGateway(cfgPath string) (*gateway, error) {
 	}
 	aud.SetMetrics(m) // audit_write_failures / buffer_utilization
 
-	// model_api[providerName] = {upstreamModelID: api} — gathered from model
-	// targets that name a non-empty api, so the bedrock factory can override
-	// its default invoke/converse routing per upstream model.
-	modelAPIByProvider := map[string]map[string]string{}
-	for _, mc := range cfg.Models {
-		for _, t := range mc.Targets {
-			if t.API != "" {
-				if modelAPIByProvider[t.Provider] == nil {
-					modelAPIByProvider[t.Provider] = map[string]string{}
-				}
-				modelAPIByProvider[t.Provider][t.Model] = t.API
-			}
-		}
+	// Topology generation (providers + routes + pricing) — built by the
+	// topology-only builder so the same path serves boot and hot reload
+	// (ADR-006). Published behind an atomic holder the router reads.
+	st, _, err := live.BuildState(cfg)
+	if err != nil {
+		store.Close()
+		aud.Close()
+		return nil, err
 	}
-
-	provs := map[string]providers.Provider{}
-	for name, pc := range cfg.Providers {
-		var settings map[string]string
-		if pc.Type == "bedrock" {
-			settings = map[string]string{
-				"region":    pc.Region,
-				"auth_mode": pc.Auth.Mode,
-				"profile":   pc.Auth.Profile,
-			}
-			if m := modelAPIByProvider[name]; len(m) > 0 {
-				b, _ := json.Marshal(m)
-				settings["model_api"] = string(b)
-			}
-		}
-		p, err := providers.New(providers.Config{Type: pc.Type, BaseURL: pc.BaseURL, APIKey: pc.APIKey, Settings: settings})
-		if err != nil {
-			store.Close()
-			aud.Close()
-			return nil, fmt.Errorf("provider %q: %w", name, err)
-		}
-		provs[name] = p
-	}
-	r := router.New(provs, cfg.Models)
+	holder := &live.Holder{}
+	holder.Swap(st)
+	r := router.New(holder)
 	r.SetMetrics(m) // circuit_state
 
 	// Governance pipeline: map config → governance/pricing config shapes (which
@@ -171,6 +146,8 @@ func newGateway(cfgPath string) (*gateway, error) {
 		cfg:      cfg,
 		store:    store,
 		aud:      aud,
+		holder:   holder,
+		router:   r,
 		dataLn:   dataLn,
 		adminLn:  adminLn,
 		dataSrv:  &http.Server{Handler: server.DataMux(r, store, aud, gov, m)},

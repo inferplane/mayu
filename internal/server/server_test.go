@@ -12,6 +12,7 @@ import (
 	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/config"
 	"github.com/inferplane/inferplane/internal/keystore"
+	"github.com/inferplane/inferplane/internal/live"
 	"github.com/inferplane/inferplane/internal/metrics"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/internal/server/configapi"
@@ -24,7 +25,7 @@ func TestDataMuxRoutesAndAuths(t *testing.T) {
 	models := map[string]config.ModelConfig{
 		"claude-sonnet-4-6": {Targets: []config.Target{{Provider: "p", Model: "claude-sonnet-4-6"}}},
 	}
-	r := router.New(provs, models)
+	r := router.New(newHolder(provs, models))
 	store := stubStore{key: "dev-key", p: keystore.Principal{KeyID: "ik_abc", Team: "platform-eng", AllowedModels: []string{"*"}}}
 	mux := DataMux(r, store, nil, nil, nil)
 
@@ -49,7 +50,7 @@ func TestDataMuxModelsContentNegotiation(t *testing.T) {
 	models := map[string]config.ModelConfig{
 		"claude-sonnet-4-6": {Targets: []config.Target{{Provider: "p", Model: "claude-sonnet-4-6"}}},
 	}
-	r := router.New(provs, models)
+	r := router.New(newHolder(provs, models))
 	store := stubStore{key: "dev-key", p: keystore.Principal{KeyID: "ik_abc", Team: "platform-eng", AllowedModels: []string{"*"}}}
 	mux := DataMux(r, store, nil, nil, nil)
 
@@ -78,7 +79,7 @@ func TestDataMuxChatCompletionsRoutes(t *testing.T) {
 	models := map[string]config.ModelConfig{
 		"claude-sonnet-4-6": {Targets: []config.Target{{Provider: "p", Model: "claude-sonnet-4-6"}}},
 	}
-	r := router.New(provs, models)
+	r := router.New(newHolder(provs, models))
 	store := stubStore{key: "dev-key", p: keystore.Principal{KeyID: "ik_abc", Team: "platform-eng", AllowedModels: []string{"*"}}}
 	mux := DataMux(r, store, nil, nil, nil)
 
@@ -313,4 +314,15 @@ func TestAdminMuxConfigEndpoint(t *testing.T) {
 	if strings.Contains(body, "sk-LEAK") {
 		t.Fatalf("config endpoint leaked secret value: %s", body)
 	}
+}
+
+// newHolder builds a live.Holder for router tests (no registry needed).
+func newHolder(provs map[string]providers.Provider, models map[string]config.ModelConfig) *live.Holder {
+	ids := make(map[string]string, len(provs))
+	for n := range provs {
+		ids[n] = n
+	}
+	h := &live.Holder{}
+	h.Swap(live.NewState(provs, models, nil, ids))
+	return h
 }

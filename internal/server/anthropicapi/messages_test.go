@@ -19,6 +19,7 @@ import (
 	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
 	"github.com/inferplane/inferplane/internal/limiter"
+	"github.com/inferplane/inferplane/internal/live"
 	"github.com/inferplane/inferplane/internal/metrics"
 	"github.com/inferplane/inferplane/internal/pricing"
 	"github.com/inferplane/inferplane/internal/principal"
@@ -42,7 +43,7 @@ func testRouter() *router.Router {
 	models := map[string]config.ModelConfig{
 		"claude-sonnet-4-6": {Targets: []config.Target{{Provider: "p", Model: "claude-sonnet-4-6"}}},
 	}
-	return router.New(provs, models)
+	return router.New(holderFor(provs, models))
 }
 
 func TestMessagesNonStreaming(t *testing.T) {
@@ -102,7 +103,7 @@ func (errStreamProvider) Stream(context.Context, *providers.ProxyRequest) (iter.
 func TestMessagesStreamingUpstreamErrorTeed(t *testing.T) {
 	provs := map[string]providers.Provider{"p": errStreamProvider{}}
 	models := map[string]config.ModelConfig{"m": {Targets: []config.Target{{Provider: "p", Model: "m"}}}}
-	h := NewMessagesHandler(router.New(provs, models))
+	h := NewMessagesHandler(router.New(holderFor(provs, models)))
 	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"m","stream":true,"messages":[]}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, allowAll(req))
@@ -132,7 +133,7 @@ func (headerProvider) Stream(context.Context, *providers.ProxyRequest) (iter.Seq
 func TestMessagesNonStreamingTeesUpstreamHeaders(t *testing.T) {
 	provs := map[string]providers.Provider{"p": headerProvider{}}
 	models := map[string]config.ModelConfig{"m": {Targets: []config.Target{{Provider: "p", Model: "m"}}}}
-	h := NewMessagesHandler(router.New(provs, models))
+	h := NewMessagesHandler(router.New(holderFor(provs, models)))
 	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"m","messages":[]}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, allowAll(req))
@@ -158,7 +159,7 @@ func (retryStreamProvider) Stream(context.Context, *providers.ProxyRequest) (ite
 func TestMessagesStreamingErrorTeesHeaders(t *testing.T) {
 	provs := map[string]providers.Provider{"p": retryStreamProvider{}}
 	models := map[string]config.ModelConfig{"m": {Targets: []config.Target{{Provider: "p", Model: "m"}}}}
-	h := NewMessagesHandler(router.New(provs, models))
+	h := NewMessagesHandler(router.New(holderFor(provs, models)))
 	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"m","stream":true,"messages":[]}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, allowAll(req))
@@ -191,7 +192,7 @@ func TestMessagesNonStreamingFallsBackPreTTFT(t *testing.T) {
 			{Provider: "good", Model: "claude-sonnet-4-6"},
 		}},
 	}
-	h := NewMessagesHandler(router.New(provs, models))
+	h := NewMessagesHandler(router.New(holderFor(provs, models)))
 	req := httptest.NewRequest("POST", "/v1/messages",
 		strings.NewReader(`{"model":"claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
 	rec := httptest.NewRecorder()
@@ -218,7 +219,7 @@ func TestMessagesStreamingFallsBackPreTTFT(t *testing.T) {
 			{Provider: "good", Model: "claude-sonnet-4-6"},
 		}},
 	}
-	h := NewMessagesHandler(router.New(provs, models))
+	h := NewMessagesHandler(router.New(holderFor(provs, models)))
 	req := httptest.NewRequest("POST", "/v1/messages",
 		strings.NewReader(`{"model":"claude-sonnet-4-6","stream":true,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
 	rec := httptest.NewRecorder()
@@ -420,4 +421,14 @@ func TestMessagesEmitsTwoPhaseAudit(t *testing.T) {
 	if !strings.Contains(out, `"ik_x"`) || !strings.Contains(out, `"platform-eng"`) {
 		t.Fatalf("audit missing principal: %s", out)
 	}
+}
+
+func holderFor(provs map[string]providers.Provider, models map[string]config.ModelConfig) *live.Holder {
+	ids := make(map[string]string, len(provs))
+	for n := range provs {
+		ids[n] = n
+	}
+	h := &live.Holder{}
+	h.Swap(live.NewState(provs, models, nil, ids))
+	return h
 }

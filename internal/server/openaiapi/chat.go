@@ -99,7 +99,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 403, "permission_error", "model not allowed for this key: "+canonical.Model)
 		return
 	}
-	chain, err := h.r.ResolveChain(canonical.Model)
+	chain, _, err := h.r.ResolveChain(canonical.Model)
 	if err != nil {
 		h.audit(p, canonical.Model, "", &audit.OutcomeRef{Status: 404})
 		// Pre-resolution reject: model is still attacker-controlled → sentinel label.
