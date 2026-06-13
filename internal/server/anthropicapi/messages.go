@@ -85,7 +85,7 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 403, "permission_error", "model not allowed for this key: "+parsed.Model)
 		return
 	}
-	chain, _, err := h.r.ResolveChain(parsed.Model)
+	chain, st, err := h.r.ResolveChain(parsed.Model)
 	if err != nil {
 		// Unknown model is recorded as a started record carrying the 404 outcome,
 		// for consistency with the 403 allow-list deny above.
@@ -95,6 +95,9 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 404, "not_found_error", "unknown model: "+parsed.Model)
 		return
 	}
+	// Pricing table from the SAME generation we resolved on (ADR-006): a reload
+	// between now and Settle must not bill at a different generation's rates.
+	table := st.Pricing()
 	// Governance pre-check (rate/quota/budget) BEFORE the upstream call. A block
 	// is recorded as a started record carrying the deny status.
 	if h.gov != nil {
@@ -128,9 +131,9 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 		var retriable bool
 		if stream {
-			retriable = h.serveStream(w, req, ct.Provider, pr, p, parsed.Model, ct.ProviderName, ct.Upstream, last, start)
+			retriable = h.serveStream(w, req, ct.Provider, pr, p, parsed.Model, ct.ProviderName, ct.Upstream, last, start, table)
 		} else {
-			retriable = h.serveComplete(w, req, ct.Provider, pr, p, parsed.Model, ct.ProviderName, ct.Upstream, last, start)
+			retriable = h.serveComplete(w, req, ct.Provider, pr, p, parsed.Model, ct.ProviderName, ct.Upstream, last, start, table)
 		}
 		if !retriable {
 			return // committed (success, or terminal error on the last target)
@@ -157,7 +160,7 @@ func govErrType(status int) string {
 // when the call failed pre-TTFT (transport error, or an upstream 5xx/429) AND a
 // next target exists (!last) — the caller then falls back. Otherwise it writes
 // the response/error to the client and returns false (committed).
-func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool, start time.Time) (retriable bool) {
+func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool, start time.Time, table *pricing.Table) (retriable bool) {
 	resp, err := prov.Complete(req.Context(), pr)
 	if err != nil {
 		if !last {
@@ -190,7 +193,7 @@ func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request
 	var cost *audit.CostRef
 	if resp.Parsed != nil {
 		usage = usageRef(resp.Parsed.Usage)
-		cost = h.settle(p.Team, providerName, model, upstream, resp.Parsed.Usage)
+		cost = h.settle(p.Team, providerName, model, upstream, resp.Parsed.Usage, table)
 		h.observeTokens(model, providerName, p.Team, resp.Parsed.Usage)
 	}
 	h.auditCompleted(p, model, upstream, resp.StatusCode, usage, cost)
@@ -203,7 +206,7 @@ func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request
 // (!last), it returns retriable=true and the caller falls back. Once the first
 // event is teed the response is committed; a mid-stream error terminates the
 // stream (no fallback). Returns false in all committed cases.
-func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool, start time.Time) (retriable bool) {
+func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool, start time.Time, table *pricing.Table) (retriable bool) {
 	seq, err := prov.Stream(req.Context(), pr)
 	if err != nil {
 		if !last {
@@ -261,7 +264,7 @@ func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, 
 			lastUsage = ev.Chunk.Usage
 		}
 	}
-	cost := h.settle(p.Team, providerName, model, upstream, lastUsage)
+	cost := h.settle(p.Team, providerName, model, upstream, lastUsage, table)
 	h.observeTokens(model, providerName, p.Team, lastUsage)
 	h.auditCompleted(p, model, upstream, 200, usage, cost)
 	h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 200, time.Since(start).Seconds(), ttft)
@@ -275,7 +278,7 @@ func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, 
 // M5 mapping notes: schema does not yet split cache_creation by TTL, so the
 // whole cache_creation_input_tokens total maps to CacheWrite5m as a
 // conservative default (the cheaper 5m tier); cache_read maps to CacheRead.
-func (h *MessagesHandler) settle(team, providerName, model, upstream string, u *schema.Usage) *audit.CostRef {
+func (h *MessagesHandler) settle(team, providerName, model, upstream string, u *schema.Usage, table *pricing.Table) *audit.CostRef {
 	if h.gov == nil || u == nil {
 		return nil
 	}
@@ -285,11 +288,11 @@ func (h *MessagesHandler) settle(team, providerName, model, upstream string, u *
 		CacheRead:    deref(u.CacheReadInputTokens),
 		CacheWrite5m: deref(u.CacheCreationInputTokens),
 	}
-	cost, missing := h.gov.Settle(team, providerName, upstream, pu)
+	cost, missing := h.gov.Settle(team, providerName, upstream, pu, table)
 	return &audit.CostRef{
 		AmountUSDMicros: cost,
 		PricingMissing:  missing,
-		PricingVersion:  h.gov.PricingVersion(),
+		PricingVersion:  governance.PricingVersionOf(table),
 	}
 }
 

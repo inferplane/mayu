@@ -301,7 +301,7 @@ func TestMessagesGovernorQuotaBlocks429(t *testing.T) {
 	teams := map[string]governance.TeamPolicy{
 		"platform-eng": {TokensPerDay: 1000, QuotaExceeded: "block"},
 	}
-	gov := governance.NewGovernor(teams, lim, budget.NewMemory(), govPricing(), nil)
+	gov := governance.NewGovernor(teams, lim, budget.NewMemory(), nil)
 	// Exhaust the team's daily token quota so the pre-check blocks.
 	lim.DebitQuota("quota:platform-eng", 1000, 24*time.Hour)
 
@@ -328,7 +328,7 @@ func TestMessagesGovernorSettlesCostIntoAudit(t *testing.T) {
 	teams := map[string]governance.TeamPolicy{
 		"platform-eng": {TokensPerDay: 1_000_000, QuotaExceeded: "block"},
 	}
-	gov := governance.NewGovernor(teams, limiter.NewMemory(), budget.NewMemory(), govPricing(), nil)
+	gov := governance.NewGovernor(teams, limiter.NewMemory(), budget.NewMemory(), nil)
 	h := NewMessagesHandlerFull(testRouter(), w, gov)
 	req := httptest.NewRequest("POST", "/v1/messages",
 		strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}`))
@@ -429,6 +429,6 @@ func holderFor(provs map[string]providers.Provider, models map[string]config.Mod
 		ids[n] = n
 	}
 	h := &live.Holder{}
-	h.Swap(live.NewState(provs, models, nil, ids))
+	h.Swap(live.NewState(provs, models, govPricing(), ids))
 	return h
 }

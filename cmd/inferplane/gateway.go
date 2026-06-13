@@ -18,7 +18,6 @@ import (
 	"github.com/inferplane/inferplane/internal/limiter"
 	"github.com/inferplane/inferplane/internal/live"
 	"github.com/inferplane/inferplane/internal/metrics"
-	"github.com/inferplane/inferplane/internal/pricing"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/internal/server"
 	"github.com/inferplane/inferplane/internal/server/configapi"
@@ -102,22 +101,10 @@ func newGateway(cfgPath string) (*gateway, error) {
 		}
 	}
 	policies := governance.PoliciesFromConfig(teamCfg)
-
-	overrides := map[string]map[string]pricing.ConfigRate{}
-	for provider, models := range cfg.Pricing.Overrides {
-		overrides[provider] = map[string]pricing.ConfigRate{}
-		for model, rc := range models {
-			overrides[provider][model] = pricing.ConfigRate{
-				InputPerMTok:        rc.InputPerMTok,
-				OutputPerMTok:       rc.OutputPerMTok,
-				CacheReadPerMTok:    rc.CacheReadPerMTok,
-				CacheWrite5mPerMTok: rc.CacheWrite5mPerMTok,
-				CacheWrite1hPerMTok: rc.CacheWrite1hPerMTok,
-			}
-		}
-	}
-	tbl := pricing.FromConfig(cfg.Pricing.OnMissing, overrides)
-	gov := governance.NewGovernor(policies, limiter.NewMemory(), budget.NewMemory(), tbl, m) // budget_spend / pricing_miss
+	// The pricing table lives in the live.State (built by live.BuildState) and
+	// is passed into Settle per request from the resolved snapshot, so the
+	// governor holds no pricing — only its persistent rate/budget counters.
+	gov := governance.NewGovernor(policies, limiter.NewMemory(), budget.NewMemory(), m) // budget_spend / pricing_miss
 
 	// Optional self-TLS for the data plane (design §2.3): non-K8s single-binary
 	// deployments can terminate their own TLS; K8s terminates at ingress/mesh.

@@ -29,18 +29,33 @@ type TeamPolicy struct {
 	BudgetExceeded       string
 }
 
+// Governor enforces rate/quota/budget and settles cost. Its stateful stores
+// (limiter rate buckets, budget µUSD counters) are owned here and PERSIST
+// across config hot-reloads. The pricing table is NOT stored — it is a
+// reloadable lookup, so Settle takes it as a parameter (the handler passes the
+// table from the live.State it resolved against), keeping this package a leaf
+// (no live/config import) and billing a request on the same generation it
+// resolved on (ADR-006).
 type Governor struct {
 	teams   map[string]TeamPolicy
 	lim     limiter.LimiterStore
 	bud     budget.BudgetStore
-	price   *pricing.Table
 	metrics *metrics.Metrics // nil-safe: no-op when nil
 }
 
 // NewGovernor builds the Governor. m is the Prometheus metrics sink for
 // budget_spend / pricing_miss; pass nil to disable metrics (unit tests).
-func NewGovernor(teams map[string]TeamPolicy, lim limiter.LimiterStore, bud budget.BudgetStore, price *pricing.Table, m *metrics.Metrics) *Governor {
-	return &Governor{teams: teams, lim: lim, bud: bud, price: price, metrics: m}
+func NewGovernor(teams map[string]TeamPolicy, lim limiter.LimiterStore, bud budget.BudgetStore, m *metrics.Metrics) *Governor {
+	return &Governor{teams: teams, lim: lim, bud: bud, metrics: m}
+}
+
+// PricingVersionOf returns the rate table version for the audit CostRef,
+// nil-safe.
+func PricingVersionOf(table *pricing.Table) string {
+	if table == nil {
+		return ""
+	}
+	return table.Version
 }
 
 // GovDecision is the PreCheck verdict. Status is the HTTP status to return when
@@ -49,14 +64,6 @@ type GovDecision struct {
 	Allowed bool
 	Status  int
 	Reason  string
-}
-
-// PricingVersion exposes the rate table version for the audit CostRef.
-func (g *Governor) PricingVersion() string {
-	if g.price == nil {
-		return ""
-	}
-	return g.price.Version
 }
 
 // PreCheck enforces rate limit + quota + budget BEFORE the upstream call.
@@ -102,12 +109,16 @@ func (g *Governor) PreCheck(team string, estimateTokens int64) GovDecision {
 // Returns the cost µUSD and whether pricing was missing (for the audit record).
 // An unknown team still computes cost (so the audit record carries it) but
 // debits nothing.
-func (g *Governor) Settle(team, provider, model string, u pricing.Usage) (costMicros int64, pricingMissing bool) {
+func (g *Governor) Settle(team, provider, model string, u pricing.Usage, table *pricing.Table) (costMicros int64, pricingMissing bool) {
 	p := g.teams[team]
 	if p.TokensPerDay > 0 {
 		g.lim.DebitQuota("quota:"+team, u.Input+u.Output, 24*time.Hour)
 	}
-	costMicros, pricingMissing = g.price.CostUSDMicros(provider, model, u)
+	if table == nil {
+		costMicros, pricingMissing = 0, true
+	} else {
+		costMicros, pricingMissing = table.CostUSDMicros(provider, model, u)
+	}
 	if p.BudgetMicrosPerMonth > 0 {
 		g.bud.Debit("budget:"+team, costMicros, 30*24*time.Hour)
 	}

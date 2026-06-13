@@ -99,7 +99,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 403, "permission_error", "model not allowed for this key: "+canonical.Model)
 		return
 	}
-	chain, _, err := h.r.ResolveChain(canonical.Model)
+	chain, st, err := h.r.ResolveChain(canonical.Model)
 	if err != nil {
 		h.audit(p, canonical.Model, "", &audit.OutcomeRef{Status: 404})
 		// Pre-resolution reject: model is still attacker-controlled → sentinel label.
@@ -108,6 +108,8 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	// Governance pre-check (rate/quota/budget) BEFORE the upstream call.
+	// Pricing table from the SAME generation we resolved on (ADR-006).
+	table := st.Pricing()
 	if h.gov != nil {
 		dec := h.gov.PreCheck(p.Team, estimateTokens(raw))
 		if !dec.Allowed {
@@ -137,9 +139,9 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 		var retriable bool
 		if stream {
-			retriable = h.serveStream(w, req, ct.Provider, pr, p, canonical.Model, ct.ProviderName, ct.Upstream, last, start)
+			retriable = h.serveStream(w, req, ct.Provider, pr, p, canonical.Model, ct.ProviderName, ct.Upstream, last, start, table)
 		} else {
-			retriable = h.serveComplete(w, req, ct.Provider, pr, p, canonical.Model, ct.ProviderName, ct.Upstream, last, start)
+			retriable = h.serveComplete(w, req, ct.Provider, pr, p, canonical.Model, ct.ProviderName, ct.Upstream, last, start, table)
 		}
 		if !retriable {
 			return
@@ -152,7 +154,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 // serveComplete proxies one non-streaming target. It returns retriable=true on a
 // pre-TTFT failure (transport error or upstream 5xx/429) when a next target
 // exists (!last); otherwise it writes the response/error and returns false.
-func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool, start time.Time) (retriable bool) {
+func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool, start time.Time, table *pricing.Table) (retriable bool) {
 	resp, err := prov.Complete(req.Context(), pr)
 	if err != nil {
 		if !last {
@@ -200,7 +202,7 @@ func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, pr
 	var cost *audit.CostRef
 	if resp.Parsed != nil {
 		usage = usageRef(resp.Parsed.Usage)
-		cost = h.settle(p.Team, providerName, upstream, resp.Parsed.Usage)
+		cost = h.settle(p.Team, providerName, upstream, resp.Parsed.Usage, table)
 		h.observeTokens(model, providerName, p.Team, resp.Parsed.Usage)
 	}
 	h.auditCompleted(p, model, upstream, resp.StatusCode, usage, cost)
@@ -211,7 +213,7 @@ func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, pr
 // serveStream proxies one streaming target. Fallback is PRE-TTFT ONLY: Stream()
 // erroring before any event with a next target available (!last) returns
 // retriable=true. Once the first event is rendered the response is committed.
-func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool, start time.Time) (retriable bool) {
+func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool, start time.Time, table *pricing.Table) (retriable bool) {
 	seq, err := prov.Stream(req.Context(), pr)
 	if err != nil {
 		if !last {
@@ -285,7 +287,7 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 		w.Write([]byte("data: [DONE]\n\n"))
 		flusher.Flush()
 	}
-	cost := h.settle(p.Team, providerName, upstream, lastUsage)
+	cost := h.settle(p.Team, providerName, upstream, lastUsage, table)
 	h.observeTokens(model, providerName, p.Team, lastUsage)
 	h.auditCompleted(p, model, upstream, 200, usage, cost)
 	h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 200, time.Since(start).Seconds(), ttft)
@@ -308,7 +310,7 @@ func govErrType(status int) string {
 // post-call settlement (quota debit + cost + budget debit), returning the audit
 // CostRef. nil when governance is disabled or there is no usage. The cost key is
 // (providerName, upstream-model) to match the pricing table.
-func (h *ChatHandler) settle(team, providerName, upstream string, u *schema.Usage) *audit.CostRef {
+func (h *ChatHandler) settle(team, providerName, upstream string, u *schema.Usage, table *pricing.Table) *audit.CostRef {
 	if h.gov == nil || u == nil {
 		return nil
 	}
@@ -318,11 +320,11 @@ func (h *ChatHandler) settle(team, providerName, upstream string, u *schema.Usag
 		CacheRead:    deref(u.CacheReadInputTokens),
 		CacheWrite5m: deref(u.CacheCreationInputTokens),
 	}
-	cost, missing := h.gov.Settle(team, providerName, upstream, pu)
+	cost, missing := h.gov.Settle(team, providerName, upstream, pu, table)
 	return &audit.CostRef{
 		AmountUSDMicros: cost,
 		PricingMissing:  missing,
-		PricingVersion:  h.gov.PricingVersion(),
+		PricingVersion:  governance.PricingVersionOf(table),
 	}
 }
 
