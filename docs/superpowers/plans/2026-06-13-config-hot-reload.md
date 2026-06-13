@@ -15,11 +15,28 @@ SIGHUP-from-file is the trigger that ships now.
 ## Core architecture (rewritten after P2 round-1 — both panels)
 
 **One immutable snapshot, one atomic pointer.** A `live.State` value holds the
-WHOLE reloadable generation together — providers map, model routes, the pricing
-table, and the secret-free config view — so a reader never sees a mixed
-generation (router gen N+1 with pricing/view gen N). It lives in a
-`live.Holder` (`atomic.Pointer[State]`). Reload builds a new `State` and does
-**one** `Swap` — every consumer flips together.
+reloadable generation — providers map, model routes, and the pricing table —
+in a `live.Holder` (`atomic.Pointer[State]`). Reload builds a new `State` and
+does **one** `Swap`. `live` imports only `config`, `providers`, `pricing` — it
+does **NOT** import `configapi` (the secret-free view is DERIVED by the
+assembly layer from `state.Providers()/Models()`, so `live` stays clean) and
+nothing in `internal/governance` imports `live` (leaf-package mandate — see
+below).
+
+**Request-scoped consistency (P2 r2 CRITICAL, both panels).** A request must
+resolve AND bill on the SAME generation. `ResolveChain` does the single
+`Load()` and RETURNS the `*live.State` it used; the handler threads that
+snapshot's pricing table into `Settle`. (Confirmed in code: `PreCheck` does NOT
+price — it takes `estimateTokens` and checks rate/quota/budget; only `Settle`
+prices. So the only intra-request pricing read is `Settle`, which now uses the
+request's snapshot, not a fresh `Load`.)
+
+**Leaf-package boundary preserved (P2 r2 CRITICAL, both panels).**
+`internal/governance` is a mandate-defined leaf that must not import `config`
+or `server`. So the governor does NOT read `live`/the holder. Instead
+`Settle(team, provider, model, usage, table *pricing.Table)` takes the table as
+a parameter (governance already imports `pricing`); the handler passes the
+table from the snapshot it resolved against. `PreCheck` is unchanged.
 
 **Stateful components live OUTSIDE the snapshot and are never rebuilt by
 reload:** the governor's limiter (rate buckets) and budget (µUSD counters), the
@@ -37,12 +54,20 @@ and use that pointer for the whole operation.
 - **Pricing swaps WITH topology** — adding a provider+route+rate in one config
   edit takes effect atomically; a route can never bill at stale/0 pricing
   because of a half-applied reload (P2 r1 CRITICAL, both panels).
-- The circuit breaker persists for UNCHANGED providers and is **pruned** for
-  providers removed (or whose type/base_url identity changed) by the reload —
-  no stale open/closed state leaks to a re-added provider (P2 r1).
-- `ResolveChain` does exactly ONE `Load()` and uses that snapshot for its whole
-  fallback loop — no mixed-generation resolve. `RecordResult` only touches the
-  shared breaker.
+- The circuit breaker is **keyed by provider identity** (`type+base_url`), not
+  name alone, so a removed-then-re-added provider (or one whose endpoint
+  changed) gets a FRESH breaker, never stale open/closed state. `RetainBreakers`
+  drops identities absent from the new generation; all breaker ops (`Allow`,
+  `RecordResult`, `RetainBreakers`) are guarded by the breaker's own mutex, and
+  `RecordResult` for an identity not present is a silent no-op (never
+  auto-recreates a pruned entry) (P2 r1+r2, both panels).
+- `ResolveChain` does exactly ONE `Load()`, uses that snapshot for its whole
+  fallback loop, and RETURNS it so the handler bills the same generation.
+- `live.NewState` deep-copies nested mutable data (the `models` map AND each
+  `ModelConfig.Targets` slice), and accessors never leak mutable internals
+  (return copies) — a published `State` is frozen (P2 r2). `providers.Provider`
+  interface values are shared by reference (correct — providers are
+  concurrency-safe and identity-stable within a generation).
 - **Validate-then-swap:** the new generation is fully validated offline —
   config loads AND every model target references a provider that exists in the
   new providers map AND every provider builds — BEFORE the swap. Any failure
@@ -67,7 +92,12 @@ and use that pointer for the whole operation.
 
 ---
 
-### Task 1: `internal/live` — immutable generation snapshot + atomic holder
+### Task 1: `internal/live` — immutable generation snapshot + holder + builder
+
+`internal/live` is also the **topology-only builder** boundary: it imports only
+`config`, `providers`, `pricing` (+ stdlib) — never `governance`, `keystore`,
+`audit`, or `configapi`. An import-guard test makes that boundary STRUCTURAL,
+not conventional (P2 r2).
 
 **Files:**
 
@@ -76,14 +106,22 @@ and use that pointer for the whole operation.
 
 **Steps:**
 
-- [ ] Failing tests: `TestNewStateDeepCopies` (mutating the caller's providers/
-      models map AFTER `NewState` does not change the published state —
-      immutability); `TestHolderLoadSwap` (Load returns last Swap); `TestHolderRaceFree`
-      (N goroutines Load while one loops Swap, `-race` clean, no torn reads).
-- [ ] Implement `State{ providers map[string]providers.Provider; models
-      map[string]config.ModelConfig; pricing *pricing.Table; view configapi.View }`
-      with unexported fields + accessors; `NewState(...)` deep-copies the maps;
-      `Holder{ p atomic.Pointer[State] }` with `Load() *State` / `Swap(*State)`.
+- [ ] Failing tests: `TestNewStateDeepCopies` (mutating the caller's `models`
+      map AND a `ModelConfig.Targets` slice AFTER `NewState` does not change the
+      published state; an accessor's returned value cannot mutate internals);
+      `TestHolderLoadSwap`; `TestHolderRaceFree` (N goroutines Load while one
+      loops Swap, `-race` clean); `TestBuildStateValidatesRoutes` (a config
+      whose model target names a missing provider → build error, no State);
+      `TestLiveImportsAreLeafSafe` (parse this package's imports via
+      `go/parser`; assert none match governance/keystore/audit/server/configapi).
+- [ ] Implement `State{ providers map; models map; pricing *pricing.Table }`
+      (unexported) + accessors returning copies; `NewState` deep-copies maps and
+      `Targets` slices; `Holder{ p atomic.Pointer[State] }` (Load/Swap);
+      `BuildState(cfg *config.Config) (st *State, identities map[string]string, err error)`
+      — builds the providers map (the bedrock-settings logic moved from
+      gateway.go), the pricing table, validates every model target → existing
+      provider, computes identities (`type+base_url`); CANNOT reach stateful
+      constructors.
 - [ ] All four checks green. Commit (DCO sign-off).
 
 ### Task 2: Router reads topology from the holder; breaker prune
@@ -99,36 +137,53 @@ and gains identity-aware pruning.
 
 **Steps:**
 
-- [ ] Failing tests: `TestResolveChainSingleSnapshot` (a Swap mid-resolve does
-      not change the chain returned by an in-progress ResolveChain — one Load);
-      `TestSwapChangesResolution` (after holder Swap, new ResolveChain sees the
-      new route; removed model → error); `TestBreakerPersistsForUnchangedProvider`
-      (open A's breaker, swap to a gen still containing A with same identity →
-      still open); `TestBreakerPrunedForRemovedProvider` (open A, swap to a gen
-      without A, re-add A later → breaker closed/fresh, not stale-open).
-- [ ] Refactor `New` to take `*live.Holder`; `ResolveChain`/`Resolve`/
-      `ResolveProvider`/`AllModels` read `r.live.Load()` once. Add
-      `RetainBreakers(identities map[string]string)` (provider name → identity
-      string `type+base_url`) called by the reloader to drop stale entries.
+- [ ] Failing tests: `TestResolveChainReturnsSnapshot` (ResolveChain returns the
+      `*live.State` it Loaded; a Swap mid-loop does not change that call's
+      result); `TestSwapChangesResolution` (after Swap, a NEW ResolveChain sees
+      the new route; removed model → error); `TestBreakerKeyedByIdentity` (open
+      A@urlX, swap to A@urlY → fresh breaker, not stale-open);
+      `TestRetainBreakersDropsRemoved` + `TestRecordResultIgnoresUnknown` (after
+      a provider is pruned, an in-flight `RecordResult` for it is a no-op, does
+      not recreate the entry); `TestBreakerOpsRaceFree` (RecordResult +
+      RetainBreakers concurrent, `-race` clean).
+- [ ] Refactor `New(*live.Holder)`; `ResolveChain` Loads once and returns
+      `([]ChainTarget, *live.State, error)`; `Resolve`/`ResolveProvider`/
+      `AllModels` Load once each. Breaker keyed by identity (`type+base_url`),
+      all ops mutex-guarded; add `RetainBreakers(identities map[string]string)`
+      (name→identity) dropping absent identities; `RecordResult` no-ops for an
+      identity not currently present.
+- [ ] Update the two ingress handlers (`anthropicapi/messages.go`,
+      `openaiapi/chat.go`) for the new `ResolveChain` return arity (thread the
+      snapshot to Settle — Task 3).
 - [ ] All four checks green. Commit (DCO sign-off).
 
 ### Task 3: Governor reads pricing from the holder; counters untouched
+
+`internal/governance` MUST stay a leaf (no `live`/`config`/`server` import).
+So Settle takes the pricing table as a PARAMETER (governance already imports
+`pricing`); the handler passes the table from its resolved snapshot. This
+fixes both the leaf-boundary violation AND request-scoped pricing consistency
+(P2 r2 CRITICAL, both panels). `PreCheck` is unchanged (it does not price).
 
 **Files:**
 
 - Modify: `internal/governance/governance.go`
 - Modify: `internal/governance/governance_test.go`
+- Modify: `internal/server/anthropicapi/messages.go`
+- Modify: `internal/server/openaiapi/chat.go`
 
 **Steps:**
 
-- [ ] Failing tests: `TestGovernorPricingFromHolder` (Settle uses the holder's
-      current pricing table; after a Swap to a table with a new rate, the new
-      cost applies); `TestGovernorCountersSurvivePricingSwap` (spend budget,
-      Swap pricing, the budget counter is unchanged — limiter/budget instances
-      are not rebuilt).
-- [ ] Refactor the governor to read `*pricing.Table` from `*live.Holder` (one
-      Load per Settle) instead of a fixed field; limiter + budget stay as
-      owned, persistent fields. PreCheck/Settle signatures unchanged.
+- [ ] Failing tests: `TestSettleUsesPassedTable` (Settle bills with the table
+      argument, not a stored one; two different tables → two different costs);
+      `TestGovernorCountersIndependentOfTable` (the limiter/budget instances are
+      not affected by which table is passed — counters are the governor's own
+      persistent fields). Verify `internal/governance` imports do NOT include
+      `live`/`config`/`server` (guard test or manual assertion).
+- [ ] Change `Settle(team, provider, model string, u pricing.Usage)` →
+      `Settle(team, provider, model string, u pricing.Usage, table *pricing.Table)`;
+      drop the stored `price` field. Handlers pass `snapshot.Pricing()` (the
+      `*live.State` from ResolveChain) into Settle.
 - [ ] All four checks green. Commit (DCO sign-off).
 
 ### Task 4: Live config view + AdminMux wiring
@@ -146,8 +201,9 @@ and gains identity-aware pruning.
       changes between GETs is reflected — no stale capture); existing
       secret-free assertions still hold.
 - [ ] `Handler(View)` → `Handler(func() configapi.View)`; `AdminMux` takes
-      `func() configapi.View` (backed by `live.Holder.Load().View()`); update
-      callers/tests.
+      `func() configapi.View`. The assembly layer backs it with
+      `func() View { st := holder.Load(); return configapi.ViewFrom(st.Providers(), st.Models()) }`
+      — so `live` never imports `configapi`. Update callers/tests.
 - [ ] All four checks green. Commit (DCO sign-off).
 
 ### Task 5: Gateway reloader — topology-only builder, SIGHUP worker, rollback
@@ -171,17 +227,20 @@ and gains identity-aware pruning.
       still counted after); `TestConcurrentReloadsSerialize` (two `reload()`
       calls in parallel do not race under `-race`; final state is one of the
       two, never torn).
-- [ ] Extract `buildState(cfg) (*live.State, identities, error)` — a
-      TOPOLOGY-ONLY builder (providers map + router models + pricing table +
-      view) that CANNOT reach the governor/keystore/audit constructors; full
-      validation (every model target → existing provider; every provider
-      builds) inside it. `reload()` = `config.Load(path)` → `buildState` →
-      `holder.Swap` + `router.RetainBreakers(identities)`; on any error return
-      it WITHOUT swapping. `newGateway` uses `buildState` for the initial
-      generation too (shared path).
-- [ ] SIGHUP: a buffered channel + single-worker goroutine guarded by a reload
-      mutex, started in `serve()`, stopped on ctx cancel; logs each outcome,
-      never exits on reload failure. SIGINT/SIGTERM shutdown unchanged.
+- [ ] `reload()` = `config.Load(path)` → `live.BuildState(cfg)` (Task 1; the
+      topology-only builder, full validation inside) → `holder.Swap(st)` +
+      `router.RetainBreakers(identities)`; on any error return it WITHOUT
+      swapping (old generation keeps serving). `newGateway` uses
+      `live.BuildState` for the initial generation too (shared path — no
+      duplicated provider-build logic).
+- [ ] SIGHUP worker lifecycle (P2 r2): buffered channel (`signal.Notify`),
+      ONE worker goroutine guarded by a reload mutex, started in `serve()`;
+      `signal.Stop` + worker drains and exits before `serve()` returns; no
+      double-start across serve/test lifecycles; a ctx cancel during an active
+      reload lets the in-flight reload finish then exits. Each outcome logged;
+      reload failure never exits the process. SIGINT/SIGTERM shutdown unchanged.
+- [ ] Tests also cover: `TestSighupTriggersReload` (send SIGHUP to the worker
+      channel, assert swap) and `TestWorkerStopsOnCtxCancel` (no goroutine leak).
 - [ ] All four checks green. Commit (DCO sign-off).
 
 ### Task 6: ADR-006 + docs sync
