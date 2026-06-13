@@ -23,6 +23,7 @@ wires an optional IRSA ServiceAccount for Bedrock.
 ### 3. Key Decisions
 - `CGO_ENABLED=0` static binary so the image can be distroless/nonroot with no libc.
 - The admin key console's static assets (`internal/server/adminui/static/`) ship inside the binary via `go:embed` — no image, chart, or build-pipeline change (ADR-001).
+- **Config hot-reload (ADR-006):** edit config and `kill -HUP <pid>` (K8s: signal PID 1 or roll the pods) to apply provider/model/pricing changes with no restart — the topology is swapped atomically, governance counters/keystore/audit persist, and a bad config rolls back. Listen addrs, TLS, drain, and team policy limits are NOT hot (restart required).
 - Single replica by default (SQLite key store + instance-local governance); multi-replica HA waits for the Postgres/Redis backends in v0.2.
 - The chart references an `existingSecret` and never creates secrets (design §7).
 
@@ -56,6 +57,7 @@ Docker 빌드와, config를 ConfigMap으로 렌더링하고 Bedrock용 선택 IR
 ### 3. 주요 결정
 - `CGO_ENABLED=0` 정적 바이너리로 libc 없이 distroless/nonroot 이미지 구성.
 - 관리 키 콘솔의 정적 자산(`internal/server/adminui/static/`)은 `go:embed`로 바이너리에 내장 — 이미지/차트/빌드 파이프라인 변경 없음(ADR-001).
+- **Config hot-reload (ADR-006):** config 편집 후 `kill -HUP <pid>`(K8s: PID 1에 시그널 또는 파드 롤)로 프로바이더/모델/pricing 변경을 무중단 적용 — 토폴로지는 원자적으로 교체되고 거버넌스 카운터/키스토어/감사는 유지되며 잘못된 config는 롤백됩니다. listen 주소·TLS·drain·팀 정책 한도는 hot 아님(재시작 필요).
 - 기본 단일 레플리카(SQLite 키 스토어 + 인스턴스 로컬 거버넌스); 다중 레플리카 HA는 v0.2 Postgres/Redis 백엔드 대기.
 - 차트는 `existingSecret`을 참조하며 시크릿을 생성하지 않음(설계 §7).
 

@@ -141,6 +141,13 @@ The **Providers** tab shows which providers, endpoints, and auth modes are
 wired and the model routing/fallback order (read-only; secrets never shown —
 registration stays in config, ADR-005).
 
+**Add a provider without downtime:** edit the config file and send `SIGHUP`
+(`kill -HUP <pid>`; on Kubernetes signal PID 1 or roll the pods). The gateway
+re-reads config and atomically swaps the provider/model/pricing topology —
+in-flight requests, team quotas/budgets, and the audit chain are unaffected; a
+bad config rolls back and keeps the old generation serving (ADR-006). Listen
+addresses, TLS, and team rate/quota/budget limits still need a restart.
+
 ### 4. Point your coding agent at the gateway
 
 ```bash

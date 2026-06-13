@@ -127,6 +127,8 @@ Client -> KeyAuth(RBAC) -> Governor.PreCheck -> Router(fallback+breaker) -> Prov
 - Data plane: `:8080` (`/v1/messages`, `/v1/chat/completions`)
 - Admin plane: `:9090` (`/healthz`, `/readyz`, `/metrics`, `/admin/keys`, `/admin/ui/`)
 
+- **Config hot-reload (`internal/live`, ADR-006)** -- the provider/model/pricing topology is one immutable `live.State` behind an atomic pointer; `SIGHUP` validates + atomically swaps a new generation. Governance counters, keystore, audit chain, and circuit-breaker state persist across reloads.
+
 ## Key Design Decisions
 
 - **Canonical schema = Anthropic-superset, not OpenAI** -- preserves thinking blocks and `cache_control` that the OpenAI shape cannot represent; same-protocol round-trips stay lossless.
