@@ -7,6 +7,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/inferplane/inferplane/internal/adminauth"
@@ -28,11 +31,13 @@ import (
 // Binding in newGateway (rather than inside serve) makes ":0" configs testable:
 // the OS-chosen ports are discoverable via DataAddr/AdminAddr before traffic.
 type gateway struct {
+	cfgPath  string
 	cfg      *config.Config
 	store    keystore.Store
 	aud      *audit.Writer
 	holder   *live.Holder
 	router   *router.Router
+	reloadMu sync.Mutex // serializes reloads (concurrent SIGHUPs/triggers)
 	dataLn   net.Listener
 	adminLn  net.Listener
 	dataSrv  *http.Server
@@ -130,6 +135,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 	}
 
 	return &gateway{
+		cfgPath:  cfgPath,
 		cfg:      cfg,
 		store:    store,
 		aud:      aud,
@@ -149,12 +155,66 @@ func (g *gateway) DataAddr() string { return g.dataLn.Addr().String() }
 // AdminAddr is the bound admin-plane address (host:port).
 func (g *gateway) AdminAddr() string { return g.adminLn.Addr().String() }
 
+// reload re-reads the config file and atomically swaps the topology generation
+// (providers + routes + pricing) — it touches NO stateful component (governor
+// counters, keystore, audit writer, circuit breaker all persist; ADR-006).
+// Validate-then-swap: a config that fails to load/build leaves the current
+// generation serving and returns the error (fail-safe rollback). Serialized by
+// reloadMu so concurrent triggers never race.
+func (g *gateway) reload() error {
+	g.reloadMu.Lock()
+	defer g.reloadMu.Unlock()
+	cfg, err := config.Load(g.cfgPath)
+	if err != nil {
+		return fmt.Errorf("reload: %w", err)
+	}
+	st, identities, err := live.BuildState(cfg)
+	if err != nil {
+		return fmt.Errorf("reload: %w", err)
+	}
+	g.holder.Swap(st)                   // one atomic publish — every reader flips together
+	g.router.RetainBreakers(identities) // drop breaker state for removed/re-pointed providers
+	return nil
+}
+
+// reloadWorker serializes reload triggers (SIGHUP) on a single goroutine and
+// exits when ctx is canceled. A reload already in progress finishes before the
+// worker observes cancellation (the trigger calls reload synchronously), so a
+// shutdown never interrupts a half-applied swap. Reload failures are logged,
+// never fatal (a bad SIGHUP must not take the gateway down).
+func (g *gateway) reloadWorker(ctx context.Context, trigger <-chan os.Signal, done chan<- struct{}) {
+	defer close(done)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-trigger:
+			if err := g.reload(); err != nil {
+				fmt.Fprintln(os.Stderr, "inferplane: config reload failed (keeping current generation):", err)
+			} else {
+				fmt.Println("inferplane: config reloaded")
+			}
+		}
+	}
+}
+
 // serve runs both planes until ctx is canceled (graceful drain within
 // drain_grace) or a server fails. It owns closing the keystore and audit
-// writer; the in-flight handlers finish before audit drains (§5.4).
+// writer; the in-flight handlers finish before audit drains (§5.4). SIGHUP
+// triggers a hot config reload via a single serialized worker.
 func (g *gateway) serve(ctx context.Context) error {
 	defer g.store.Close()
 	defer g.aud.Close()
+
+	// SIGHUP → hot reload, on one worker with a clean lifecycle: signal.Stop on
+	// exit, and wait for the worker to drain before serve returns (no leak).
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	workerCtx, cancelWorker := context.WithCancel(ctx)
+	workerDone := make(chan struct{})
+	go g.reloadWorker(workerCtx, hup, workerDone)
+	defer func() { cancelWorker(); <-workerDone }()
 
 	errc := make(chan error, 2)
 	go func() {
