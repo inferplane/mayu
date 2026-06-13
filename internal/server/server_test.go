@@ -14,6 +14,7 @@ import (
 	"github.com/inferplane/inferplane/internal/keystore"
 	"github.com/inferplane/inferplane/internal/metrics"
 	"github.com/inferplane/inferplane/internal/router"
+	"github.com/inferplane/inferplane/internal/server/configapi"
 	"github.com/inferplane/inferplane/providers"
 	"github.com/inferplane/inferplane/providers/testing/mockprovider"
 )
@@ -93,7 +94,7 @@ func TestDataMuxChatCompletionsRoutes(t *testing.T) {
 
 func TestAdminMuxHealthz(t *testing.T) {
 	store := stubStore{}
-	mux := AdminMux(store, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, nil, nil)
+	mux := AdminMux(store, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, configapi.View{}, nil, nil)
 	req := httptest.NewRequest("GET", "/healthz", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -109,7 +110,7 @@ func TestAdminMuxKeysRequiresToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	mux := AdminMux(store, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, nil, nil)
+	mux := AdminMux(store, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, configapi.View{}, nil, nil)
 
 	// no admin token → 401
 	req := httptest.NewRequest("GET", "/admin/keys", nil)
@@ -132,7 +133,7 @@ func TestAdminMuxKeysRequiresToken(t *testing.T) {
 func TestAdminMuxMetricsUnauthed(t *testing.T) {
 	m := metrics.New()
 	m.ObserveRequest("anthropic", "claude-sonnet-4-6", "anthropic-direct", "t", 200, 1.0, 0)
-	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, nil, m)
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, configapi.View{}, nil, m)
 	req := httptest.NewRequest("GET", "/metrics", nil) // NO auth
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -145,7 +146,7 @@ func TestAdminMuxMetricsUnauthed(t *testing.T) {
 }
 
 func TestAdminMuxServesUI(t *testing.T) {
-	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, nil, nil)
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, configapi.View{}, nil, nil)
 	req := httptest.NewRequest("GET", "/admin/ui/", nil) // NO auth — data-free static page (ADR-001)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -161,7 +162,7 @@ func TestAdminMuxServesUI(t *testing.T) {
 }
 
 func TestAdminMuxUIRedirect(t *testing.T) {
-	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, nil, nil)
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, configapi.View{}, nil, nil)
 	req := httptest.NewRequest("GET", "/admin/ui", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -176,7 +177,7 @@ func TestAdminMuxUIRedirect(t *testing.T) {
 // TestAdminMuxUIDoesNotBypassKeysAuth pins the ADR-001 invariant: wiring the
 // unauthenticated UI must not loosen auth on the keys API.
 func TestAdminMuxUIDoesNotBypassKeysAuth(t *testing.T) {
-	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, nil, nil)
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, configapi.View{}, nil, nil)
 	for _, tc := range []struct{ method, path string }{
 		{"GET", "/admin/keys"},
 		{"POST", "/admin/keys"},
@@ -216,7 +217,7 @@ func TestAdminMuxOIDCWiring(t *testing.T) {
 
 	v := &fakeVerifier{claims: adminauth.Claims{Subject: "u-alpha", Groups: []string{"team-alpha"}}}
 	mapping := adminauth.MappingConfig{GroupMappings: []adminauth.GroupMapping{{Group: "team-alpha", Teams: []string{"alpha"}}}}
-	mux := AdminMux(store, []string{"admin-tok"}, v, mapping, aud, nil)
+	mux := AdminMux(store, []string{"admin-tok"}, v, mapping, configapi.View{}, aud, nil)
 
 	do := func(bearer, method, path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -260,7 +261,7 @@ func TestAdminMuxOIDCWiring(t *testing.T) {
 // TestAdminMuxNilOIDCUnchanged: without a verifier the mux behaves exactly as
 // the task-6 static-only state; UI/metrics/health stay unauthenticated.
 func TestAdminMuxNilOIDCUnchanged(t *testing.T) {
-	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, nil, nil)
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, configapi.View{}, nil, nil)
 	for path, want := range map[string]int{
 		"/healthz": 200, "/readyz": 200, "/admin/ui/": 200,
 	} {
@@ -277,5 +278,39 @@ func TestAdminMuxNilOIDCUnchanged(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code != 401 {
 		t.Fatalf("shaped bearer with nil verifier = %d, want 401", rec.Code)
+	}
+}
+
+// TestAdminMuxConfigEndpoint (plan C2): GET /admin/config is behind AdminAuth,
+// read-only, and exposes the topology without secret values.
+func TestAdminMuxConfigEndpoint(t *testing.T) {
+	view := configapi.ViewFrom(map[string]config.ProviderConfig{
+		"anthropic-direct": {Type: "anthropic", BaseURL: "https://api.anthropic.com", APIKeyRef: &config.SecretRef{Env: "ANTHROPIC_API_KEY"}, APIKey: "sk-LEAK"},
+	}, map[string]config.ModelConfig{
+		"claude-sonnet-4-6": {Targets: []config.Target{{Provider: "anthropic-direct", Model: "claude-sonnet-4-6"}}},
+	})
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, view, nil, nil)
+
+	// no token → 401
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/admin/config", nil))
+	if rec.Code != 401 {
+		t.Fatalf("GET /admin/config without token = %d, want 401", rec.Code)
+	}
+
+	// with token → 200, topology present, secret absent
+	req := httptest.NewRequest("GET", "/admin/config", nil)
+	req.Header.Set("Authorization", "Bearer admin-tok")
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("GET /admin/config = %d: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "https://api.anthropic.com") || !strings.Contains(body, "ANTHROPIC_API_KEY") {
+		t.Fatalf("config view missing topology: %s", body)
+	}
+	if strings.Contains(body, "sk-LEAK") {
+		t.Fatalf("config endpoint leaked secret value: %s", body)
 	}
 }

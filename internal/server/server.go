@@ -12,6 +12,7 @@ import (
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/internal/server/adminapi"
 	"github.com/inferplane/inferplane/internal/server/adminui"
+	"github.com/inferplane/inferplane/internal/server/configapi"
 	"github.com/inferplane/inferplane/internal/server/anthropicapi"
 	"github.com/inferplane/inferplane/internal/server/openaiapi"
 	"github.com/inferplane/inferplane/pkg/ulid"
@@ -59,7 +60,7 @@ func negotiateModels(anthropicH, openaiH http.Handler) http.Handler {
 // receives admin-action audit records (key create/revoke + denials, §5.5
 // "admin API calls are audit events"); nil skips. When m is nil the /metrics
 // endpoint is omitted.
-func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier, mapping adminauth.MappingConfig, aud *audit.Writer, m *metrics.Metrics) http.Handler {
+func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier, mapping adminauth.MappingConfig, configView configapi.View, aud *audit.Writer, m *metrics.Metrics) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
@@ -77,6 +78,9 @@ func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier,
 	guard := AdminAuth(adminTokens, verifier, mapping, denied, keys)
 	mux.Handle("/admin/keys", guard)
 	mux.Handle("/admin/keys/", guard)
+	// Read-only provider/model topology (ADR-005), behind the same AdminAuth —
+	// secret-free, so it carries no governance weight beyond authentication.
+	mux.Handle("/admin/config", AdminAuth(adminTokens, verifier, mapping, denied, configapi.Handler(configView)))
 	// Minimal embedded key console (ADR-001): data-free static assets, served
 	// unauthenticated like /metrics — every data call it makes goes through the
 	// token-gated /admin/keys handlers above.

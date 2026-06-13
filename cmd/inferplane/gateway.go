@@ -21,6 +21,7 @@ import (
 	"github.com/inferplane/inferplane/internal/pricing"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/internal/server"
+	"github.com/inferplane/inferplane/internal/server/configapi"
 	"github.com/inferplane/inferplane/pkg/ulid"
 	"github.com/inferplane/inferplane/providers"
 )
@@ -173,7 +174,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 		dataLn:   dataLn,
 		adminLn:  adminLn,
 		dataSrv:  &http.Server{Handler: server.DataMux(r, store, aud, gov, m)},
-		adminSrv: &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), aud, m)},
+		adminSrv: &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), configapi.ViewFrom(cfg.Providers, cfg.Models), aud, m)},
 	}, nil
 }
 
