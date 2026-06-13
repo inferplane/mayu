@@ -40,6 +40,10 @@ type State struct {
 	models     map[string]config.ModelConfig
 	pricing    *pricing.Table
 	identities map[string]string // config provider name → identity (type+base_url)
+	// providerConfigs is the source ProviderConfig per name, kept so the
+	// assembly layer can derive the secret-free /admin/config view from the
+	// live generation (set by BuildState; nil for NewState-only test states).
+	providerConfigs map[string]config.ProviderConfig
 }
 
 // Providers returns the provider instances by config name. The map is a copy;
@@ -103,6 +107,17 @@ func (s *State) Identities() map[string]string {
 func (s *State) Identity(name string) (string, bool) {
 	id, ok := s.identities[name]
 	return id, ok
+}
+
+// ProviderConfigs returns a copy of the source provider configs, for deriving
+// the secret-free admin view (live never imports the view package). The
+// returned configs still carry the resolved APIKey — the view layer drops it.
+func (s *State) ProviderConfigs() map[string]config.ProviderConfig {
+	out := make(map[string]config.ProviderConfig, len(s.providerConfigs))
+	for k, v := range s.providerConfigs {
+		out[k] = v
+	}
+	return out
 }
 
 // NewState freezes the given topology into an immutable State, deep-copying the
@@ -185,7 +200,14 @@ func BuildState(cfg *config.Config) (*State, map[string]string, error) {
 	}
 
 	tbl := pricingFromConfig(cfg)
-	return NewState(provs, cfg.Models, tbl, identities), identities, nil
+	st := NewState(provs, cfg.Models, tbl, identities)
+	// Keep the source configs for the secret-free admin view (copy so the
+	// published State is independent of the caller's cfg).
+	st.providerConfigs = make(map[string]config.ProviderConfig, len(cfg.Providers))
+	for k, v := range cfg.Providers {
+		st.providerConfigs[k] = v
+	}
+	return st, identities, nil
 }
 
 // pricingFromConfig mirrors the gateway's pricing assembly (kept here so the

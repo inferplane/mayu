@@ -138,7 +138,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 		dataLn:   dataLn,
 		adminLn:  adminLn,
 		dataSrv:  &http.Server{Handler: server.DataMux(r, store, aud, gov, m)},
-		adminSrv: &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), configapi.ViewFrom(cfg.Providers, cfg.Models), aud, m)},
+		adminSrv: &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder), aud, m)},
 	}, nil
 }
 
@@ -212,6 +212,16 @@ func oidcVerifier(cfg *config.Config) server.OIDCVerifier {
 		ClientID:    o.ClientID,
 		GroupsClaim: o.GroupsClaim,
 	})
+}
+
+// liveView derives the secret-free config view from the current generation,
+// so /admin/config reflects hot reloads (ADR-006). live never imports
+// configapi — the view is built here in the assembly layer.
+func liveView(holder *live.Holder) func() configapi.View {
+	return func() configapi.View {
+		st := holder.Load()
+		return configapi.ViewFrom(st.ProviderConfigs(), st.Models())
+	}
 }
 
 // oidcMapping converts the config mapping rules into the adminauth shape

@@ -97,7 +97,7 @@ func TestViewProvidersAndModelsSorted(t *testing.T) {
 
 func TestHandlerServesViewGETOnly(t *testing.T) {
 	v := ViewFrom(map[string]config.ProviderConfig{"a": {Type: "anthropic", BaseURL: "https://x"}}, nil)
-	h := Handler(v)
+	h := Handler(func() View { return v })
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", "/admin/config", nil))
@@ -112,5 +112,26 @@ func TestHandlerServesViewGETOnly(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/admin/config", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST = %d, want 405 (read-only — stage 2 is a separate ADR)", rec.Code)
+	}
+}
+
+// TestHandlerReadsLiveView: the handler derives the view per request from the
+// provider func, so a hot reload (changing what the func returns) is reflected
+// without rebuilding the handler.
+func TestHandlerReadsLiveView(t *testing.T) {
+	current := ViewFrom(map[string]config.ProviderConfig{"a": {Type: "anthropic", BaseURL: "https://one"}}, nil)
+	h := Handler(func() View { return current })
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/admin/config", nil))
+	if !strings.Contains(rec.Body.String(), "https://one") {
+		t.Fatalf("first: %s", rec.Body.String())
+	}
+	// Simulate a reload changing the topology.
+	current = ViewFrom(map[string]config.ProviderConfig{"a": {Type: "anthropic", BaseURL: "https://two"}}, nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/admin/config", nil))
+	if !strings.Contains(rec.Body.String(), "https://two") || strings.Contains(rec.Body.String(), "https://one") {
+		t.Fatalf("handler did not reflect the live view: %s", rec.Body.String())
 	}
 }

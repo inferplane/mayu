@@ -90,14 +90,16 @@ func authString(p config.ProviderConfig) string {
 
 // Handler serves the view as JSON on GET. Writes return 405 — registration is
 // config-driven (stage 2 UI-write is a separate ADR). The handler is mounted
-// behind AdminAuth, so it is already authenticated when it runs.
-func Handler(v View) http.Handler {
+// behind AdminAuth, so it is already authenticated when it runs. It takes a
+// view PROVIDER (not a fixed value) so a config hot-reload (ADR-006) is
+// reflected: each request derives the view from the current generation.
+func Handler(view func() View) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, `{"error":"read-only"}`, http.StatusMethodNotAllowed)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(v)
+		_ = json.NewEncoder(w).Encode(view())
 	})
 }
