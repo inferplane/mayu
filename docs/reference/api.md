@@ -19,6 +19,7 @@ contract is in [docs/api-reference.md](../api-reference.md).
 | OpenAI ingress | `internal/server/openaiapi/` | `/v1/chat/completions`, `/v1/models` |
 | Admin keys API | `internal/server/adminapi/keys.go` | issue / list / revoke virtual keys (per-team entitlement + admin audit, ADR-004) |
 | Admin key console | `internal/server/adminui/` | `/admin/ui/` embedded static console (data-free, unauthenticated; data via `/admin/keys`, ADR-001) |
+| Config view API | `internal/server/configapi/` | `GET /admin/config` read-only secret-free provider/model topology (ADR-005); writes 405 |
 | Metrics endpoint | `internal/server/metricsapi.go` | unauthenticated Prometheus `/metrics` |
 | OpenAI conversion | `internal/openai/convert.go` | OpenAI ⇄ canonical request/response/chunk |
 
@@ -53,6 +54,7 @@ HTTP 표면입니다. 두 인그레스(Anthropic Messages, OpenAI Chat Completio
 | OpenAI 인그레스 | `internal/server/openaiapi/` | `/v1/chat/completions`, `/v1/models` |
 | 관리 키 API | `internal/server/adminapi/keys.go` | 가상 키 발급 / 목록 / 폐기 (팀별 권한 + 관리 감사, ADR-004) |
 | 관리 키 콘솔 | `internal/server/adminui/` | `/admin/ui/` 내장 정적 콘솔(데이터 없음·무인증, 데이터는 `/admin/keys` 경유, ADR-001) |
+| Config 뷰 API | `internal/server/configapi/` | `GET /admin/config` 읽기 전용 시크릿 무노출 프로바이더/모델 토폴로지 (ADR-005); 쓰기 405 |
 | 메트릭 엔드포인트 | `internal/server/metricsapi.go` | 무인증 Prometheus `/metrics` |
 | OpenAI 변환 | `internal/openai/convert.go` | OpenAI ⇄ canonical 요청/응답/청크 |
 

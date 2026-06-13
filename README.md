@@ -137,6 +137,9 @@ docker exec inferplane inferplane keys create \
 
 Or use the web console: open `http://localhost:9090/admin/ui/`, paste the admin
 token, and issue/revoke keys from the page (the token stays in page memory only).
+The **Providers** tab shows which providers, endpoints, and auth modes are
+wired and the model routing/fallback order (read-only; secrets never shown —
+registration stays in config, ADR-005).
 
 ### 4. Point your coding agent at the gateway
 
@@ -381,6 +384,10 @@ docker exec inferplane inferplane keys create \
   --store /var/lib/inferplane/keys.db
 # → ik_... 를 1회만 출력 (복구 불가 — 지금 복사)
 ```
+
+**Providers** 탭에서 어떤 프로바이더·endpoint·인증 모드가 연결돼 있는지와
+모델 라우팅/폴백 순서를 볼 수 있습니다 (읽기 전용·시크릿 미표시 — 등록은
+config, ADR-005).
 
 웹 콘솔도 가능합니다: `http://localhost:9090/admin/ui/`를 열고 관리자 토큰을
 붙여넣은 뒤 페이지에서 키 발급/폐기 (토큰은 페이지 메모리에만 유지됩니다).
