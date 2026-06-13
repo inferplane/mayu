@@ -24,7 +24,7 @@ async function api(method, path, body) {
 
 /* ---------- views ---------- */
 
-const VIEWS = { overview: "Overview", keys: "Virtual keys", quickstart: "Quickstart" };
+const VIEWS = { overview: "Overview", keys: "Virtual keys", providers: "Providers", quickstart: "Quickstart" };
 
 function showView(name) {
   for (const v of Object.keys(VIEWS)) $("view-" + v).hidden = v !== name;
@@ -32,6 +32,7 @@ function showView(name) {
     b.classList.toggle("active", b.dataset.view === name));
   $("view-title").textContent = VIEWS[name];
   if (name === "overview") refreshOverview();
+  if (name === "providers") refreshProviders();
 }
 
 document.querySelectorAll("[data-view]").forEach((b) =>
@@ -141,6 +142,49 @@ function emptyRow(span, text) {
   e.colSpan = span; e.className = "empty"; e.textContent = text;
   tr.appendChild(e);
   return tr;
+}
+
+/* ---------- providers (read-only topology, ADR-005) ---------- */
+
+async function refreshProviders() {
+  let view;
+  try {
+    view = await api("GET", "/admin/config");
+  } catch {
+    return; // keep last state; auth errors surface on the lock screen
+  }
+  const pbody = $("providers-table").querySelector("tbody");
+  pbody.textContent = "";
+  const provs = view.providers || [];
+  if (!provs.length) {
+    pbody.appendChild(emptyRow(4, "no providers configured"));
+  } else {
+    for (const p of provs) {
+      const tr = document.createElement("tr");
+      tr.appendChild(td(p.name));
+      tr.appendChild(td(p.type));
+      tr.appendChild(td(p.base_url || "(default)"));
+      tr.appendChild(td(p.auth)); // ref name / IAM mode — never a secret value
+      pbody.appendChild(tr);
+    }
+  }
+
+  const rbody = $("routes-table").querySelector("tbody");
+  rbody.textContent = "";
+  const models = view.models || [];
+  if (!models.length) {
+    rbody.appendChild(emptyRow(2, "no model routes configured"));
+  } else {
+    for (const m of models) {
+      const tr = document.createElement("tr");
+      tr.appendChild(td(m.name));
+      const route = (m.targets || [])
+        .map((t) => t.provider + " · " + t.model + (t.api ? " (" + t.api + ")" : ""))
+        .join("  →  ");
+      tr.appendChild(td(route));
+      rbody.appendChild(tr);
+    }
+  }
 }
 
 /* ---------- keys ---------- */

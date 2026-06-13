@@ -35,6 +35,7 @@
       <nav>
         <button class="nav active" data-view="overview">⌂&ensp;Overview</button>
         <button class="nav" data-view="keys">⚿&ensp;Virtual keys</button>
+        <button class="nav" data-view="providers">⇄&ensp;Providers</button>
         <button class="nav" data-view="quickstart">▸&ensp;Quickstart</button>
       </nav>
       <div class="side-foot">
@@ -120,6 +121,57 @@
             <thead><tr><th>key id</th><th>team</th><th>allowed models</th><th></th></tr></thead>
             <tbody></tbody>
           </table>
+        </div>
+      </section>
+
+      <!-- ===== providers ===== -->
+      <section id="view-providers" class="view" hidden>
+        <p class="hint">Upstream providers and model routing are declared in
+          <b>config</b> (policy-as-code, ADR-003) — this view is read-only.
+          Secrets never appear here: only the env var / file path the gateway
+          reads, or the IAM mode. <span class="ko">업스트림 프로바이더·모델
+          라우팅은 config로 선언합니다(읽기 전용). 시크릿 값은 표시되지 않고,
+          참조 이름/IAM 모드만 보입니다.</span></p>
+
+        <div class="card">
+          <div class="microlabel">providers</div>
+          <table class="data" id="providers-table">
+            <thead><tr><th>name</th><th>type</th><th>endpoint</th><th>auth</th></tr></thead>
+            <tbody><tr><td colspan="4" class="empty">connect to load…</td></tr></tbody>
+          </table>
+        </div>
+
+        <div class="card">
+          <div class="microlabel">model routing · primary → fallback</div>
+          <table class="data" id="routes-table">
+            <thead><tr><th>model</th><th>route (provider · upstream model)</th></tr></thead>
+            <tbody><tr><td colspan="2" class="empty">connect to load…</td></tr></tbody>
+          </table>
+        </div>
+
+        <div class="card">
+          <div class="snippet-head"><span class="microlabel">add a provider · config block</span>
+            <button class="ghost copy-snippet" data-target="add-provider">COPY</button></div>
+          <pre class="snippet"><code id="add-provider">// providers: one block per upstream; secrets stay as env/file refs.
+"providers": {
+  "anthropic-direct": { "type": "anthropic",
+    "base_url": "https://api.anthropic.com",
+    "api_key_ref": { "env": "ANTHROPIC_API_KEY" } },
+  "vllm-internal":    { "type": "openai_compatible",
+    "base_url": "http://vllm.internal:8000/v1",
+    "api_key_ref": { "file": "/secrets/vllm-key" } },
+  "bedrock-us":       { "type": "bedrock", "region": "us-west-2",
+    "auth": { "mode": "irsa" } }
+},
+"models": {
+  "claude-sonnet-4-6": { "targets": [
+    { "provider": "anthropic-direct", "model": "claude-sonnet-4-6" },
+    { "provider": "bedrock-us", "model": "anthropic.claude-sonnet-4-6-v1:0", "api": "invoke_model" }
+  ] }
+}</code></pre>
+          <p class="hint">Reload the gateway to apply (config is loaded at boot;
+            UI-write is a planned stage 2). Set the referenced secret in your
+            platform's secret store — never inline.</p>
         </div>
       </section>
 
