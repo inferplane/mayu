@@ -32,10 +32,13 @@ func New(holder *live.Holder) *Router {
 func (r *Router) SetMetrics(m *metrics.Metrics) { r.metrics = m }
 
 // ChainTarget is one resolved fallback target: the provider instance, its
-// CONFIG provider name (pricing/breaker key), and the upstream model id.
+// CONFIG provider name (pricing/metric key), the breaker Identity (type+base_url,
+// captured from the generation this was resolved on so RecordResult records
+// against the SAME generation — never a re-Loaded one), and the upstream model.
 type ChainTarget struct {
 	Provider     providers.Provider
 	ProviderName string
+	Identity     string
 	Upstream     string
 }
 
@@ -55,9 +58,9 @@ func (r *Router) ResolveChain(model string) ([]ChainTarget, *live.State, error) 
 		if !ok {
 			continue // config drift: target points at unknown provider
 		}
-		ct := ChainTarget{Provider: p, ProviderName: t.Provider, Upstream: t.Model}
-		all = append(all, ct)
 		id, _ := st.Identity(t.Provider)
+		ct := ChainTarget{Provider: p, ProviderName: t.Provider, Identity: id, Upstream: t.Model}
+		all = append(all, ct)
 		if r.brk.Allow(id) {
 			allowed = append(allowed, ct)
 		}
@@ -71,22 +74,21 @@ func (r *Router) ResolveChain(model string) ([]ChainTarget, *live.State, error) 
 	return allowed, st, nil
 }
 
-// RecordResult feeds a per-provider call outcome to the circuit breaker and
-// reflects the resulting circuit state into the metrics gauge. The breaker is
-// keyed by provider IDENTITY, looked up from the current snapshot; a result
-// for a provider no longer present is a silent no-op (it never recreates a
-// pruned breaker entry).
-func (r *Router) RecordResult(providerName string, ok bool) {
-	id, present := r.live.Load().Identity(providerName)
-	if !present {
-		return
-	}
+// RecordResult feeds a per-provider call outcome to the circuit breaker, keyed
+// by the breaker IDENTITY captured when the request resolved (passed via the
+// ChainTarget, NOT re-Loaded here) so the outcome is always recorded against
+// the generation the call actually ran on. The metric label is the config
+// provider name (cardinality-bounded). A stale identity whose provider was
+// pruned by a concurrent reload is never consulted by ResolveChain (which only
+// checks current-generation identities) and is reaped by the next reload's
+// RetainBreakers, so recording against it is harmless.
+func (r *Router) RecordResult(providerName, identity string, ok bool) {
 	if ok {
-		r.brk.RecordSuccess(id)
+		r.brk.RecordSuccess(identity)
 	} else {
-		r.brk.RecordFailure(id)
+		r.brk.RecordFailure(identity)
 	}
-	r.metrics.SetCircuitState(providerName, r.brk.State(id))
+	r.metrics.SetCircuitState(providerName, r.brk.State(identity))
 }
 
 // RetainBreakers drops breaker entries whose identity is absent from the given

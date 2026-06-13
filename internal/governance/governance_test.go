@@ -102,10 +102,9 @@ func TestGovernorCountersIndependentOfTable(t *testing.T) {
 	tbl := pricing.New(pricing.OnMissingAllow, map[pricing.Key]pricing.Rate{{Provider: "p", Model: "m"}: {InputPerMTok: 1_000_000}})
 	g.Settle("t", "p", "m", pricing.Usage{Input: 400_000}, tbl) // 400k µUSD
 	g.Settle("t", "p", "m", pricing.Usage{Input: 400_000}, tbl) // +400k = 800k
-	// A third would exceed 1M; PreCheck on accumulated spend now blocks.
-	if d := g.PreCheck("t", 0); d.Allowed {
-		// budget pre-check is on accumulated spend; 800k < 1M so still allowed —
-		// assert the counter actually moved by checking a debit beyond the cap.
+	// 800k < 1M cap → still allowed (counter accumulated, not yet over).
+	if d := g.PreCheck("t", 0); !d.Allowed {
+		t.Fatalf("800k < 1M cap should still allow: %+v", d)
 	}
 	g.Settle("t", "p", "m", pricing.Usage{Input: 400_000}, tbl) // 1.2M > cap
 	if d := g.PreCheck("t", 0); d.Allowed {

@@ -71,12 +71,16 @@ func (s *State) Models() map[string]config.ModelConfig {
 // Pricing returns the generation's pricing table (immutable).
 func (s *State) Pricing() *pricing.Table { return s.pricing }
 
-// Route returns the model's config (read-only — callers must not mutate the
-// returned Targets). Hot-path accessor: no copy, safe because a published
-// State is never mutated. Use Models() when a mutable copy is needed.
+// Route returns a copy of the model's config (the Targets slice is copied so a
+// caller can never mutate the published generation — the immutability invariant
+// holds through every accessor). The copy is a tiny slice (1–3 targets),
+// negligible against the upstream call.
 func (s *State) Route(model string) (config.ModelConfig, bool) {
 	mc, ok := s.models[model]
-	return mc, ok
+	if !ok {
+		return config.ModelConfig{}, false
+	}
+	return config.ModelConfig{Targets: append([]config.Target(nil), mc.Targets...)}, true
 }
 
 // Provider returns the built provider for a config name (read-only).

@@ -139,14 +139,14 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 		var retriable bool
 		if stream {
-			retriable = h.serveStream(w, req, ct.Provider, pr, p, canonical.Model, ct.ProviderName, ct.Upstream, last, start, table)
+			retriable = h.serveStream(w, req, ct.Provider, pr, p, canonical.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, start, table)
 		} else {
-			retriable = h.serveComplete(w, req, ct.Provider, pr, p, canonical.Model, ct.ProviderName, ct.Upstream, last, start, table)
+			retriable = h.serveComplete(w, req, ct.Provider, pr, p, canonical.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, start, table)
 		}
 		if !retriable {
 			return
 		}
-		h.r.RecordResult(ct.ProviderName, false)
+		h.r.RecordResult(ct.ProviderName, ct.Identity, false)
 		h.metrics.ObserveFallback(canonical.Model, ct.ProviderName, chain[i+1].ProviderName, "upstream_error")
 	}
 }
@@ -154,7 +154,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 // serveComplete proxies one non-streaming target. It returns retriable=true on a
 // pre-TTFT failure (transport error or upstream 5xx/429) when a next target
 // exists (!last); otherwise it writes the response/error and returns false.
-func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool, start time.Time, table *pricing.Table) (retriable bool) {
+func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, identity, upstream string, last bool, start time.Time, table *pricing.Table) (retriable bool) {
 	resp, err := prov.Complete(req.Context(), pr)
 	if err != nil {
 		if !last {
@@ -181,7 +181,7 @@ func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, pr
 		return true // upstream 5xx/429 → fall back
 	}
 	if resp.StatusCode < 400 {
-		h.r.RecordResult(providerName, true)
+		h.r.RecordResult(providerName, identity, true)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if providerWire(prov.Name()) == "openai" {
@@ -213,7 +213,7 @@ func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, pr
 // serveStream proxies one streaming target. Fallback is PRE-TTFT ONLY: Stream()
 // erroring before any event with a next target available (!last) returns
 // retriable=true. Once the first event is rendered the response is committed.
-func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool, start time.Time, table *pricing.Table) (retriable bool) {
+func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, identity, upstream string, last bool, start time.Time, table *pricing.Table) (retriable bool) {
 	seq, err := prov.Stream(req.Context(), pr)
 	if err != nil {
 		if !last {
@@ -243,7 +243,7 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 		return false
 	}
 	// Stream() succeeded → the target is healthy (breaker success, post-TTFT).
-	h.r.RecordResult(providerName, true)
+	h.r.RecordResult(providerName, identity, true)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(200)

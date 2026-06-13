@@ -131,15 +131,15 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 		var retriable bool
 		if stream {
-			retriable = h.serveStream(w, req, ct.Provider, pr, p, parsed.Model, ct.ProviderName, ct.Upstream, last, start, table)
+			retriable = h.serveStream(w, req, ct.Provider, pr, p, parsed.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, start, table)
 		} else {
-			retriable = h.serveComplete(w, req, ct.Provider, pr, p, parsed.Model, ct.ProviderName, ct.Upstream, last, start, table)
+			retriable = h.serveComplete(w, req, ct.Provider, pr, p, parsed.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, start, table)
 		}
 		if !retriable {
 			return // committed (success, or terminal error on the last target)
 		}
 		// Pre-TTFT failure with a next target available → record + fall back.
-		h.r.RecordResult(ct.ProviderName, false)
+		h.r.RecordResult(ct.ProviderName, ct.Identity, false)
 		h.metrics.ObserveFallback(parsed.Model, ct.ProviderName, chain[i+1].ProviderName, "upstream_error")
 	}
 }
@@ -160,7 +160,7 @@ func govErrType(status int) string {
 // when the call failed pre-TTFT (transport error, or an upstream 5xx/429) AND a
 // next target exists (!last) — the caller then falls back. Otherwise it writes
 // the response/error to the client and returns false (committed).
-func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool, start time.Time, table *pricing.Table) (retriable bool) {
+func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, identity, upstream string, last bool, start time.Time, table *pricing.Table) (retriable bool) {
 	resp, err := prov.Complete(req.Context(), pr)
 	if err != nil {
 		if !last {
@@ -186,7 +186,7 @@ func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request
 	// A 2xx is a breaker success; a committed non-2xx on the last target is not
 	// counted (it was teed as the client's real upstream error).
 	if resp.StatusCode < 400 {
-		h.r.RecordResult(providerName, true)
+		h.r.RecordResult(providerName, identity, true)
 	}
 	// resp.Parsed.Usage is the observation hook for M3 audit / M5 quota.
 	var usage *audit.UsageRef
@@ -206,7 +206,7 @@ func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request
 // (!last), it returns retriable=true and the caller falls back. Once the first
 // event is teed the response is committed; a mid-stream error terminates the
 // stream (no fallback). Returns false in all committed cases.
-func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, upstream string, last bool, start time.Time, table *pricing.Table) (retriable bool) {
+func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, identity, upstream string, last bool, start time.Time, table *pricing.Table) (retriable bool) {
 	seq, err := prov.Stream(req.Context(), pr)
 	if err != nil {
 		if !last {
@@ -239,7 +239,7 @@ func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, 
 		return false
 	}
 	// Stream() succeeded → the target is healthy (breaker success, post-TTFT).
-	h.r.RecordResult(providerName, true)
+	h.r.RecordResult(providerName, identity, true)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(200)

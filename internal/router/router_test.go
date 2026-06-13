@@ -52,7 +52,7 @@ func TestResolveChainSkipsOpenBreaker(t *testing.T) {
 	r, _ := newTestRouter(provs, models)
 	// trip provider "a" breaker (5 failures)
 	for i := 0; i < 5; i++ {
-		r.RecordResult("a", false)
+		r.RecordResult("a", "a", false)
 	}
 	chain, _, err := r.ResolveChain("m")
 	if err != nil {
@@ -73,13 +73,13 @@ func TestRecordResultSetsCircuitStateMetric(t *testing.T) {
 
 	// 5 consecutive failures (default threshold) → breaker opens → gauge = 2.
 	for i := 0; i < 5; i++ {
-		r.RecordResult("p", false)
+		r.RecordResult("p", "p", false)
 	}
 	if got := circuitState(t, m); got != 2 {
 		t.Fatalf("circuit_state after opening = %v, want 2 (open)", got)
 	}
 	// A success closes the breaker → gauge = 0.
-	r.RecordResult("p", true)
+	r.RecordResult("p", "p", true)
 	if got := circuitState(t, m); got != 0 {
 		t.Fatalf("circuit_state after success = %v, want 0 (closed)", got)
 	}
@@ -176,7 +176,7 @@ func TestBreakerKeyedByIdentity(t *testing.T) {
 	))
 	r := New(h)
 	for i := 0; i < 5; i++ {
-		r.RecordResult("a", false) // trip identity X
+		r.RecordResult("a", "anthropic\x00https://x", false) // trip identity X
 	}
 	chain, _, _ := r.ResolveChain("m")
 	if len(chain) != 1 { // all-open → returns all anyway, but breaker is open
@@ -194,7 +194,7 @@ func TestBreakerKeyedByIdentity(t *testing.T) {
 	}
 }
 
-func TestRecordResultIgnoresUnknownAndRetainPrunes(t *testing.T) {
+func TestRetainPrunesAndStaleIdentityNeverRoutes(t *testing.T) {
 	a := mockprovider.New("m")
 	h := &live.Holder{}
 	h.Swap(live.NewState(
@@ -204,19 +204,31 @@ func TestRecordResultIgnoresUnknownAndRetainPrunes(t *testing.T) {
 	))
 	r := New(h)
 	for i := 0; i < 5; i++ {
-		r.RecordResult("a", false)
+		r.RecordResult("a", "idA", false) // trip idA
 	}
-	// Swap to a generation WITHOUT "a", then prune.
+	// Swap to a generation WITHOUT "a", then prune: idA is dropped.
 	h.Swap(live.NewState(map[string]providers.Provider{}, map[string]config.ModelConfig{}, nil, map[string]string{}))
-	r.RetainBreakers(map[string]string{}) // idA dropped
+	r.RetainBreakers(map[string]string{})
 	if r.brk.State("idA") != 0 {
 		t.Fatal("RetainBreakers must drop the pruned identity's state")
 	}
-	// An in-flight RecordResult for the now-absent "a" must be a no-op
-	// (not recreate the entry).
-	r.RecordResult("a", false)
-	if r.brk.State("idA") != 0 {
-		t.Fatal("RecordResult for an absent provider must not recreate breaker state")
+	// A late in-flight RecordResult against the stale idA may transiently
+	// recreate the entry, but ResolveChain only ever consults CURRENT-generation
+	// identities — so the stale entry can never affect routing.
+	r.RecordResult("a", "idA", false)
+	// Bring "a" back under a NEW identity; routing uses the fresh (closed) breaker.
+	h.Swap(live.NewState(
+		map[string]providers.Provider{"a": a},
+		map[string]config.ModelConfig{"m": {Targets: []config.Target{{Provider: "a", Model: "m1"}}}},
+		nil, map[string]string{"a": "idA2"},
+	))
+	r.RetainBreakers(map[string]string{"a": "idA2"})
+	chain, _, err := r.ResolveChain("m")
+	if err != nil || len(chain) != 1 || chain[0].Identity != "idA2" {
+		t.Fatalf("re-added provider must route on its fresh identity: %+v %v", chain, err)
+	}
+	if !r.brk.Allow("idA2") {
+		t.Fatal("re-added provider's fresh breaker must be closed")
 	}
 }
 
@@ -238,7 +250,7 @@ func TestBreakerOpsRaceFree(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 300; j++ {
-				r.RecordResult("a", j%2 == 0)
+				r.RecordResult("a", "idA", j%2 == 0)
 			}
 		}()
 	}
