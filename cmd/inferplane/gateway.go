@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -46,6 +47,7 @@ type gateway struct {
 	instance    string                      // audit chain instance id (matches the audit Writer)
 	anchorer    audit.Anchorer              // nil unless audit.anchor is configured (ADR-012)
 	anchorEvery time.Duration               // anchor interval
+	anchorLast  atomic.Int64                // highest record count successfully anchored (shared: worker + finalAnchor)
 	metrics     *metrics.Metrics            // for the anchor-failure counter
 	reloadMu    sync.Mutex                  // serializes reloads AND UI writes (concurrent SIGHUPs/triggers)
 	dataLn      net.Listener
@@ -474,33 +476,43 @@ func (g *gateway) DeleteModel(ctx context.Context, name string) error {
 // are logged + counted, never fatal (best-effort, off the request path).
 func (g *gateway) anchorWorker(ctx context.Context, done chan<- struct{}) {
 	defer close(done)
-	var lastCount int64
 	t := time.NewTicker(g.anchorEvery)
 	defer t.Stop()
-	anchor := func(actx context.Context) {
-		hash, count := g.aud.HeadHash()
-		if count <= lastCount {
-			return // nothing new since the last successful anchor
-		}
-		p := audit.AnchorPoint{Instance: g.instance, HeadHash: hash, Count: count, TS: time.Now().UTC().Format(time.RFC3339Nano)}
-		if err := g.anchorer.Anchor(actx, p); err != nil {
-			fmt.Fprintln(os.Stderr, "inferplane: audit anchor failed (will retry):", err)
-			g.metrics.IncAnchorFailure()
-			return // do NOT advance lastCount → retry next tick / on shutdown
-		}
-		lastCount = count
-	}
 	for {
 		select {
 		case <-ctx.Done():
-			fctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			anchor(fctx)
-			cancel()
-			return
+			return // the FINAL anchor is done by finalAnchor() AFTER the writer drains
 		case <-t.C:
-			anchor(ctx)
+			g.anchorOnce(ctx)
 		}
 	}
+}
+
+// anchorOnce anchors the current head if the durable count advanced beyond the
+// last SUCCESSFUL anchor (so a failed anchor is retried, never skipped). Failures
+// are logged + counted, never propagated (best-effort).
+func (g *gateway) anchorOnce(ctx context.Context) {
+	hash, count := g.aud.HeadHash()
+	if count <= g.anchorLast.Load() {
+		return
+	}
+	p := audit.AnchorPoint{Instance: g.instance, HeadHash: hash, Count: count, TS: time.Now().UTC().Format(time.RFC3339Nano)}
+	if err := g.anchorer.Anchor(ctx, p); err != nil {
+		fmt.Fprintln(os.Stderr, "inferplane: audit anchor failed (will retry):", err)
+		g.metrics.IncAnchorFailure()
+		return // do NOT advance → retried on the next tick / final
+	}
+	g.anchorLast.Store(count)
+}
+
+// finalAnchor witnesses the FINAL chain head on shutdown. It is deferred FIRST in
+// serve so it runs LAST — AFTER the audit writer has drained (aud.Close), so the
+// last in-flight records are included (ADR-012 P4 MAJOR: the periodic worker's
+// snapshot would otherwise miss records still in the queue). Bounded fresh ctx.
+func (g *gateway) finalAnchor() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	g.anchorOnce(ctx)
 }
 
 // reloadWorker serializes reload triggers (SIGHUP) on a single goroutine and
@@ -529,6 +541,12 @@ func (g *gateway) reloadWorker(ctx context.Context, trigger <-chan os.Signal, do
 // writer; the in-flight handlers finish before audit drains (§5.4). SIGHUP
 // triggers a hot config reload via a single serialized worker.
 func (g *gateway) serve(ctx context.Context) error {
+	// Registered FIRST so it runs LAST (LIFO) — after aud.Close() below drains the
+	// audit queue — so the final WORM anchor includes the last in-flight records
+	// (ADR-012 P4: the periodic worker would otherwise snapshot before drain).
+	if g.anchorer != nil {
+		defer g.finalAnchor()
+	}
 	defer g.store.Close()
 	defer g.aud.Close()
 	if g.pstore != nil {

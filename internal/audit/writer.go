@@ -87,12 +87,17 @@ func (w *Writer) loop() {
 
 		// durability first: WAL, then sinks. A required-sink failure leaves the
 		// record in the WAL for replay (buffer_then_block; §5.4).
-		_ = w.wal.Append(canon)
+		walErr := w.wal.Append(canon)
 		w.pending++ // records persisted to the WAL, not yet confirmed delivered
-		// Publish the chain head ONLY after the record is durable (ADR-012): an
-		// anchor must never witness a hash for a record a crash could lose.
-		w.count++
-		w.head.Store(&chainHead{hash: w.prevHash, count: w.count})
+		// Publish the chain head ONLY after the record is DURABLE (ADR-012 P4
+		// CRITICAL): on a WAL-append failure the record may be lost on crash, so an
+		// anchor must NOT witness it — advance the published head/count only when
+		// the WAL write succeeded. (The chain link `prevHash` already advanced, so
+		// chaining continues; the witnessed head simply lags an undurable record.)
+		if walErr == nil {
+			w.count++
+			w.head.Store(&chainHead{hash: w.prevHash, count: w.count})
+		}
 		flushedAll := true
 		for _, s := range w.sinks {
 			if err := s.Write(canon); err != nil {

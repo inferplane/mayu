@@ -331,8 +331,12 @@ func validateAnchor(a *AnchorConfig) error {
 		return fmt.Errorf("config: audit.anchor.bucket is required")
 	}
 	if a.Interval != "" {
-		if _, err := time.ParseDuration(a.Interval); err != nil {
+		d, err := time.ParseDuration(a.Interval)
+		if err != nil {
 			return fmt.Errorf("config: audit.anchor.interval %q: %w", a.Interval, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("config: audit.anchor.interval must be > 0, got %q", a.Interval)
 		}
 	}
 	if a.RetainDays < 0 {

@@ -93,29 +93,29 @@ func TestAnchorWorkerRetriesOnFailure(t *testing.T) {
 	<-done
 }
 
-// TestAnchorWorkerFinalOnCancel: a head appended just before cancel is still
-// anchored by the final-on-shutdown anchor.
-func TestAnchorWorkerFinalOnCancel(t *testing.T) {
+// TestFinalAnchorWitnessesDrainedHead: finalAnchor (the shutdown path, run AFTER
+// the audit writer drains) anchors the final head exactly once; a second call is
+// a no-op (count not advanced) so it never re-PUTs an already-anchored WORM key.
+func TestFinalAnchorWitnessesDrainedHead(t *testing.T) {
 	fa := &fakeAnchorer{}
 	dir := t.TempDir()
 	aud, _ := audit.NewWriter("inst-1", dir+"/a.wal", []audit.Sink{audit.NewStdoutSink()})
 	t.Cleanup(func() { aud.Close() })
-	g := &gateway{aud: aud, anchorer: fa, anchorEvery: time.Hour, instance: "inst-1", metrics: metrics.New()} // long interval → no tick fires
+	g := &gateway{aud: aud, anchorer: fa, anchorEvery: time.Hour, instance: "inst-1", metrics: metrics.New()}
 
 	g.aud.Append(audit.Record{SchemaVersion: 1, Event: "e", ID: "1", TS: "t"})
-	// wait for the record to drain to the head
 	for i := 0; i < 200; i++ {
 		if _, c := g.aud.HeadHash(); c == 1 {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go g.anchorWorker(ctx, done)
-	cancel() // immediate → only the final anchor should fire
-	<-done
+	g.finalAnchor()
+	if len(fa.calls()) != 1 || fa.calls()[0].Count != 1 {
+		t.Fatalf("final anchor = %+v, want exactly 1 at count 1", fa.calls())
+	}
+	g.finalAnchor() // unchanged head → no re-anchor (no duplicate WORM key)
 	if len(fa.calls()) != 1 {
-		t.Fatalf("final-on-cancel anchor = %d, want exactly 1", len(fa.calls()))
+		t.Fatalf("final anchor re-anchored an unchanged head: %d calls", len(fa.calls()))
 	}
 }
