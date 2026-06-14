@@ -190,7 +190,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 		writer = g
 	}
 	g.dataSrv = &http.Server{Handler: server.DataMux(r, store, aud, gov, m)}
-	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder), auditFileSinks, aud, m, writer)}
+	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder), auditFileSinks, aud, m, writer, liveExport(holder))}
 	return g, nil
 }
 
@@ -463,6 +463,17 @@ func liveView(holder *live.Holder) func() configapi.View {
 	return func() configapi.View {
 		st := holder.Load()
 		return configapi.ViewFrom(st.ProviderConfigs(), st.Models())
+	}
+}
+
+// liveExport derives the secret-free, config-shaped Git-export doc from the
+// current generation (ADR-008 §3). Like liveView it reads the holder per call so
+// the export reflects the latest UI writes / reloads; ProviderConfig.APIKey is
+// dropped at marshal time by its `json:"-"` tag.
+func liveExport(holder *live.Holder) func() configapi.ExportDoc {
+	return func() configapi.ExportDoc {
+		st := holder.Load()
+		return configapi.ExportDocFrom(st.ProviderConfigs(), st.Models())
 	}
 }
 
