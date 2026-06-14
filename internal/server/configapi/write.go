@@ -9,8 +9,12 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
+	"github.com/inferplane/inferplane/internal/audit"
+	"github.com/inferplane/inferplane/internal/principal"
 	"github.com/inferplane/inferplane/internal/providerstore"
+	"github.com/inferplane/inferplane/pkg/ulid"
 )
 
 // nameRe bounds a provider/model resource name (path segment): no slashes, no
@@ -149,7 +153,9 @@ var ErrInvalidTopology = errors.New("invalid topology")
 // WriteHandler serves the provider/model write resources. resource is
 // "providers" or "models". When w is nil (no provider store configured) every
 // write returns 405 — registration stays config-driven (ADR-005, unchanged).
-func WriteHandler(resource string, w Writer) http.Handler {
+// emit (nil-safe) receives a secret-free admin-action audit record on each
+// successful write (§5.5; refs/names only, never a value).
+func WriteHandler(resource string, w Writer, emit func(audit.Record)) http.Handler {
 	prefix := "/admin/" + resource + "/"
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		if w == nil {
@@ -161,6 +167,7 @@ func WriteHandler(resource string, w Writer) http.Handler {
 			writeErr(rw, http.StatusBadRequest, "invalid resource name")
 			return
 		}
+		isProvider := resource == "providers"
 		switch r.Method {
 		case http.MethodPut:
 			body, err := io.ReadAll(io.LimitReader(r.Body, maxWriteBody))
@@ -168,13 +175,17 @@ func WriteHandler(resource string, w Writer) http.Handler {
 				writeErr(rw, http.StatusBadRequest, "cannot read body")
 				return
 			}
-			if resource == "providers" {
+			if isProvider {
 				row, perr := ParseProviderWrite(name, body)
 				if perr != nil {
 					writeErr(rw, http.StatusBadRequest, perr.Error())
 					return
 				}
-				mapWriteResult(rw, w.WriteProvider(r.Context(), row))
+				werr := w.WriteProvider(r.Context(), row)
+				if werr == nil {
+					emitEvent(emit, r, "provider_registered", name, "")
+				}
+				mapWriteResult(rw, werr)
 				return
 			}
 			targets, perr := ParseModelWrite(body)
@@ -182,17 +193,50 @@ func WriteHandler(resource string, w Writer) http.Handler {
 				writeErr(rw, http.StatusBadRequest, perr.Error())
 				return
 			}
-			mapWriteResult(rw, w.WriteModel(r.Context(), name, targets))
+			werr := w.WriteModel(r.Context(), name, targets)
+			if werr == nil {
+				emitEvent(emit, r, "model_route_updated", "", name)
+			}
+			mapWriteResult(rw, werr)
 		case http.MethodDelete:
-			if resource == "providers" {
-				mapWriteResult(rw, w.DeleteProvider(r.Context(), name))
+			if isProvider {
+				werr := w.DeleteProvider(r.Context(), name)
+				if werr == nil {
+					emitEvent(emit, r, "provider_deleted", name, "")
+				}
+				mapWriteResult(rw, werr)
 				return
 			}
-			mapWriteResult(rw, w.DeleteModel(r.Context(), name))
+			werr := w.DeleteModel(r.Context(), name)
+			if werr == nil {
+				emitEvent(emit, r, "model_route_deleted", "", name)
+			}
+			mapWriteResult(rw, werr)
 		default:
 			writeErr(rw, http.StatusMethodNotAllowed, "use PUT or DELETE")
 		}
 	})
+}
+
+// emitEvent records a secret-free admin-action audit record (§5.5): the event,
+// the actor (opaque OIDC subject / break-glass — never PII), and the resource
+// NAME (provider or model — config-bounded, never a secret value).
+func emitEvent(emit func(audit.Record), r *http.Request, event, provider, model string) {
+	if emit == nil {
+		return
+	}
+	rec := audit.Record{
+		SchemaVersion: 1,
+		Event:         event,
+		ID:            ulid.New(),
+		TS:            time.Now().UTC().Format(time.RFC3339Nano),
+		Request:       audit.RequestRef{Ingress: "admin", Provider: provider, ModelRequested: model},
+	}
+	if id, ok := principal.AdminFrom(r.Context()); ok {
+		sub, method := id.Subject, id.AuthMethod
+		rec.Principal = audit.PrincipalRef{User: &sub, AuthMethod: &method}
+	}
+	emit(rec)
 }
 
 // mapWriteResult maps a Writer error to an HTTP status: nil→204, invalid

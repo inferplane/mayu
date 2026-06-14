@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/inferplane/inferplane/internal/audit"
+	"github.com/inferplane/inferplane/internal/principal"
 	"github.com/inferplane/inferplane/internal/providerstore"
 )
 
@@ -136,7 +138,7 @@ func doReq(h http.Handler, method, path, body string) *httptest.ResponseRecorder
 }
 
 func TestWriteHandlerStoreAbsent405(t *testing.T) {
-	h := WriteHandler("providers", nil) // nil writer = store not enabled
+	h := WriteHandler("providers", nil, nil) // nil writer = store not enabled
 	rec := doReq(h, "PUT", "/admin/providers/p", `{"type":"anthropic"}`)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("store-absent PUT = %d, want 405", rec.Code)
@@ -145,7 +147,7 @@ func TestWriteHandlerStoreAbsent405(t *testing.T) {
 
 func TestWriteHandlerPutProvider(t *testing.T) {
 	w := &stubWriter{}
-	h := WriteHandler("providers", w)
+	h := WriteHandler("providers", w, nil)
 	rec := doReq(h, "PUT", "/admin/providers/anthropic-prod", `{"type":"anthropic","api_key_ref":{"env":"K"}}`)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("PUT = %d, want 204: %s", rec.Code, rec.Body)
@@ -157,7 +159,7 @@ func TestWriteHandlerPutProvider(t *testing.T) {
 
 func TestWriteHandlerInlineSecretNotForwarded(t *testing.T) {
 	w := &stubWriter{}
-	h := WriteHandler("providers", w)
+	h := WriteHandler("providers", w, nil)
 	rec := doReq(h, "PUT", "/admin/providers/p", `{"type":"anthropic","api_key":"sk-leak"}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("inline api_key = %d, want 400", rec.Code)
@@ -172,7 +174,7 @@ func TestWriteHandlerInlineSecretNotForwarded(t *testing.T) {
 
 func TestWriteHandlerInvalidTopology400(t *testing.T) {
 	w := &stubWriter{err: ErrInvalidTopology}
-	h := WriteHandler("providers", w)
+	h := WriteHandler("providers", w, nil)
 	rec := doReq(h, "PUT", "/admin/providers/p", `{"type":"anthropic"}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("invalid topology = %d, want 400", rec.Code)
@@ -181,7 +183,7 @@ func TestWriteHandlerInvalidTopology400(t *testing.T) {
 
 func TestWriteHandlerDeleteNotFound404(t *testing.T) {
 	w := &stubWriter{err: providerstore.ErrNotFound}
-	h := WriteHandler("providers", w)
+	h := WriteHandler("providers", w, nil)
 	rec := doReq(h, "DELETE", "/admin/providers/gone", "")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("delete missing = %d, want 404", rec.Code)
@@ -190,7 +192,7 @@ func TestWriteHandlerDeleteNotFound404(t *testing.T) {
 
 func TestWriteHandlerModelPutDelete(t *testing.T) {
 	w := &stubWriter{}
-	h := WriteHandler("models", w)
+	h := WriteHandler("models", w, nil)
 	rec := doReq(h, "PUT", "/admin/models/claude", `{"targets":[{"provider":"p","model":"m"}]}`)
 	if rec.Code != http.StatusNoContent || w.lastModel != "claude" || len(w.lastTargets) != 1 {
 		t.Fatalf("model PUT wrong: code=%d model=%q targets=%+v", rec.Code, w.lastModel, w.lastTargets)
@@ -203,11 +205,58 @@ func TestWriteHandlerModelPutDelete(t *testing.T) {
 
 func TestWriteHandlerBadNameAndMethod(t *testing.T) {
 	w := &stubWriter{}
-	h := WriteHandler("providers", w)
+	h := WriteHandler("providers", w, nil)
 	if rec := doReq(h, "PUT", "/admin/providers/", `{"type":"anthropic"}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("empty name = %d, want 400", rec.Code)
 	}
 	if rec := doReq(h, "GET", "/admin/providers/p", ""); rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET = %d, want 405", rec.Code)
 	}
+}
+
+func TestWriteHandlerEmitsSecretFreeAudit(t *testing.T) {
+	var recs []audit.Record
+	emit := func(r audit.Record) { recs = append(recs, r) }
+	w := &stubWriter{}
+	h := WriteHandler("providers", w, emit)
+
+	req := httptest.NewRequest("PUT", "/admin/providers/anthropic-prod",
+		strings.NewReader(`{"type":"anthropic","api_key_ref":{"env":"ANTHROPIC_KEY"}}`))
+	req = req.WithContext(principal.WithAdmin(req.Context(), principal.AdminIdentity{Subject: "alice", AuthMethod: "oidc"}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("PUT = %d", rec.Code)
+	}
+	if len(recs) != 1 || recs[0].Event != "provider_registered" {
+		t.Fatalf("want one provider_registered event, got %+v", recs)
+	}
+	if recs[0].Request.Provider != "anthropic-prod" {
+		t.Fatalf("event missing provider name: %+v", recs[0].Request)
+	}
+	if recs[0].Principal.User == nil || *recs[0].Principal.User != "alice" {
+		t.Fatalf("event missing actor: %+v", recs[0].Principal)
+	}
+	// Secret-free: the ref NAME (let alone any value) must not appear in the record.
+	canon, _ := recs[0].Canonical()
+	if strings.Contains(string(canon), "ANTHROPIC_KEY") {
+		t.Fatalf("audit record leaked the ref: %s", canon)
+	}
+}
+
+func TestWriteHandlerNoAuditOnFailure(t *testing.T) {
+	var recs []audit.Record
+	emit := func(r audit.Record) { recs = append(recs, r) }
+	w := &stubWriter{err: ErrInvalidTopology}
+	h := WriteHandler("providers", w, emit)
+	doReqCtx(h, "PUT", "/admin/providers/p", `{"type":"anthropic"}`)
+	if len(recs) != 0 {
+		t.Fatalf("a failed write must not emit an audit event, got %+v", recs)
+	}
+}
+
+func doReqCtx(h http.Handler, method, path, body string) {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req = req.WithContext(principal.WithAdmin(req.Context(), principal.AdminIdentity{Subject: "x", AuthMethod: "oidc"}))
+	h.ServeHTTP(httptest.NewRecorder(), req)
 }

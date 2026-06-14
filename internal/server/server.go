@@ -86,9 +86,9 @@ func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier,
 	// writer is nil when no provider store is configured → every write returns
 	// 405 (ADR-005 stage-1 posture preserved). Mutations are secret-free (refs
 	// only) and run build-once-swap-once in the assembly.
-	providersW := AdminAuth(adminTokens, verifier, mapping, denied, configapi.WriteHandler("providers", writer))
+	providersW := AdminAuth(adminTokens, verifier, mapping, denied, configapi.WriteHandler("providers", writer, emit))
 	mux.Handle("/admin/providers/", providersW)
-	modelsW := AdminAuth(adminTokens, verifier, mapping, denied, configapi.WriteHandler("models", writer))
+	modelsW := AdminAuth(adminTokens, verifier, mapping, denied, configapi.WriteHandler("models", writer, emit))
 	mux.Handle("/admin/models/", modelsW)
 	// Audit-chain verification (ADR-003 #2), behind the same AdminAuth: read-only
 	// per-sink hash-chain check, returns no record contents.
