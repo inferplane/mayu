@@ -29,8 +29,8 @@ func enableRecorder(t *testing.T) *tracetest.SpanRecorder {
 func TestSpanRecordedWithGenAIAttrs(t *testing.T) {
 	sr := enableRecorder(t)
 	ctx, span := Start(context.Background(), "chat m")
-	SetGenAIRequest(span, "anthropic", "claude")
-	SetGenAIResponse(span, "claude-up", 10, 20)
+	SetGenAIRequest(span, "claude")
+	SetGenAIResponse(span, "anthropic", "claude-up", 10, 20)
 	SetStatus(span, true, "")
 	if tid := TraceID(ctx); len(tid) != 32 {
 		t.Fatalf("TraceID = %q, want 32-hex", tid)
