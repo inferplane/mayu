@@ -14,27 +14,36 @@ Complete the v0.2 governance wedge entirely in-binary (no new infra), then tag
   (finance lock-in; reuses the existing audit log).
 - **Release prep** — version 0.2.0, CHANGELOG, README status, final review.
 
-## Design decisions (for the gate)
+## Design decisions (for the gate — revised after P2 round-1, both panels)
 
-- **Audit-verify endpoint reads a file being appended to.** The live file sink
-  may have a partially-written trailing line; verifying it raw would spuriously
-  fail. The endpoint verifies only COMPLETE lines (up to the last `\n`) — a
-  trailing partial line is ignored, never treated as tampering.
-- **Which file:** the endpoint verifies the FIRST configured `file` audit sink;
-  if there is no file sink, it returns a clear "no file sink" result (not an
-  error) — stdout-only deployments can't be verified at rest.
-- **Endpoint cost:** verification is O(file) and operator-triggered behind
-  AdminAuth; it is read-only and not on the data hot path. Documented; no cap
-  in v0.2 (operator action, single file).
-- **Chargeback aggregation:** only `request_completed` records with a `cost`
-  are summed (started/denied/count_tokens carry no settled cost). Key by team,
-  or team+model. Period filter parses `ts` as RFC3339 (`--since`/`--until`).
-  Integer µUSD throughout; the report prints µUSD and a derived USD (µUSD/1e6)
-  — never float accumulation.
-- **Governance gauges are client-side** from `/metrics`
-  (`inferplane_quota_utilization_ratio{team,window}`,
-  `inferplane_budget_spend_usd_total{team,...}`) — no new endpoint, no secret,
-  cardinality already config-bounded.
+- **Audit-verify reads a live-appended file.** Verify only the COMPLETE prefix
+  (up to the last `\n`); a partial trailing line is ignored. **Be honest about
+  it:** the result carries `partial_tail bool` and the UI says "complete prefix
+  OK (N records)" — never claim bytes were verified that weren't (codex MAJOR).
+- **All file sinks, per-sink results.** The endpoint verifies EVERY configured
+  `file` sink and returns an array `[{path, ok, records, broken_at, reason,
+  partial_tail}]` (not just the first). No file sink → `{"sinks":[]}` (clear,
+  200, not 500). `os.Stat` each path; skip non-regular files with a reason
+  (rotation/symlink-swap safety — codex MAJOR).
+- **DoS guard:** a file larger than a cap (16 MiB) is not scanned synchronously
+  — its per-sink result is `{ok:false, reason:"too large for online verify; use
+  `inferplane audit verify`"}` (AdminAuth is not a DoS control — both panels).
+- **Chargeback aggregation:** only `request_completed` records with a non-nil
+  `cost` are summed. Group by team, or team+**resolved** model (`ModelResolved`
+  — the billed model; fall back to `ModelRequested` if empty) — codex MAJOR.
+  Output via **`encoding/csv`** (team/model names may contain commas/quotes —
+  both panels). Period: `--since` inclusive, `--until` exclusive, both parsed as
+  `time.Time` (RFC3339/Nano, offset-aware); invalid `ts` on a record → skip +
+  count + stderr warning; malformed JSON line → skip + count. The CLI trims a
+  partial trailing line (shared complete-line reader). **USD is formatted
+  directly from integer micros** as a sign-aware `$d.dddddd` (micros/1e6 with a
+  zero-padded 6-digit fraction) — never float division/accumulation (codex MAJOR).
+- **Console governance is client-side** from `/metrics`. Quota → the real gauge
+  `inferplane_quota_utilization_ratio{team,window}` (a 0..1 ratio) shown as a
+  per-team+window bar. Budget → `inferplane_budget_spend_usd_total{team,...}` is
+  a **counter**, shown honestly as "spend (cumulative since start)" — NOT a
+  fake utilization gauge (a true budget gauge needs the limit, deferred). No new
+  endpoint for gauges; cardinality is config-bounded.
 
 ## Security invariants
 
@@ -44,7 +53,7 @@ Complete the v0.2 governance wedge entirely in-binary (no new infra), then tag
 - The report CLI reads a local file (operator bootstrap, like `audit verify`);
   it prints team/model/cost — no key material (audit records already carry no
   secrets, only `key_id`/team).
-- Every task ends green on: `CGO_ENABLED=0 go build ./...`,
+- Every task ends green on: `CGO_ENABLED=0 go build -trimpath -o bin/inferplane ./cmd/inferplane`,
   `go test ./... -race`, `go vet ./... && gofmt -l .`, `bash tests/run-all.sh`.
 
 ## Non-goals
@@ -71,11 +80,18 @@ Complete the v0.2 governance wedge entirely in-binary (no new infra), then tag
       the audit log rather than a new store.
 - [ ] Failing tests `report_test.go`: a fixture JSONL with mixed records
       (started, completed-with-cost across 2 teams/2 models, a denial) →
-      `runReport` aggregates µUSD by team (and by team+model with `--by team,model`);
-      `--since`/`--until` filter by `ts`; records without cost are excluded;
-      CSV output columns + a deterministic order; USD column = µUSD/1e6 exact.
-- [ ] Implement `report.go` (`reportCmd(args) int`, `runReport(io.Reader, opts)`)
-      parsing audit.Record lines; wire `report` into `main.go` dispatch + usage.
+      `runReport` aggregates µUSD by team (and by team+**resolved** model with
+      `--by team,model`), sorted deterministically; `--since` inclusive /
+      `--until` exclusive filter parsed as `time.Time`; records without cost
+      excluded; **`encoding/csv`** output with a team name containing a comma +
+      a quote (escaping); **USD formatted from integer micros** (`$d.dddddd`,
+      incl. a large value with no float drift); edge cases — empty file,
+      all-unsettled, a malformed JSON line (skipped + counted), nil cost,
+      missing team/model, a negative micros value.
+- [ ] Implement `report.go` (`reportCmd(args) int`, `runReport(io.Reader, opts)
+      (rows, skipped, error)`) — a complete-line reader (trims a partial
+      trailing line), `encoding/csv` writer, integer-micros USD formatter; wire
+      `report` into `main.go` dispatch + usage.
 - [ ] All four checks green. Commit (DCO sign-off).
 
 ### Task 2: Audit-verify admin endpoint (complete-lines-only)
@@ -90,16 +106,18 @@ Complete the v0.2 governance wedge entirely in-binary (no new infra), then tag
 
 **Steps:**
 
-- [ ] Failing tests: `GET /admin/audit/verify` with a valid chain file → 200
-      `{"ok":true,"records":N}`; a tampered file → `{"ok":false,"broken_at":K}`;
-      **a file whose last line is a partial write (no trailing newline) verifies
-      the complete prefix and does NOT report tampering**; no file sink
-      configured → 200 `{"ok":false,"reason":"no file sink"}` (clear, not 500);
-      non-GET → 405. Behind AdminAuth (401 without token — wired in server_test).
-- [ ] Implement `auditapi.Handler(verifyPath string)` reading the file, trimming
-      any trailing partial line at the last `\n`, running `audit.Verify` on the
-      complete prefix; JSON result. Wire into AdminMux behind AdminAuth; gateway
-      passes the first `file` sink path (empty if none).
+- [ ] Failing tests: `GET /admin/audit/verify` → 200 `{"sinks":[{path,ok,records,
+      partial_tail,...}]}`; valid chain → ok:true; tampered → ok:false+broken_at;
+      **partial trailing line (no `\n`) → ok:true, partial_tail:true, verifies the
+      complete prefix, NOT tampering**; over-cap file → ok:false,
+      reason contains "too large"; non-regular path skipped with a reason; no
+      file sink → `{"sinks":[]}`; authenticated non-GET → 405 with `Allow: GET`;
+      no token → 401 (AdminAuth, wired in server_test, runs before method check).
+- [ ] Implement `auditapi.Handler(paths []string)`: for each path `os.Stat`
+      (skip non-regular w/ reason), enforce the 16 MiB cap, read + trim to the
+      last `\n`, `audit.Verify` the complete prefix, set `partial_tail` if bytes
+      were trimmed; return the per-sink array. Wire into AdminMux behind
+      AdminAuth; gateway passes ALL `file` sink paths.
 - [ ] All four checks green. Commit (DCO sign-off).
 
 ### Task 3: Console Governance tab (quota/budget gauges + verify button)
@@ -114,13 +132,18 @@ Complete the v0.2 governance wedge entirely in-binary (no new infra), then tag
 **Steps:**
 
 - [ ] Failing asset tests: assets still contain no `ik_`/`localStorage`/
-      `document.cookie` (the new tab adds no storage/secret); the verify button
-      calls `/admin/audit/verify` (grep the fetch path in app.js).
-- [ ] Add a **Governance** tab: per-team quota-utilization bars and budget-spend
-      figures parsed from `/metrics` (client-side, reusing the existing parser),
-      and an **Audit integrity** card with a "Verify chain" button that GETs
-      `/admin/audit/verify` and renders ok/records or broken-at. CSP unchanged
-      (`default-src 'self'`); no inline styles/handlers.
+      `document.cookie`; the verify button uses the existing `api()` helper
+      (in-memory admin token, handles 401) to GET `/admin/audit/verify` (grep
+      it routes through `api(`, not a bare unauthenticated `fetch`); no inline
+      `style=`/`onclick=` attributes in the new markup (CSP guard).
+- [ ] Add a **Governance** tab: per-team **quota-utilization** bars from the
+      real `inferplane_quota_utilization_ratio{team,window}` gauge, and a
+      **budget spend (cumulative)** figure from `inferplane_budget_spend_usd_total`
+      — labeled honestly as a counter since process start, NOT a utilization
+      gauge — both parsed client-side via the existing `/metrics` parser; plus
+      an **Audit integrity** card whose "Verify chain" button renders the
+      per-sink results (complete-prefix OK / broken-at / too-large). CSP
+      unchanged (`default-src 'self'`); no inline styles/handlers.
 - [ ] Browser smoke (Playwright) against a local gateway: Governance tab renders
       gauges; verify button shows "chain OK (N records)".
 - [ ] All four checks green. Commit (DCO sign-off).
