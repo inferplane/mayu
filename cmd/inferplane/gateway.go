@@ -134,6 +134,14 @@ func newGateway(cfgPath string) (*gateway, error) {
 		return nil, fmt.Errorf("admin listen %q: %w", cfg.Server.AdminListen, err)
 	}
 
+	// File audit-sink paths for the /admin/audit/verify endpoint (ADR-003 #2).
+	var auditFileSinks []string
+	for _, sk := range cfg.Audit.Sinks {
+		if sk.Type == "file" {
+			auditFileSinks = append(auditFileSinks, sk.Path)
+		}
+	}
+
 	return &gateway{
 		cfgPath:  cfgPath,
 		cfg:      cfg,
@@ -144,7 +152,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 		dataLn:   dataLn,
 		adminLn:  adminLn,
 		dataSrv:  &http.Server{Handler: server.DataMux(r, store, aud, gov, m)},
-		adminSrv: &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder), aud, m)},
+		adminSrv: &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder), auditFileSinks, aud, m)},
 	}, nil
 }
 
