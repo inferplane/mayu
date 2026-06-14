@@ -99,6 +99,16 @@ type KeyStoreConfig struct {
 	Path string `json:"path"`
 }
 
+// ProviderStoreConfig optionally enables the DB-authoritative provider/model
+// topology store (ADR-008, Stage 2). Absent (nil) → providers/models come from
+// this file and UI writes return 405 (ADR-005, unchanged). Present → the DB is
+// authoritative for the reloadable topology; "sqlite" ships, "postgres" is the
+// HA path. Same shape as KeyStoreConfig for consistency.
+type ProviderStoreConfig struct {
+	Type string `json:"type"`
+	Path string `json:"path"`
+}
+
 // AuditSink configures one audit output: "stdout" or "file" (with Path).
 type AuditSink struct {
 	Type string `json:"type"`
@@ -163,16 +173,37 @@ type PricingConfig struct {
 }
 
 type Config struct {
-	Server    ServerConfig              `json:"server"`
-	Providers map[string]ProviderConfig `json:"providers"`
-	Models    map[string]ModelConfig    `json:"models"`
-	KeyStore  KeyStoreConfig            `json:"key_store"`
-	Audit     AuditConfig               `json:"audit"`
-	Teams     map[string]TeamConfig     `json:"teams"`
-	Pricing   PricingConfig             `json:"pricing"`
+	Server        ServerConfig              `json:"server"`
+	Providers     map[string]ProviderConfig `json:"providers"`
+	Models        map[string]ModelConfig    `json:"models"`
+	KeyStore      KeyStoreConfig            `json:"key_store"`
+	ProviderStore *ProviderStoreConfig      `json:"provider_store,omitempty"`
+	Audit         AuditConfig               `json:"audit"`
+	Teams         map[string]TeamConfig     `json:"teams"`
+	Pricing       PricingConfig             `json:"pricing"`
 }
 
+// Load parses the config and resolves every secret ref — the back-compat entry
+// point (= LoadRaw + ResolveProviders). Used when no provider store is enabled:
+// file providers are authoritative, so their secrets must resolve at boot.
 func Load(path string) (*Config, error) {
+	cfg, err := LoadRaw(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := ResolveProviders(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// LoadRaw parses the config, rejects inline secrets (§7), resolves admin tokens,
+// and validates the OIDC block — but does NOT resolve provider secret refs
+// (ADR-008 gate G1). When a provider store is authoritative, file providers may
+// be stale/ignored, so resolving their refs at boot would crash the gateway
+// before the DB overlay could discard them; the assembly resolves only the
+// effective (DB-overlaid) providers via ResolveProviders.
+func LoadRaw(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -194,17 +225,9 @@ func Load(path string) (*Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
-	for name, p := range cfg.Providers {
-		secret, err := resolveSecret(p.APIKeyRef)
-		if err != nil {
-			return nil, fmt.Errorf("config: provider %q secret: %w", name, err)
-		}
-		p.APIKey = secret
-		cfg.Providers[name] = p
-	}
 	for i := range cfg.Server.AdminAuth.TokenRefs {
 		ref := cfg.Server.AdminAuth.TokenRefs[i]
-		tok, err := resolveSecret(&ref)
+		tok, err := ResolveSecretRef(&ref)
 		if err != nil {
 			return nil, fmt.Errorf("config: admin token: %w", err)
 		}
@@ -214,6 +237,23 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// ResolveProviders resolves every provider's secret ref into ProviderConfig.APIKey,
+// in place. It is the ONLY provider-secret resolution path — both the back-compat
+// Load and the DB-overlay assembly (ADR-008) call it, so inline-rejection and
+// env/file rules stay in one place. An unresolvable ref (unset env / unreadable
+// file) is an error.
+func ResolveProviders(cfg *Config) error {
+	for name, p := range cfg.Providers {
+		secret, err := ResolveSecretRef(p.APIKeyRef)
+		if err != nil {
+			return fmt.Errorf("config: provider %q secret: %w", name, err)
+		}
+		p.APIKey = secret
+		cfg.Providers[name] = p
+	}
+	return nil
 }
 
 // validateOIDC enforces the ADR-004 load-time rules when the oidc block is
@@ -253,7 +293,9 @@ func validateOIDC(aa *AdminAuth) error {
 	return nil
 }
 
-func resolveSecret(ref *SecretRef) (string, error) {
+// ResolveSecretRef resolves an env/file secret ref to its value (exported so the
+// DB-overlay path resolves DB-sourced provider refs through the same code).
+func ResolveSecretRef(ref *SecretRef) (string, error) {
 	if ref == nil {
 		return "", nil
 	}

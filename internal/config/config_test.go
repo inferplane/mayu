@@ -248,3 +248,88 @@ func TestOIDCConfigRejectsJWTShapedStaticToken(t *testing.T) {
 		t.Fatalf("JWT-shaped token without oidc must load: %v", err)
 	}
 }
+
+// --- T0: provider_store block + LoadRaw/ResolveProviders split (ADR-008) ---
+
+// TestProviderStoreConfigParses: the optional provider_store block is parsed
+// into Config.ProviderStore (nil when absent — opt-in, ADR-008 §1).
+func TestProviderStoreConfigParses(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "c.json")
+	os.WriteFile(f, []byte(`{"provider_store":{"type":"sqlite","path":"providers.db"}}`), 0o600)
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProviderStore == nil {
+		t.Fatal("provider_store block not parsed")
+	}
+	if cfg.ProviderStore.Type != "sqlite" || cfg.ProviderStore.Path != "providers.db" {
+		t.Fatalf("provider_store fields wrong: %+v", cfg.ProviderStore)
+	}
+
+	// Absent → nil (opt-in default unchanged).
+	f2 := filepath.Join(dir, "c2.json")
+	os.WriteFile(f2, []byte(`{"providers":{}}`), 0o600)
+	cfg2, err := Load(f2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.ProviderStore != nil {
+		t.Fatalf("provider_store should be nil when absent, got %+v", cfg2.ProviderStore)
+	}
+}
+
+// TestLoadRawDoesNotResolveProviderSecrets pins gate G1 (CRITICAL): LoadRaw
+// parses + rejects inline secrets + validates OIDC, but does NOT resolve
+// provider secret refs — so a file provider with an unset env ref does NOT
+// crash boot/reload before the DB overlay can discard it.
+func TestLoadRawDoesNotResolveProviderSecrets(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "c.json")
+	// MISSING_REF_ENV is intentionally never set.
+	os.WriteFile(f, []byte(`{"providers":{"p":{"type":"anthropic","api_key_ref":{"env":"MISSING_REF_ENV"}}}}`), 0o600)
+
+	// LoadRaw must succeed (the unset ref is NOT resolved).
+	cfg, err := LoadRaw(f)
+	if err != nil {
+		t.Fatalf("LoadRaw must not resolve provider secrets: %v", err)
+	}
+	if got := cfg.Providers["p"].APIKey; got != "" {
+		t.Fatalf("LoadRaw must leave APIKey empty, got %q", got)
+	}
+
+	// ResolveProviders on the same config DOES fail (unset env).
+	if err := ResolveProviders(cfg); err == nil {
+		t.Fatal("ResolveProviders must fail on an unset env ref")
+	}
+
+	// And the back-compat Load (= LoadRaw + ResolveProviders) fails too.
+	if _, err := Load(f); err == nil {
+		t.Fatal("Load must fail on an unset env ref (back-compat)")
+	}
+}
+
+// TestLoadRawRejectsInlineSecret: the §7 inline-api_key rejection lives in the
+// raw parse, so it fires even without provider resolution.
+func TestLoadRawRejectsInlineSecret(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	os.WriteFile(f, []byte(`{"providers":{"x":{"type":"anthropic","api_key":"sk-plaintext"}}}`), 0o600)
+	if _, err := LoadRaw(f); err == nil {
+		t.Fatal("LoadRaw must still reject inline api_key")
+	}
+}
+
+// TestResolveSecretRefExported: the exported resolver is the single code path
+// for env/file refs (DB-overlaid providers reuse it).
+func TestResolveSecretRefExported(t *testing.T) {
+	t.Setenv("T0_REF_ENV", "sk-t0-val")
+	got, err := ResolveSecretRef(&SecretRef{Env: "T0_REF_ENV"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "sk-t0-val" {
+		t.Fatalf("ResolveSecretRef = %q", got)
+	}
+}
