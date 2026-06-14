@@ -17,6 +17,7 @@ backends are a swap, not a rewrite.
 |---|---|---|
 | Key store | `internal/keystore/sqlite.go` | SHA-256-hashed virtual keys, Postgres-portable schema |
 | Store interface | `internal/keystore/keystore.go` | `Store`, `Principal`, `Allows()` (RBAC) |
+| Provider store | `internal/providerstore/sqlite.go` | opt-in DB topology (ADR-008): `providers` (refs only — no secret column), `model_targets` (ordered routes), `meta` (durable `seeded` marker); Postgres-portable TEXT-only DDL |
 | Audit writer | `internal/audit/writer.go` | single-writer hash chain, WAL truncation |
 | Audit WAL | `internal/audit/wal.go` | disk buffer for `buffer_then_block` durability |
 | Audit verify | `internal/audit/verify.go` | per-instance segmented chain verification |
@@ -53,6 +54,7 @@ backends are a swap, not a rewrite.
 |---|---|---|
 | 키 스토어 | `internal/keystore/sqlite.go` | SHA-256 해시 가상 키, Postgres 이식 스키마 |
 | Store 인터페이스 | `internal/keystore/keystore.go` | `Store`, `Principal`, `Allows()` (RBAC) |
+| Provider 스토어 | `internal/providerstore/sqlite.go` | 옵트인 DB 토폴로지 (ADR-008): `providers`(ref만·시크릿 컬럼 없음), `model_targets`(순서 라우트), `meta`(durable `seeded` 마커); Postgres 이식 TEXT 전용 DDL |
 | 감사 writer | `internal/audit/writer.go` | 단일 writer 해시 체인, WAL 절단 |
 | 감사 WAL | `internal/audit/wal.go` | `buffer_then_block` 내구성용 디스크 버퍼 |
 | 감사 verify | `internal/audit/verify.go` | 인스턴스별 분절 체인 검증 |

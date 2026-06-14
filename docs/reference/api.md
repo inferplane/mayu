@@ -19,7 +19,8 @@ contract is in [docs/api-reference.md](../api-reference.md).
 | OpenAI ingress | `internal/server/openaiapi/` | `/v1/chat/completions`, `/v1/models` |
 | Admin keys API | `internal/server/adminapi/keys.go` | issue / list / revoke virtual keys (per-team entitlement + admin audit, ADR-004) |
 | Admin key console | `internal/server/adminui/` | `/admin/ui/` embedded static console (data-free, unauthenticated; data via `/admin/keys`, ADR-001) |
-| Config view API | `internal/server/configapi/` | `GET /admin/config` read-only secret-free provider/model topology (ADR-005); writes 405 |
+| Config view/write API | `internal/server/configapi/` | `GET /admin/config` read-only topology (ADR-005); `PUT`/`DELETE /admin/providers/{name}` + `PUT`/`DELETE /admin/models/{name}` UI-write (ADR-008; 405 unless `provider_store` enabled); `GET /admin/config/export` secret-free Git export |
+| Provider store | `internal/providerstore/` | opt-in DB-authoritative provider/model topology (ADR-008); refs only (no secret column), durable seed marker, Postgres-portable DDL |
 | Audit verify API | `internal/server/auditapi/` | `GET /admin/audit/verify` per-sink hash-chain check (ADR-003 #2); complete-prefix, 16 MiB cap |
 | Metrics endpoint | `internal/server/metricsapi.go` | unauthenticated Prometheus `/metrics` |
 | OpenAI conversion | `internal/openai/convert.go` | OpenAI ⇄ canonical request/response/chunk |
@@ -55,7 +56,8 @@ HTTP 표면입니다. 두 인그레스(Anthropic Messages, OpenAI Chat Completio
 | OpenAI 인그레스 | `internal/server/openaiapi/` | `/v1/chat/completions`, `/v1/models` |
 | 관리 키 API | `internal/server/adminapi/keys.go` | 가상 키 발급 / 목록 / 폐기 (팀별 권한 + 관리 감사, ADR-004) |
 | 관리 키 콘솔 | `internal/server/adminui/` | `/admin/ui/` 내장 정적 콘솔(데이터 없음·무인증, 데이터는 `/admin/keys` 경유, ADR-001) |
-| Config 뷰 API | `internal/server/configapi/` | `GET /admin/config` 읽기 전용 시크릿 무노출 프로바이더/모델 토폴로지 (ADR-005); 쓰기 405 |
+| Config 뷰/쓰기 API | `internal/server/configapi/` | `GET /admin/config` 읽기 전용 토폴로지 (ADR-005); `PUT`/`DELETE /admin/providers/{name}` + `PUT`/`DELETE /admin/models/{name}` UI 쓰기 (ADR-008; `provider_store` 미설정 시 405); `GET /admin/config/export` 시크릿 무노출 Git export |
+| Provider 스토어 | `internal/providerstore/` | 옵트인 DB 권위 프로바이더/모델 토폴로지 (ADR-008); ref만 저장(시크릿 컬럼 없음), durable seed 마커, Postgres 이식 가능 DDL |
 | Audit verify API | `internal/server/auditapi/` | `GET /admin/audit/verify` sink별 해시체인 검증 (ADR-003 #2); 완전 prefix, 16 MiB 캡 |
 | 메트릭 엔드포인트 | `internal/server/metricsapi.go` | 무인증 Prometheus `/metrics` |
 | OpenAI 변환 | `internal/openai/convert.go` | OpenAI ⇄ canonical 요청/응답/청크 |

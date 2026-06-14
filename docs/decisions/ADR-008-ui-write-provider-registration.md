@@ -7,7 +7,11 @@ ignored the piped context). Round 1: 9 findings (2 CRITICAL/secret-safety + 5
 MAJOR) folded in. Round 2: all 9 confirmed CLOSED; 2 new findings — a CRITICAL
 seed-resurrection bug (durable marker, below) and a MAJOR call-chain ambiguity
 (explicit chain, below) — folded in; 1 file-ref MINOR chair-downgraded with code
-evidence. Implementation = Stage B.
+evidence. **Implemented (Stage B): backend T0–T7** behind 2-round P4 code gate
+(codex + gemini) — round 1 found a CRITICAL seed-path ref-validation gap + a
+MAJOR un-sanitized 400, both fixed (shared `config.ValidateSecretRef`, fixed
+client message + server-side log); round 2 PASS. Console write UI (T8) is a
+tracked follow-up.
 **Related:** ADR-005 (provider visibility; UI-write deferred to this ADR),
 ADR-006 (config hot-reload — the `reload()` + `live.Holder` mechanism this builds
 on), ADR-003 (policy-as-code differentiator), spec §7 (secret-ref mandate, inline

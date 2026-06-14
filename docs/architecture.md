@@ -129,6 +129,8 @@ Client -> KeyAuth(RBAC) -> Governor.PreCheck -> Router(fallback+breaker) -> Prov
 
 - **Config hot-reload (`internal/live`, ADR-006)** -- the provider/model/pricing topology is one immutable `live.State` behind an atomic pointer; `SIGHUP` validates + atomically swaps a new generation. Governance counters, keystore, audit chain, and circuit-breaker state persist across reloads.
 
+- **UI-write provider registration (`internal/providerstore`, ADR-008)** -- an opt-in `provider_store` makes the DB authoritative for the reloadable topology (providers + model routes); `PUT`/`DELETE /admin/providers|models` register changes build-once-swap-once through the same `reload()` mechanism (validate the candidate generation, persist, swap the validated state, all under one `reloadMu`). **Secrets never enter the gateway** -- only the ref (env var name / file path) is stored; `GET /admin/config/export` emits a secret-free config fragment for Git. Absent `provider_store` → file-authoritative, writes 405 (ADR-005).
+
 ## Key Design Decisions
 
 - **Canonical schema = Anthropic-superset, not OpenAI** -- preserves thinking blocks and `cache_control` that the OpenAI shape cannot represent; same-protocol round-trips stay lossless.
