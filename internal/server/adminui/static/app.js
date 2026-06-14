@@ -312,12 +312,14 @@ async function refreshGovernance() {
       tr.appendChild(td(q.labels.window || ""));
       const cell = document.createElement("td");
       const pct = Math.max(0, Math.min(1, q.value)) * 100;
-      const bar = document.createElement("div");
+      // <progress> needs no style — bulletproof under CSP style-src 'self'
+      // (no .style writes, no inline style attribute).
+      const bar = document.createElement("progress");
       bar.className = "bar";
-      const fill = document.createElement("div");
-      fill.className = "bar-fill";
-      fill.style.width = pct.toFixed(0) + "%"; // width % is dynamic data, set via JS (CSP: no inline style attr in HTML)
-      bar.appendChild(fill);
+      bar.max = 100;
+      bar.value = pct;
+      if (pct >= 90) bar.classList.add("over");
+      else if (pct >= 75) bar.classList.add("warn");
       cell.appendChild(bar);
       const label = document.createElement("span");
       label.className = "bar-label";

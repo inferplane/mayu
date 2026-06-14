@@ -220,10 +220,15 @@ pre.snippet code { user-select: all; }
 }
 
 /* ---------- governance ---------- */
-.bar { display: inline-block; width: 11rem; height: 0.55rem; background: var(--panel-2); border: 1px solid var(--line); border-radius: 99px; overflow: hidden; vertical-align: middle; }
-.bar-fill { height: 100%; background: var(--green); }
-.bar-fill.warn { background: var(--amber); }
-.bar-fill.over { background: var(--red); }
+/* <progress> bar — styled via element selectors only (no inline style). */
+progress.bar { -webkit-appearance: none; appearance: none; width: 11rem; height: 0.55rem; vertical-align: middle; border: 1px solid var(--line); border-radius: 99px; overflow: hidden; background: var(--panel-2); }
+progress.bar::-webkit-progress-bar { background: var(--panel-2); }
+progress.bar::-webkit-progress-value { background: var(--green); }
+progress.bar::-moz-progress-bar { background: var(--green); }
+progress.bar.warn::-webkit-progress-value { background: var(--amber); }
+progress.bar.warn::-moz-progress-bar { background: var(--amber); }
+progress.bar.over::-webkit-progress-value { background: var(--red); }
+progress.bar.over::-moz-progress-bar { background: var(--red); }
 .bar-label { margin-left: 0.5rem; font-size: 0.8rem; color: var(--dim); }
 #verify-result { margin-top: 0.8rem; font-size: 0.85rem; }
 .verify-line { padding: 0.2rem 0; word-break: break-all; }

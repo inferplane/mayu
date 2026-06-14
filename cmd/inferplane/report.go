@@ -24,10 +24,62 @@ type reportOpts struct {
 	until string
 }
 
+// reportKey is the exact aggregation key — a struct (not a concatenated
+// string) so team/model values containing any byte can never collide.
+type reportKey struct {
+	team  string
+	model string // "" when by == "team"
+}
+
 type reportRow struct {
 	Team   string
 	Model  string // "" when by == "team"
 	Micros int64
+}
+
+// accumulate parses one complete line and folds a settled record into sums.
+// Returns 1 if the line was skipped (malformed JSON or unparseable ts when a
+// time filter is active), else 0.
+func accumulate(line []byte, sums map[reportKey]*reportRow, byModel, haveSince, haveUntil bool, since, until time.Time) int {
+	if len(line) == 0 {
+		return 0
+	}
+	var rec audit.Record
+	if e := json.Unmarshal(line, &rec); e != nil {
+		fmt.Fprintf(os.Stderr, "report: skipping malformed line: %v\n", e)
+		return 1
+	}
+	if rec.Event != "request_completed" || rec.Cost == nil {
+		return 0 // only settled records carry billable cost
+	}
+	if haveSince || haveUntil {
+		ts, e := time.Parse(time.RFC3339, rec.TS)
+		if e != nil {
+			fmt.Fprintf(os.Stderr, "report: skipping record with bad ts %q: %v\n", rec.TS, e)
+			return 1
+		}
+		if haveSince && ts.Before(since) {
+			return 0 // --since inclusive
+		}
+		if haveUntil && !ts.Before(until) {
+			return 0 // --until exclusive
+		}
+	}
+	model := ""
+	if byModel {
+		model = rec.Request.ModelResolved // the BILLED model
+		if model == "" {
+			model = rec.Request.ModelRequested
+		}
+	}
+	key := reportKey{team: rec.Principal.Team, model: model}
+	row := sums[key]
+	if row == nil {
+		row = &reportRow{Team: rec.Principal.Team, Model: model}
+		sums[key] = row
+	}
+	row.Micros += rec.Cost.AmountUSDMicros
+	return 0
 }
 
 // runReport aggregates settled cost (integer µUSD) from an audit JSONL stream
@@ -53,53 +105,22 @@ func runReport(r io.Reader, opts reportOpts) (csvBytes []byte, skipped int, err 
 	}
 	byModel := opts.by == "team,model"
 
-	sums := map[string]*reportRow{}
-	sc := bufio.NewScanner(completeLines(r))
-	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
-	for sc.Scan() {
-		line := bytes.TrimSpace(sc.Bytes())
-		if len(line) == 0 {
+	// Stream line by line (no whole-file buffer — audit logs are operator-scale,
+	// can be large). ReadString('\n') returns nil err only for a complete,
+	// newline-terminated line; a non-terminated remainder at EOF is the live
+	// writer's partial tail and is dropped, never parsed. A real read error is
+	// propagated (a failed read must NOT masquerade as an empty report).
+	sums := map[reportKey]*reportRow{}
+	br := bufio.NewReader(r)
+	for {
+		raw, e := br.ReadString('\n')
+		if e == nil {
+			skipped += accumulate(bytes.TrimSpace([]byte(raw)), sums, byModel, haveSince, haveUntil, since, until)
 			continue
 		}
-		var rec audit.Record
-		if e := json.Unmarshal(line, &rec); e != nil {
-			skipped++
-			fmt.Fprintf(os.Stderr, "report: skipping malformed line: %v\n", e)
-			continue
+		if e == io.EOF {
+			break // drop any partial trailing remainder
 		}
-		if rec.Event != "request_completed" || rec.Cost == nil {
-			continue // only settled records carry billable cost
-		}
-		if haveSince || haveUntil {
-			ts, e := time.Parse(time.RFC3339, rec.TS)
-			if e != nil {
-				skipped++
-				fmt.Fprintf(os.Stderr, "report: skipping record with bad ts %q: %v\n", rec.TS, e)
-				continue
-			}
-			if haveSince && ts.Before(since) {
-				continue // --since inclusive
-			}
-			if haveUntil && !ts.Before(until) {
-				continue // --until exclusive
-			}
-		}
-		model := ""
-		if byModel {
-			model = rec.Request.ModelResolved // the BILLED model
-			if model == "" {
-				model = rec.Request.ModelRequested
-			}
-		}
-		key := rec.Principal.Team + "\x00" + model
-		row := sums[key]
-		if row == nil {
-			row = &reportRow{Team: rec.Principal.Team, Model: model}
-			sums[key] = row
-		}
-		row.Micros += rec.Cost.AmountUSDMicros
-	}
-	if e := sc.Err(); e != nil {
 		return nil, skipped, fmt.Errorf("report: read: %w", e)
 	}
 
@@ -140,25 +161,16 @@ func runReport(r io.Reader, opts reportOpts) (csvBytes []byte, skipped int, err 
 // show float-rounded money).
 func formatUSDFromMicros(micros int64) string {
 	sign := ""
+	// Take the magnitude as uint64 so math.MinInt64 (which has no positive
+	// int64 negation) is exact — a billing figure must never overflow.
+	var mag uint64
 	if micros < 0 {
 		sign = "-"
-		micros = -micros
+		mag = uint64(-(micros + 1)) + 1
+	} else {
+		mag = uint64(micros)
 	}
-	return fmt.Sprintf("%s$%d.%06d", sign, micros/1_000_000, micros%1_000_000)
-}
-
-// completeLines returns a reader that yields only the data up to the last
-// newline, dropping any partial trailing line (a live audit file mid-write).
-// It buffers the whole input (audit files for a report are operator-scale).
-func completeLines(r io.Reader) io.Reader {
-	data, err := io.ReadAll(r)
-	if err != nil {
-		return bytes.NewReader(nil)
-	}
-	if i := bytes.LastIndexByte(data, '\n'); i >= 0 {
-		return bytes.NewReader(data[:i+1])
-	}
-	return bytes.NewReader(nil) // no complete line yet
+	return fmt.Sprintf("%s$%d.%06d", sign, mag/1_000_000, mag%1_000_000)
 }
 
 // reportCmd implements `inferplane report --file <path> [--since] [--until]

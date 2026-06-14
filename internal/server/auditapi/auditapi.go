@@ -9,6 +9,7 @@ package auditapi
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 
@@ -59,7 +60,18 @@ func Handler(paths []string) http.Handler {
 // treated as tampering, and flagged via PartialTail), and runs audit.Verify.
 func verifyFile(path string) SinkResult {
 	res := SinkResult{Path: path}
-	fi, err := os.Stat(path)
+	// Open ONCE and stat/read the same descriptor, so the type and size checks
+	// can't be raced by a rotation/symlink-swap between a separate Stat and
+	// ReadFile (TOCTOU). The size cap is enforced by reading through a
+	// LimitReader of cap+1 — a file that grows past the cap after fstat is
+	// still bounded.
+	f, err := os.Open(path)
+	if err != nil {
+		res.Reason = "open failed: " + err.Error()
+		return res
+	}
+	defer f.Close()
+	fi, err := f.Stat()
 	if err != nil {
 		res.Reason = "stat failed: " + err.Error()
 		return res
@@ -68,13 +80,13 @@ func verifyFile(path string) SinkResult {
 		res.Reason = "not a regular file"
 		return res
 	}
-	if fi.Size() > maxVerifyBytes {
-		res.Reason = "too large for online verify; use `inferplane audit verify`"
-		return res
-	}
-	data, err := os.ReadFile(path)
+	data, err := io.ReadAll(io.LimitReader(f, maxVerifyBytes+1))
 	if err != nil {
 		res.Reason = "read failed: " + err.Error()
+		return res
+	}
+	if len(data) > maxVerifyBytes {
+		res.Reason = "too large for online verify; use `inferplane audit verify`"
 		return res
 	}
 	// Verify only the complete, newline-terminated prefix. Anything after the

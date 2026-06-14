@@ -73,12 +73,16 @@ func TestRunReportTimeFilter(t *testing.T) {
 }
 
 func TestRunReportEdgeCases(t *testing.T) {
-	// empty input
-	if out, sk, err := runReport(strings.NewReader(""), reportOpts{by: "team"}); err != nil || sk != 0 || len(mustCSV(t, out)) == 0 {
-		// header-only is fine; just must not error
-		if err != nil {
-			t.Fatalf("empty: %v", err)
-		}
+	// empty input → no error, no skips, header-only CSV (non-empty).
+	out, sk, err := runReport(strings.NewReader(""), reportOpts{by: "team"})
+	if err != nil {
+		t.Fatalf("empty: %v", err)
+	}
+	if sk != 0 {
+		t.Fatalf("empty: skipped=%d, want 0", sk)
+	}
+	if !strings.Contains(mustCSV(t, out), "team,micro_usd,usd") {
+		t.Fatalf("empty: want header row, got %q", mustCSV(t, out))
 	}
 	// all-unsettled
 	unsettled := `{"schema_version":1,"event":"request_started","id":"1","ts":"2026-06-11T00:00:00Z","principal":{"team":"a"}}`
@@ -87,7 +91,8 @@ func TestRunReportEdgeCases(t *testing.T) {
 	}
 	// malformed JSON line is skipped + counted, not fatal.
 	mixed := `{"event":"request_completed","ts":"2026-06-11T00:00:00Z","principal":{"team":"a"},"cost":{"amount_usd_micros":10}}` + "\n" + `{ not json` + "\n"
-	_, skipped, err := runReport(strings.NewReader(mixed), reportOpts{by: "team"})
+	_, skipped, err2 := runReport(strings.NewReader(mixed), reportOpts{by: "team"})
+	err = err2
 	if err != nil || skipped != 1 {
 		t.Fatalf("malformed: err=%v skipped=%d (want 1)", err, skipped)
 	}
@@ -101,12 +106,13 @@ func TestRunReportEdgeCases(t *testing.T) {
 
 func TestFormatUSDFromMicros(t *testing.T) {
 	cases := map[int64]string{
-		0:                         "$0.000000",
-		42:                        "$0.000042",
-		1_000_000:                 "$1.000000",
-		1_004_000:                 "$1.004000",
-		-2_500_000:                "-$2.500000",
-		9_223_372_036_854_775_807: "$9223372036854.775807", // no float drift at max int64
+		0:                          "$0.000000",
+		42:                         "$0.000042",
+		1_000_000:                  "$1.000000",
+		1_004_000:                  "$1.004000",
+		-2_500_000:                 "-$2.500000",
+		9_223_372_036_854_775_807:  "$9223372036854.775807",  // max int64
+		-9_223_372_036_854_775_808: "-$9223372036854.775808", // min int64 — no overflow
 	}
 	for micros, want := range cases {
 		if got := formatUSDFromMicros(micros); got != want {
@@ -118,4 +124,20 @@ func TestFormatUSDFromMicros(t *testing.T) {
 func mustCSV(t *testing.T, b []byte) string {
 	t.Helper()
 	return string(b)
+}
+
+type errReader struct{}
+
+func (errReader) Read([]byte) (int, error) { return 0, errStubRead }
+
+var errStubRead = &reportReadErr{}
+
+type reportReadErr struct{}
+
+func (*reportReadErr) Error() string { return "boom" }
+
+func TestRunReportPropagatesReadError(t *testing.T) {
+	if _, _, err := runReport(errReader{}, reportOpts{by: "team"}); err == nil {
+		t.Fatal("a read error must propagate, not become an empty report")
+	}
 }
