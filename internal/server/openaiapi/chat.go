@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/inferplane/inferplane/internal/audit"
+	"github.com/inferplane/inferplane/internal/filter"
 	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
 	"github.com/inferplane/inferplane/internal/metrics"
@@ -43,7 +44,13 @@ type ChatHandler struct {
 	aud     *audit.Writer        // nil-safe: unit tests may omit
 	gov     *governance.Governor // nil-safe: governance disabled when nil
 	metrics *metrics.Metrics     // nil-safe: no-op when nil
+	mask    *filter.Masking      // nil-safe: masking off when nil (ADR-009)
 }
+
+// SetMasking wires the masking decision. v1 does NOT mask the OpenAI ingress, so
+// a masked team is REJECTED here (fail closed) — it must not bypass the control
+// by switching protocol (ADR-009 round-2 CRITICAL). nil-safe.
+func (h *ChatHandler) SetMasking(m *filter.Masking) { h.mask = m }
 
 func NewChatHandler(r *router.Router) *ChatHandler { return &ChatHandler{r: r} }
 
@@ -90,6 +97,15 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	p, ok := principal.From(req.Context())
 	if !ok {
 		writeErr(w, 401, "authentication_error", "no principal")
+		return
+	}
+	// Fail closed for masked teams on the OpenAI ingress (ADR-009 round-2
+	// CRITICAL): v1 masks only the Anthropic ingress, so a masked team must not
+	// bypass PII masking by using /v1/chat/completions. Reject until OpenAI-ingress
+	// masking ships.
+	if h.mask.Enabled(p.Team) {
+		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 400, time.Since(start).Seconds(), 0)
+		writeErr(w, 400, "invalid_request_error", "PII masking is enabled for your team but not supported on the OpenAI-compatible endpoint yet; use /v1/messages")
 		return
 	}
 	if !p.Allows(canonical.Model) {

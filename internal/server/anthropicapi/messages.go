@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/inferplane/inferplane/internal/audit"
+	"github.com/inferplane/inferplane/internal/filter"
 	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
 	"github.com/inferplane/inferplane/internal/metrics"
@@ -36,7 +37,12 @@ type MessagesHandler struct {
 	aud     *audit.Writer        // nil-safe: unit tests may omit
 	gov     *governance.Governor // nil-safe: governance disabled when nil
 	metrics *metrics.Metrics     // nil-safe: no-op when nil
+	mask    *filter.Masking      // nil-safe: masking off when nil (ADR-009)
 }
+
+// SetMasking enables the PII masking filter for the configured teams (ADR-009).
+// nil-safe: leaving it unset keeps the verbatim fast path with zero overhead.
+func (h *MessagesHandler) SetMasking(m *filter.Masking) { h.mask = m }
 
 func NewMessagesHandler(r *router.Router) *MessagesHandler { return &MessagesHandler{r: r} }
 
@@ -79,7 +85,7 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	if !p.Allows(parsed.Model) {
 		// A deny is recorded as a started record carrying the 403 outcome.
-		h.audit(p, parsed.Model, "", &audit.OutcomeRef{Status: 403})
+		h.audit(p, parsed.Model, "", &audit.OutcomeRef{Status: 403}, false)
 		// Pre-resolution reject: model is still attacker-controlled → sentinel label.
 		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 403, time.Since(start).Seconds(), 0)
 		writeErr(w, 403, "permission_error", "model not allowed for this key: "+parsed.Model)
@@ -89,11 +95,39 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		// Unknown model is recorded as a started record carrying the 404 outcome,
 		// for consistency with the 403 allow-list deny above.
-		h.audit(p, parsed.Model, "", &audit.OutcomeRef{Status: 404})
+		h.audit(p, parsed.Model, "", &audit.OutcomeRef{Status: 404}, false)
 		// Pre-resolution reject: model is still attacker-controlled → sentinel label.
 		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 404, time.Since(start).Seconds(), 0)
 		writeErr(w, 404, "not_found_error", "unknown model: "+parsed.Model)
 		return
+	}
+	// PII masking (ADR-009): for a masked team, mask request text BEFORE the
+	// governance estimate and the upstream call. Masking updates BOTH RawBody and
+	// the parsed request (the openai_compatible provider converts from Parsed, not
+	// RawBody — masking only one would leak PII). FAIL CLOSED: a masker error
+	// rejects the request; the unmasked body is never forwarded.
+	piiMasked := false
+	if h.mask.Enabled(p.Team) {
+		masked, n, err := maskBody(raw, h.mask.Filter)
+		if err != nil {
+			h.audit(p, parsed.Model, chain[0].Upstream, &audit.OutcomeRef{Status: 400}, false)
+			h.metrics.ObserveRequest(ingressName, parsed.Model, chain[0].ProviderName, p.Team, 400, time.Since(start).Seconds(), 0)
+			writeErr(w, 400, "invalid_request_error", "request could not be PII-masked")
+			return
+		}
+		if n > 0 {
+			var reparsed schema.ChatRequest
+			if err := json.Unmarshal(masked, &reparsed); err != nil {
+				h.audit(p, parsed.Model, chain[0].Upstream, &audit.OutcomeRef{Status: 400}, false)
+				h.metrics.ObserveRequest(ingressName, parsed.Model, chain[0].ProviderName, p.Team, 400, time.Since(start).Seconds(), 0)
+				writeErr(w, 400, "invalid_request_error", "request could not be PII-masked")
+				return
+			}
+			raw = masked
+			parsed = reparsed
+			piiMasked = true
+			h.metrics.ObservePIIMask(p.Team, n)
+		}
 	}
 	// Pricing table from the SAME generation we resolved on (ADR-006): a reload
 	// between now and Settle must not bill at a different generation's rates.
@@ -103,7 +137,7 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if h.gov != nil {
 		dec := h.gov.PreCheck(p.Team, estimateTokens(raw))
 		if !dec.Allowed {
-			h.audit(p, parsed.Model, chain[0].Upstream, &audit.OutcomeRef{Status: dec.Status})
+			h.audit(p, parsed.Model, chain[0].Upstream, &audit.OutcomeRef{Status: dec.Status}, false)
 			h.metrics.ObserveRequest(ingressName, parsed.Model, chain[0].ProviderName, p.Team, dec.Status, time.Since(start).Seconds(), 0)
 			writeErr(w, dec.Status, govErrType(dec.Status), dec.Reason)
 			return
@@ -111,7 +145,7 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	// request_started: the request passed auth + allow-list + governance and
 	// resolved a target (the first in the priority chain).
-	h.audit(p, parsed.Model, chain[0].Upstream, nil)
+	h.audit(p, parsed.Model, chain[0].Upstream, nil, piiMasked)
 	stream := parsed.Stream != nil && *parsed.Stream
 
 	// Priority fallback chain (§4.5): try targets in order. A pre-TTFT failure
@@ -329,7 +363,7 @@ func copyUpstreamHeaders(dst http.Header, src http.Header) {
 // admitted" case; a non-nil outcome (e.g. 403) records a denied request as a
 // started record carrying that outcome (no completed record follows). No-op
 // when the handler has no audit writer (unit tests).
-func (h *MessagesHandler) audit(p keystore.Principal, model, upstream string, outcome *audit.OutcomeRef) {
+func (h *MessagesHandler) audit(p keystore.Principal, model, upstream string, outcome *audit.OutcomeRef, piiMasked bool) {
 	if h.aud == nil {
 		return
 	}
@@ -339,7 +373,7 @@ func (h *MessagesHandler) audit(p keystore.Principal, model, upstream string, ou
 		ID:            ulid.New(),
 		TS:            time.Now().UTC().Format(time.RFC3339Nano),
 		Principal:     audit.PrincipalRef{KeyID: p.KeyID, Team: p.Team},
-		Request:       audit.RequestRef{Ingress: "anthropic", ModelRequested: model, ModelResolved: upstream},
+		Request:       audit.RequestRef{Ingress: "anthropic", ModelRequested: model, ModelResolved: upstream, PIIMasked: piiMasked},
 		Outcome:       outcome,
 	})
 }

@@ -6,6 +6,7 @@ import (
 
 	"github.com/inferplane/inferplane/internal/adminauth"
 	"github.com/inferplane/inferplane/internal/audit"
+	"github.com/inferplane/inferplane/internal/filter"
 	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
 	"github.com/inferplane/inferplane/internal/metrics"
@@ -26,11 +27,17 @@ import (
 // gov is the governance pipeline (rate/quota/budget + cost); when non-nil the
 // /v1/messages handler enforces it, when nil governance is bypassed. m is the
 // Prometheus metrics sink threaded into the ingress handlers (nil → no-op).
-func DataMux(r *router.Router, store keystore.Store, aud *audit.Writer, gov *governance.Governor, m *metrics.Metrics) http.Handler {
+func DataMux(r *router.Router, store keystore.Store, aud *audit.Writer, gov *governance.Governor, m *metrics.Metrics, mask *filter.Masking) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("POST /v1/messages", anthropicapi.NewMessagesHandlerMetrics(r, aud, gov, m))
-	mux.Handle("POST /v1/messages/count_tokens", anthropicapi.NewCountTokensHandler(r))
-	mux.Handle("POST /v1/chat/completions", openaiapi.NewChatHandlerMetrics(r, aud, gov, m))
+	msgs := anthropicapi.NewMessagesHandlerMetrics(r, aud, gov, m)
+	msgs.SetMasking(mask) // PII masking for configured teams (ADR-009); nil = off
+	mux.Handle("POST /v1/messages", msgs)
+	ct := anthropicapi.NewCountTokensHandler(r)
+	ct.SetMasking(mask) // mask the count body too (T6); never 500
+	mux.Handle("POST /v1/messages/count_tokens", ct)
+	chat := openaiapi.NewChatHandlerMetrics(r, aud, gov, m)
+	chat.SetMasking(mask) // masked teams rejected on the OpenAI ingress (T6b)
+	mux.Handle("POST /v1/chat/completions", chat)
 	// Both the Anthropic (Claude Code) and OpenAI (OpenCode) clients hit the
 	// same GET /v1/models path but expect different response shapes, so we
 	// content-negotiate: Anthropic clients send an `anthropic-version` header,

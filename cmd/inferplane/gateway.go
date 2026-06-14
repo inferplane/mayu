@@ -16,6 +16,7 @@ import (
 	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/budget"
 	"github.com/inferplane/inferplane/internal/config"
+	"github.com/inferplane/inferplane/internal/filter"
 	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
 	"github.com/inferplane/inferplane/internal/limiter"
@@ -179,6 +180,15 @@ func newGateway(cfgPath string) (*gateway, error) {
 		}
 	}
 
+	// Request-filter plugins (ADR-009): resolve the configured masking filter from
+	// the registry (populated by blank imports). An unknown plugin name fails the
+	// boot; enabling masking logs the cache/cost warning.
+	masking, err := buildMasking(cfg)
+	if err != nil {
+		closeAll(pstore, store, aud)
+		return nil, err
+	}
+
 	g := &gateway{
 		cfgPath: cfgPath,
 		cfg:     cfg,
@@ -196,7 +206,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 	if pstore != nil {
 		writer = g
 	}
-	g.dataSrv = &http.Server{Handler: server.DataMux(r, store, aud, gov, m)}
+	g.dataSrv = &http.Server{Handler: server.DataMux(r, store, aud, gov, m, masking)}
 	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, m, writer, liveExport(holder))}
 	return g, nil
 }
@@ -220,6 +230,35 @@ func buildEffective(raw *config.Config, pstore providerstore.Store) (*config.Con
 		return nil, err
 	}
 	return eff, nil
+}
+
+// buildMasking resolves the configured request-filter plugins into a
+// filter.Masking (ADR-009). Each plugin name must be registered (blank-imported)
+// — an unknown name fails the boot. v1 supports one masking filter; the last
+// configured one wins. Enabling masking logs the cache/cost warning (never
+// silent). Returns nil when no plugin is configured (masking off, zero overhead).
+func buildMasking(cfg *config.Config) (*filter.Masking, error) {
+	var masking *filter.Masking
+	for _, pc := range cfg.Plugins {
+		f, ok := filter.Get(pc.Name)
+		if !ok {
+			return nil, fmt.Errorf("config: unknown plugin %q (registered: %v)", pc.Name, filter.Names())
+		}
+		m := &filter.Masking{Filter: f}
+		scope := "all teams"
+		if len(pc.Teams) == 0 {
+			m.Global = true
+		} else {
+			m.Teams = make(map[string]bool, len(pc.Teams))
+			for _, t := range pc.Teams {
+				m.Teams[t] = true
+			}
+			scope = fmt.Sprintf("teams %v", pc.Teams)
+		}
+		masking = m
+		fmt.Fprintf(os.Stderr, "inferplane: plugin %q enabled (%s) — WARNING: masked traffic re-serializes the body, abandoning verbatim forwarding, so prompt-cache hits are lost (up to ~10x cost); this is opt-in by design (ADR-009)\n", pc.Name, scope)
+	}
+	return masking, nil
 }
 
 // closeAll closes the partially-opened resources on a newGateway error path

@@ -27,6 +27,10 @@ type RequestRef struct {
 	Provider       string `json:"provider,omitempty"`
 	ProviderAPI    string `json:"provider_api,omitempty"`
 	Stream         bool   `json:"stream"`
+	// PIIMasked records that the request text was PII-masked before forwarding
+	// (ADR-009). A boolean only — never the redacted values (the count is a
+	// metric label); omitted when masking was off.
+	PIIMasked bool `json:"pii_masked,omitempty"`
 }
 
 type OutcomeRef struct {

@@ -22,6 +22,7 @@ type Metrics struct {
 	pricingMiss     *prometheus.CounterVec   // inferplane_pricing_miss_total
 	auditFailures   *prometheus.CounterVec   // inferplane_audit_write_failures_total
 	auditBufferUtil prometheus.Gauge         // inferplane_audit_buffer_utilization_ratio
+	piiMask         *prometheus.CounterVec   // inferplane_pii_mask_redactions_total
 }
 
 func New() *Metrics {
@@ -66,10 +67,13 @@ func New() *Metrics {
 		auditBufferUtil: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "inferplane_audit_buffer_utilization_ratio", Help: "Audit WAL buffer utilization 0..1.",
 		}),
+		piiMask: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "inferplane_pii_mask_redactions_total", Help: "PII redactions applied to request text (ADR-009).",
+		}, []string{"team"}),
 	}
 	reg.MustRegister(m.tokenUsage, m.requestDuration, m.ttft, m.requestsTotal,
 		m.fallbackTotal, m.circuitState, m.quotaUtil, m.budgetSpend, m.pricingMiss,
-		m.auditFailures, m.auditBufferUtil)
+		m.auditFailures, m.auditBufferUtil, m.piiMask)
 	// Prometheus only emits a labeled metric family once it has at least one
 	// observed child series. Pre-initialize the token-usage family to zero so
 	// gen_ai_client_token_usage_total is always present in exposition (stable
@@ -104,6 +108,15 @@ func (m *Metrics) ObserveRequest(ingress, model, provider, team string, status i
 	if ttftSec > 0 {
 		m.ttft.WithLabelValues(model, provider).Observe(ttftSec)
 	}
+}
+
+// ObservePIIMask records redactions applied to a team's request text. Only the
+// (bounded) team label + a count — never any redacted value (ADR-009).
+func (m *Metrics) ObservePIIMask(team string, redactions int) {
+	if m == nil || redactions <= 0 {
+		return
+	}
+	m.piiMask.WithLabelValues(team).Add(float64(redactions))
 }
 
 func (m *Metrics) ObserveFallback(model, from, to, reason string) {

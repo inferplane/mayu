@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	_ "github.com/inferplane/inferplane/plugins/piimask"        // register "pii-mask" filter (ADR-009)
 	_ "github.com/inferplane/inferplane/providers/anthropic"    // register "anthropic"
 	_ "github.com/inferplane/inferplane/providers/bedrock"      // register "bedrock"
 	_ "github.com/inferplane/inferplane/providers/openaicompat" // register "openai_compatible"

@@ -5,14 +5,22 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/inferplane/inferplane/internal/filter"
+	"github.com/inferplane/inferplane/internal/principal"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/pkg/schema"
 	"github.com/inferplane/inferplane/providers"
 )
 
-type CountTokensHandler struct{ r *router.Router }
+type CountTokensHandler struct {
+	r    *router.Router
+	mask *filter.Masking // nil-safe: masking off when nil (ADR-009)
+}
 
 func NewCountTokensHandler(r *router.Router) *CountTokensHandler { return &CountTokensHandler{r: r} }
+
+// SetMasking enables PII masking on the count path (ADR-009). nil-safe.
+func (h *CountTokensHandler) SetMasking(m *filter.Masking) { h.mask = m }
 
 // ServeHTTP NEVER returns a non-200 / non-JSON response. A 501/4xx/5xx here
 // crashes Claude Code (truncated-JSON crash, design doc §3.1). On any failure
@@ -29,6 +37,18 @@ func (h *CountTokensHandler) ServeHTTP(w http.ResponseWriter, req *http.Request)
 func (h *CountTokensHandler) count(req *http.Request, raw []byte) int64 {
 	var parsed schema.ChatRequest
 	_ = json.Unmarshal(raw, &parsed) // best-effort; estimator works on raw bytes too
+	// PII masking (ADR-009): mask BEFORE forwarding to the upstream counter so the
+	// count reflects what is sent AND the upstream never sees unmasked PII. On a
+	// masker error, return a LOCAL estimate — never forward unmasked, never 500.
+	if p, ok := principal.From(req.Context()); ok && h.mask.Enabled(p.Team) {
+		masked, n, err := maskBody(raw, h.mask.Filter)
+		if err != nil {
+			return estimateTokens(raw) // local, no upstream call, never leaks
+		}
+		if n > 0 {
+			raw = masked
+		}
+	}
 	prov, upstream, err := h.r.Resolve(parsed.Model)
 	if err == nil {
 		if tc, ok := prov.(providers.TokenCounter); ok {

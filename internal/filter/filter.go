@@ -18,6 +18,25 @@ type RequestFilter interface {
 	Mask(text string) (masked string, redactions int)
 }
 
+// Masking is the resolved, per-request masking decision the assembly builds from
+// the `plugins` config + the registry, and injects into the request handlers.
+// It pairs the resolved filter with the team scope (Global = all teams). A nil
+// *Masking, or one with a nil Filter, means masking is off — Enabled is
+// false-safe so handlers can hold a single nil field.
+type Masking struct {
+	Filter RequestFilter
+	Global bool
+	Teams  map[string]bool
+}
+
+// Enabled reports whether the given team's requests must be masked.
+func (m *Masking) Enabled(team string) bool {
+	if m == nil || m.Filter == nil {
+		return false
+	}
+	return m.Global || m.Teams[team]
+}
+
 var registry = map[string]RequestFilter{}
 
 // Register adds a filter under its Name(). Called from a plugin's init(); a
