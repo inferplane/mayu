@@ -37,6 +37,15 @@ type ProviderRow struct {
 	APIKeyRefFile string
 }
 
+// Target is one entry in a model's ordered fallback chain. It mirrors
+// config.Target but is defined here so the store stays a leaf (no config import);
+// the overlay layer translates between the two.
+type Target struct {
+	Provider string
+	Model    string
+	API      string
+}
+
 // Store is the persistence interface for the topology. The SQLite implementation
 // ships; Postgres is the HA path (the DDL is portable).
 type Store interface {
@@ -44,5 +53,22 @@ type Store interface {
 	GetProvider(ctx context.Context, name string) (ProviderRow, error)
 	ListProviders(ctx context.Context) ([]ProviderRow, error)
 	DeleteProvider(ctx context.Context, name string) error
+
+	// SetModel replaces a model's ordered target chain (replace-all, in a txn).
+	SetModel(ctx context.Context, name string, targets []Target) error
+	// ListModels returns every model name → its ordered targets.
+	ListModels(ctx context.Context) (map[string][]Target, error)
+	// DeleteModel removes a model route (ErrNotFound if absent).
+	DeleteModel(ctx context.Context, name string) error
+
+	// Seeded reports whether the one-time file→DB seed has run (durable marker).
+	Seeded(ctx context.Context) (bool, error)
+	// Seed imports the file topology (providers + models) AND marks the store
+	// seeded, in ONE transaction — but only if not already seeded. It returns
+	// true if it seeded, false if the store was already seeded (no-op). The
+	// marker, not a row count, gates this, so deleting every provider never
+	// resurrects the file topology (ADR-008 round-2 CRITICAL).
+	Seed(ctx context.Context, providers []ProviderRow, models map[string][]Target) (bool, error)
+
 	Close() error
 }

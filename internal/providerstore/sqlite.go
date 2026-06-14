@@ -26,6 +26,18 @@ CREATE TABLE IF NOT EXISTS providers (
     api_key_ref_env  TEXT NOT NULL DEFAULT '',
     api_key_ref_file TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS model_targets (
+    model    TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    api      TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (model, position)
+);
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 `
 
 // OpenSQLite opens (creating if needed) the provider store at path. busy_timeout
