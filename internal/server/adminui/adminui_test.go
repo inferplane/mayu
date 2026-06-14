@@ -133,8 +133,12 @@ func TestProviderWriteUICSPAndContract(t *testing.T) {
 			t.Errorf("app.js missing token-gated write call %q", call)
 		}
 	}
-	// must NOT bare-fetch the write endpoints (would be unauthenticated)
-	for _, bad := range []string{`fetch("/admin/providers`, `fetch("/admin/models`} {
+	// must NOT bare-fetch the write endpoints (would be unauthenticated) — guard
+	// both string-literal and template-literal forms (T8 gate, kiro).
+	for _, bad := range []string{
+		`fetch("/admin/providers`, `fetch("/admin/models`,
+		"fetch(`/admin/providers", "fetch(`/admin/models",
+	} {
 		if strings.Contains(js, bad) {
 			t.Errorf("app.js bare-fetches a write endpoint %q (must use api())", bad)
 		}
