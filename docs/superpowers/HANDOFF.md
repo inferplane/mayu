@@ -33,8 +33,11 @@ TDD implementation (one commit per task, scope-locked to the plan's file list)
 rejected alternatives.
 
 Panel reality on this machine:
-- Only **codex** (openai.gpt-5.5) and **gemini** (3.1-pro) are installed
-  (`kiro-cli` is NOT). Quorum guard: gemini-only rounds are single-opinion.
+- **codex** (openai.gpt-5.5), **gemini** (3.1-pro), and **kiro** are all usable.
+  Use the **`kiro-cli`** binary explicitly (a bare `kiro` is wrong). kiro-cli
+  IGNORES piped stdin — embed the review context INSIDE the prompt argument
+  (`kiro-cli chat "<PROMPT + CONTEXT>" --no-interactive --trust-tools=read,grep
+  --wrap never`), NOT `cat ctx | kiro-cli`. codex/gemini take context via stdin.
 - **codex** needs `timeout 600` and a prompt that says *"answer from the
   provided context ONLY; do not explore the filesystem"* — otherwise it times
   out or wanders. It occasionally returns a server stream-error (empty output)
@@ -112,12 +115,19 @@ Panel reality on this machine:
      echoes a ref). Secret-free admin audit events (`provider_*`/`model_route_*`).
    - `GET /admin/config/export` — secret-free Git export (`ProviderConfig.APIKey`
      is `json:"-"`), mounted unconditionally.
-   - **STILL TODO — T8 console write UI** (deferred this session per user): add
-     register/edit/delete provider + model-route forms to the `internal/server/
-     adminui/` Providers tab, CSP `default-src 'self'` (no inline handlers, DOM-
-     set values, token in JS memory), collecting the REF name + showing the
-     out-of-band secret-store step. Plan task T8 in
-     `docs/superpowers/plans/2026-06-14-ui-write-provider-registration.md`.
+   - **T8 console write UI — DONE** (`5b20a66`, gate `56d80ad`): the Providers
+     tab has register/edit/delete provider forms + a model-route editor, shown
+     only when `provider_store` is enabled (`View.Writable` capability hint;
+     `ProviderView.Region` added for edit prefill). CSP `default-src 'self'`
+     throughout (addEventListener, textContent, `hidden` property; no inline
+     handlers/styles); the form collects the REF only (no secret-value field);
+     writes go through the token-gated `api()` (which now surfaces the server's
+     sanitized `{"error"}`); a Git-export card renders `/admin/config/export`.
+     Verified by a live serve smoke (PUT/DELETE/export, inline + secret-shaped
+     ref rejected without echo, delete-with-live-route 400, 401 no-token).
+   - **ADR-008 Stage 2 is COMPLETE** (backend + console). Whole feature behind
+     a P2 design gate (2 rounds) + P4 code gate (2 rounds) + T8 UI gate (codex+
+     gemini PASS; kiro CHANGES-REQUIRED refuted with evidence).
 2. **PII masking plugin (#4)** — opt-in, with explicit cache-destruction +
    cost-increase warning (per spec; honest trade-off vs silent-masking rivals).
 3. **S3 Object Lock audit anchoring (#5)** — upgrades tamper-EVIDENT → tamper-
