@@ -23,6 +23,7 @@ type Metrics struct {
 	auditFailures   *prometheus.CounterVec   // inferplane_audit_write_failures_total
 	auditBufferUtil prometheus.Gauge         // inferplane_audit_buffer_utilization_ratio
 	piiMask         *prometheus.CounterVec   // inferplane_pii_mask_redactions_total
+	anchorFail      prometheus.Counter       // inferplane_audit_anchor_failures_total
 }
 
 func New() *Metrics {
@@ -70,10 +71,13 @@ func New() *Metrics {
 		piiMask: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "inferplane_pii_mask_redactions_total", Help: "PII redactions applied to request text (ADR-009).",
 		}, []string{"team"}),
+		anchorFail: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "inferplane_audit_anchor_failures_total", Help: "Audit chain-head anchor (WORM) write failures (ADR-012).",
+		}),
 	}
 	reg.MustRegister(m.tokenUsage, m.requestDuration, m.ttft, m.requestsTotal,
 		m.fallbackTotal, m.circuitState, m.quotaUtil, m.budgetSpend, m.pricingMiss,
-		m.auditFailures, m.auditBufferUtil, m.piiMask)
+		m.auditFailures, m.auditBufferUtil, m.piiMask, m.anchorFail)
 	// Prometheus only emits a labeled metric family once it has at least one
 	// observed child series. Pre-initialize the token-usage family to zero so
 	// gen_ai_client_token_usage_total is always present in exposition (stable
@@ -117,6 +121,14 @@ func (m *Metrics) ObservePIIMask(team string, redactions int) {
 		return
 	}
 	m.piiMask.WithLabelValues(team).Add(float64(redactions))
+}
+
+// IncAnchorFailure counts a failed audit-anchor write (ADR-012).
+func (m *Metrics) IncAnchorFailure() {
+	if m == nil {
+		return
+	}
+	m.anchorFail.Inc()
 }
 
 func (m *Metrics) ObserveFallback(model, from, to, reason string) {

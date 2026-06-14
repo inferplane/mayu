@@ -14,6 +14,7 @@ import (
 
 	"github.com/inferplane/inferplane/internal/adminauth"
 	"github.com/inferplane/inferplane/internal/audit"
+	"github.com/inferplane/inferplane/internal/audit/s3anchor"
 	"github.com/inferplane/inferplane/internal/budget"
 	"github.com/inferplane/inferplane/internal/config"
 	"github.com/inferplane/inferplane/internal/filter"
@@ -34,19 +35,23 @@ import (
 // Binding in newGateway (rather than inside serve) makes ":0" configs testable:
 // the OS-chosen ports are discoverable via DataAddr/AdminAddr before traffic.
 type gateway struct {
-	cfgPath  string
-	cfg      *config.Config
-	store    keystore.Store
-	aud      *audit.Writer
-	holder   *live.Holder
-	router   *router.Router
-	pstore   providerstore.Store         // nil unless provider_store is configured (ADR-008)
-	otelDown func(context.Context) error // OTel TracerProvider shutdown (nil unless otel configured, ADR-011)
-	reloadMu sync.Mutex                  // serializes reloads AND UI writes (concurrent SIGHUPs/triggers)
-	dataLn   net.Listener
-	adminLn  net.Listener
-	dataSrv  *http.Server
-	adminSrv *http.Server
+	cfgPath     string
+	cfg         *config.Config
+	store       keystore.Store
+	aud         *audit.Writer
+	holder      *live.Holder
+	router      *router.Router
+	pstore      providerstore.Store         // nil unless provider_store is configured (ADR-008)
+	otelDown    func(context.Context) error // OTel TracerProvider shutdown (nil unless otel configured, ADR-011)
+	instance    string                      // audit chain instance id (matches the audit Writer)
+	anchorer    audit.Anchorer              // nil unless audit.anchor is configured (ADR-012)
+	anchorEvery time.Duration               // anchor interval
+	metrics     *metrics.Metrics            // for the anchor-failure counter
+	reloadMu    sync.Mutex                  // serializes reloads AND UI writes (concurrent SIGHUPs/triggers)
+	dataLn      net.Listener
+	adminLn     net.Listener
+	dataSrv     *http.Server
+	adminSrv    *http.Server
 }
 
 // newGateway loads config and assembles the full serve wiring — metrics,
@@ -78,7 +83,8 @@ func newGateway(cfgPath string) (*gateway, error) {
 		store.Close()
 		return nil, fmt.Errorf("audit sinks: %w", err)
 	}
-	aud, err := audit.NewWriter(instanceID(), raw.Audit.Buffer.Path, sinks)
+	inst := instanceID()
+	aud, err := audit.NewWriter(inst, raw.Audit.Buffer.Path, sinks)
 	if err != nil {
 		store.Close()
 		return nil, fmt.Errorf("audit: %w", err)
@@ -205,17 +211,42 @@ func newGateway(cfgPath string) (*gateway, error) {
 		}
 	}
 
+	// Audit anchoring (ADR-012): opt-in. Init failure is NON-FATAL (best-effort
+	// forensics, never blocks boot). Worker started in serve.
+	var anchorer audit.Anchorer
+	anchorEvery := 5 * time.Minute
+	if a := raw.Audit.Anchor; a != nil {
+		if a.Interval != "" {
+			if d, derr := time.ParseDuration(a.Interval); derr == nil {
+				anchorEvery = d
+			}
+		}
+		an, aerr := s3anchor.New(context.Background(), s3anchor.Config{
+			Bucket: a.Bucket, Prefix: a.Prefix, Region: a.Region, Endpoint: a.Endpoint, RetainDays: a.RetainDays,
+		})
+		if aerr != nil {
+			fmt.Fprintln(os.Stderr, "inferplane: audit anchor init failed (anchoring disabled):", aerr)
+		} else {
+			anchorer = an
+			fmt.Printf("inferplane: audit anchoring enabled → s3://%s/%s every %s\n", a.Bucket, a.Prefix, anchorEvery)
+		}
+	}
+
 	g := &gateway{
-		cfgPath:  cfgPath,
-		cfg:      cfg,
-		store:    store,
-		aud:      aud,
-		holder:   holder,
-		router:   r,
-		pstore:   pstore,
-		otelDown: otelDown,
-		dataLn:   dataLn,
-		adminLn:  adminLn,
+		cfgPath:     cfgPath,
+		cfg:         cfg,
+		store:       store,
+		aud:         aud,
+		holder:      holder,
+		router:      r,
+		pstore:      pstore,
+		otelDown:    otelDown,
+		instance:    inst,
+		anchorer:    anchorer,
+		anchorEvery: anchorEvery,
+		metrics:     m,
+		dataLn:      dataLn,
+		adminLn:     adminLn,
 	}
 	// The gateway implements configapi.Writer (build-once-swap-once). Pass it as
 	// the write callback ONLY when a store is configured; nil → writes 405.
@@ -435,6 +466,43 @@ func (g *gateway) DeleteModel(ctx context.Context, name string) error {
 	)
 }
 
+// anchorWorker periodically anchors the audit chain head to WORM storage
+// (ADR-012). It anchors only when the count advanced beyond the last SUCCESSFUL
+// anchor, so a failed anchor is retried (not skipped). On ctx cancel it makes a
+// final anchor under a FRESH bounded timeout (the worker ctx is already
+// canceled), so the last head is witnessed without hanging shutdown. Failures
+// are logged + counted, never fatal (best-effort, off the request path).
+func (g *gateway) anchorWorker(ctx context.Context, done chan<- struct{}) {
+	defer close(done)
+	var lastCount int64
+	t := time.NewTicker(g.anchorEvery)
+	defer t.Stop()
+	anchor := func(actx context.Context) {
+		hash, count := g.aud.HeadHash()
+		if count <= lastCount {
+			return // nothing new since the last successful anchor
+		}
+		p := audit.AnchorPoint{Instance: g.instance, HeadHash: hash, Count: count, TS: time.Now().UTC().Format(time.RFC3339Nano)}
+		if err := g.anchorer.Anchor(actx, p); err != nil {
+			fmt.Fprintln(os.Stderr, "inferplane: audit anchor failed (will retry):", err)
+			g.metrics.IncAnchorFailure()
+			return // do NOT advance lastCount → retry next tick / on shutdown
+		}
+		lastCount = count
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			fctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			anchor(fctx)
+			cancel()
+			return
+		case <-t.C:
+			anchor(ctx)
+		}
+	}
+}
+
 // reloadWorker serializes reload triggers (SIGHUP) on a single goroutine and
 // exits when ctx is canceled. A reload already in progress finishes before the
 // worker observes cancellation (the trigger calls reload synchronously), so a
@@ -486,7 +554,20 @@ func (g *gateway) serve(ctx context.Context) error {
 	workerCtx, cancelWorker := context.WithCancel(ctx)
 	workerDone := make(chan struct{})
 	go g.reloadWorker(workerCtx, hup, workerDone)
-	defer func() { cancelWorker(); <-workerDone }()
+	// Periodic audit anchoring (ADR-012): same clean-lifecycle pattern. On
+	// workerCtx cancel it makes a final anchor under a fresh bounded timeout.
+	var anchorDone chan struct{}
+	if g.anchorer != nil {
+		anchorDone = make(chan struct{})
+		go g.anchorWorker(workerCtx, anchorDone)
+	}
+	defer func() {
+		cancelWorker()
+		<-workerDone
+		if anchorDone != nil {
+			<-anchorDone
+		}
+	}()
 
 	errc := make(chan error, 2)
 	go func() {
