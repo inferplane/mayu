@@ -1,7 +1,7 @@
 # inferplane
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/Version-0.1.0--pre-green.svg)]()
+[![Version](https://img.shields.io/badge/Version-0.2.0-green.svg)]()
 [![Go](https://img.shields.io/badge/Go-1.25-00ADD8.svg)](go.mod)
 <a href="#english"><img src="https://img.shields.io/badge/lang-English-blue.svg" alt="English"></a>
 <a href="#korean"><img src="https://img.shields.io/badge/lang-한국어-red.svg" alt="Korean"></a>
@@ -23,8 +23,11 @@ the team's quota/budget, forwards the request to a real provider, and writes a
 tamper-evident audit record. Single static binary, Kubernetes-native, Apache-2.0,
 **no external SaaS dependency**.
 
-> **Project status: v0.1 pre-release, not yet announced.** APIs, config schema, and
-> metric names may still change before the first tagged release.
+> **Project status: v0.2.0, not yet publicly announced** (legal/policy review per
+> design §1.3). The governance core is complete — virtual keys, two-phase
+> quotas/budgets, tamper-evident audit, free OIDC SSO, config hot-reload, an
+> operator console, and chargeback reporting; APIs and config schema are
+> stabilizing.
 
 Design: [docs/specs/2026-06-10-inferplane-gateway-design.md](docs/specs/2026-06-10-inferplane-gateway-design.md) ·
 Architecture: [docs/architecture.md](docs/architecture.md)
@@ -116,7 +119,7 @@ docker run -d --name inferplane \
   -v "$PWD/config.json":/etc/inferplane/config.json \
   -v inferplane-data:/var/lib/inferplane \
   -p 8080:8080 -p 9090:9090 \
-  inferplane:0.1.0
+  inferplane:0.2.0
 ```
 
 Port `8080` is the **data plane** (client traffic); `9090` is the **admin plane**
@@ -168,7 +171,14 @@ docker exec inferplane inferplane audit verify --file /var/lib/inferplane/audit.
 
 # Prometheus exposition (OTel GenAI naming) — counter rises after each request:
 curl -s localhost:9090/metrics | grep inferplane_requests_total
+
+# Per-team chargeback (exact integer-microUSD, CSV) from the audit log:
+docker exec inferplane inferplane report \
+  --file /var/lib/inferplane/audit.jsonl --by team,model
 ```
+
+The console's **Governance** tab shows per-team quota gauges and cumulative
+budget spend, and a one-click button verifies the audit hash chain.
 
 ## Configuration
 
@@ -280,8 +290,9 @@ vLLM/Ollama) 사이에 위치합니다. **가상 키**(`ik_...`)로 Claude Code 
 실제 공급자로 전달하고 변조 감지 감사 레코드를 기록합니다. 단일 정적 바이너리,
 Kubernetes-native, Apache-2.0, **외부 SaaS 의존성 없음**.
 
-> **프로젝트 상태: v0.1 사전 릴리스, 아직 미공개.** 첫 태그 릴리스 전까지 API, config
-> 스키마, 메트릭 이름이 변경될 수 있습니다.
+> **프로젝트 상태: v0.2.0, 아직 공개 미발표** (설계 §1.3 법무/정책 검토). 거버넌스
+> 코어 완성 — 가상 키, 2단계 쿼터/예산, 변조 감지 감사, 무료 OIDC SSO, config
+> hot-reload, 운영자 콘솔, 차지백 리포트; API와 config 스키마는 안정화 중입니다.
 
 설계: [docs/specs/2026-06-10-inferplane-gateway-design.md](docs/specs/2026-06-10-inferplane-gateway-design.md) ·
 아키텍처: [docs/architecture.md](docs/architecture.md)
@@ -373,7 +384,7 @@ docker run -d --name inferplane \
   -v "$PWD/config.json":/etc/inferplane/config.json \
   -v inferplane-data:/var/lib/inferplane \
   -p 8080:8080 -p 9090:9090 \
-  inferplane:0.1.0
+  inferplane:0.2.0
 ```
 
 포트 `8080`은 **데이터 플레인**(클라이언트 트래픽), `9090`은 **관리 플레인**
@@ -419,7 +430,14 @@ docker exec inferplane inferplane audit verify --file /var/lib/inferplane/audit.
 
 # Prometheus 노출(OTel GenAI 네이밍) — 요청마다 카운터 증가:
 curl -s localhost:9090/metrics | grep inferplane_requests_total
+
+# 감사 로그에서 팀별 차지백(정수 µUSD 정확 금액, CSV):
+docker exec inferplane inferplane report \
+  --file /var/lib/inferplane/audit.jsonl --by team,model
 ```
+
+콘솔의 **Governance** 탭은 팀별 쿼터 게이지와 누적 예산 지출을 보여주고,
+버튼 한 번으로 감사 해시 체인을 검증합니다.
 
 ## 환경 설정
 

@@ -4,7 +4,7 @@
 Binary entrypoints. Currently one binary: `cmd/inferplane`.
 
 ## Key Files
-- `inferplane/main.go` — CLI dispatch (`serve` / `keys` / `audit`), wiring of keystore + audit + governor + metrics + router + providers, the TLS branch, and graceful shutdown.
+- `inferplane/main.go` — CLI dispatch (`serve` / `keys` / `audit` / `report`), wiring of keystore + audit + governor + metrics + router + providers, the TLS branch, and graceful shutdown.
 
 ## Rules
 - `main` owns the metrics sink (`metrics.New()`) and threads it into the audit writer, router, governor, and ingress handlers.
