@@ -23,9 +23,11 @@ import (
 	"github.com/inferplane/inferplane/internal/pricing"
 	"github.com/inferplane/inferplane/internal/principal"
 	"github.com/inferplane/inferplane/internal/router"
+	"github.com/inferplane/inferplane/internal/tracing"
 	"github.com/inferplane/inferplane/pkg/schema"
 	"github.com/inferplane/inferplane/pkg/ulid"
 	"github.com/inferplane/inferplane/providers"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const ingressName = "openai"
@@ -92,6 +94,14 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 400, "invalid_request_error", "malformed JSON")
 		return
 	}
+	// Tracing (ADR-011): join the client trace, start ONE server span across the
+	// request, end once via defer; no-op when off.
+	tctx := tracing.Extract(req.Context(), req.Header)
+	tctx, span := tracing.Start(tctx, "chat "+canonical.Model)
+	defer span.End()
+	req = req.WithContext(tctx)
+	tracing.SetGenAIRequest(span, canonical.Model)
+	traceID := tracing.TraceID(tctx)
 	// Require an authenticated principal and enforce the per-key model
 	// allow-list BEFORE resolving/forwarding (§3.1, §5.1).
 	p, ok := principal.From(req.Context())
@@ -106,13 +116,13 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if h.mask.Enabled(p.Team) {
 		// Audit the security-critical rejection (a masking-bypass attempt) — a
 		// silent reject would be a blind spot in the tamper-evident chain (P4 gate).
-		h.audit(p, canonical.Model, "", &audit.OutcomeRef{Status: 400})
+		h.audit(p, canonical.Model, "", &audit.OutcomeRef{Status: 400}, traceID)
 		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 400, time.Since(start).Seconds(), 0)
 		writeErr(w, 400, "invalid_request_error", "PII masking is enabled for your team but not supported on the OpenAI-compatible endpoint yet; use /v1/messages")
 		return
 	}
 	if !p.Allows(canonical.Model) {
-		h.audit(p, canonical.Model, "", &audit.OutcomeRef{Status: 403})
+		h.audit(p, canonical.Model, "", &audit.OutcomeRef{Status: 403}, traceID)
 		// Pre-resolution reject: model is still attacker-controlled → sentinel label.
 		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 403, time.Since(start).Seconds(), 0)
 		writeErr(w, 403, "permission_error", "model not allowed for this key: "+canonical.Model)
@@ -120,7 +130,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	chain, st, err := h.r.ResolveChain(canonical.Model)
 	if err != nil {
-		h.audit(p, canonical.Model, "", &audit.OutcomeRef{Status: 404})
+		h.audit(p, canonical.Model, "", &audit.OutcomeRef{Status: 404}, traceID)
 		// Pre-resolution reject: model is still attacker-controlled → sentinel label.
 		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 404, time.Since(start).Seconds(), 0)
 		writeErr(w, 404, "not_found_error", "unknown model: "+canonical.Model)
@@ -132,7 +142,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if h.gov != nil {
 		dec := h.gov.PreCheck(p.Team, estimateTokens(raw))
 		if !dec.Allowed {
-			h.audit(p, canonical.Model, chain[0].Upstream, &audit.OutcomeRef{Status: dec.Status})
+			h.audit(p, canonical.Model, chain[0].Upstream, &audit.OutcomeRef{Status: dec.Status}, traceID)
 			h.metrics.ObserveRequest(ingressName, canonical.Model, chain[0].ProviderName, p.Team, dec.Status, time.Since(start).Seconds(), 0)
 			writeErr(w, dec.Status, govErrType(dec.Status), dec.Reason)
 			return
@@ -140,16 +150,18 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	// request_started: the request passed auth + allow-list + governance and
 	// resolved a target (the first in the priority chain).
-	h.audit(p, canonical.Model, chain[0].Upstream, nil)
+	h.audit(p, canonical.Model, chain[0].Upstream, nil, traceID)
 	stream := canonical.Stream != nil && *canonical.Stream
 
 	// Priority fallback chain (§4.5): try targets in order. A pre-TTFT failure
 	// falls back to the next target, records the breaker result, and sets
 	// x-inferplane-fallback. Stream fallback is pre-first-event only.
 	for i, ct := range chain {
+		upHeaders := req.Header.Clone()
+		tracing.Inject(req.Context(), upHeaders)
 		pr := &providers.ProxyRequest{
 			Model: canonical.Model, Upstream: ct.Upstream, Parsed: canonical,
-			RawBody: raw, Headers: req.Header, Stream: stream,
+			RawBody: raw, Headers: upHeaders, Stream: stream,
 			IngressProtocol: "openai",
 		}
 		last := i == len(chain)-1
@@ -187,12 +199,14 @@ func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, pr
 			}
 			w.WriteHeader(ue.StatusCode)
 			w.Write(ue.Body)
-			h.auditCompleted(p, model, upstream, ue.StatusCode, nil, nil)
+			h.auditCompleted(p, model, upstream, ue.StatusCode, nil, nil, tracing.TraceID(req.Context()))
+			recordSpanResponse(req, prov.Name(), upstream, nil, false)
 			h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, ue.StatusCode, time.Since(start).Seconds(), 0)
 			return false
 		}
 		writeErr(w, 502, "api_error", "upstream error")
-		h.auditCompleted(p, model, upstream, 502, nil, nil)
+		h.auditCompleted(p, model, upstream, 502, nil, nil, tracing.TraceID(req.Context()))
+		recordSpanResponse(req, prov.Name(), upstream, nil, false)
 		h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 502, time.Since(start).Seconds(), 0)
 		return false
 	}
@@ -224,7 +238,8 @@ func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, pr
 		cost = h.settle(p.Team, providerName, upstream, resp.Parsed.Usage, table)
 		h.observeTokens(model, providerName, p.Team, resp.Parsed.Usage)
 	}
-	h.auditCompleted(p, model, upstream, resp.StatusCode, usage, cost)
+	h.auditCompleted(p, model, upstream, resp.StatusCode, usage, cost, tracing.TraceID(req.Context()))
+	recordSpanResponse(req, prov.Name(), upstream, usage, resp.StatusCode < 400)
 	h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, resp.StatusCode, time.Since(start).Seconds(), 0)
 	return false
 }
@@ -245,19 +260,22 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 			}
 			w.WriteHeader(ue.StatusCode)
 			w.Write(ue.Body)
-			h.auditCompleted(p, model, upstream, ue.StatusCode, nil, nil)
+			h.auditCompleted(p, model, upstream, ue.StatusCode, nil, nil, tracing.TraceID(req.Context()))
+			recordSpanResponse(req, prov.Name(), upstream, nil, false)
 			h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, ue.StatusCode, time.Since(start).Seconds(), 0)
 			return false
 		}
 		writeErr(w, 502, "api_error", "upstream stream error")
-		h.auditCompleted(p, model, upstream, 502, nil, nil)
+		h.auditCompleted(p, model, upstream, 502, nil, nil, tracing.TraceID(req.Context()))
+		recordSpanResponse(req, prov.Name(), upstream, nil, false)
 		h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 502, time.Since(start).Seconds(), 0)
 		return false
 	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeErr(w, 500, "api_error", "streaming unsupported")
-		h.auditCompleted(p, model, upstream, 500, nil, nil)
+		h.auditCompleted(p, model, upstream, 500, nil, nil, tracing.TraceID(req.Context()))
+		recordSpanResponse(req, prov.Name(), upstream, nil, false)
 		h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 500, time.Since(start).Seconds(), 0)
 		return false
 	}
@@ -275,7 +293,7 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 	for ev, err := range seq {
 		if err != nil {
 			// upstream broke mid-stream; client sees a truncated stream.
-			h.auditCompletedPartial(p, model, upstream, usage)
+			h.auditCompletedPartial(p, model, upstream, usage, tracing.TraceID(req.Context()))
 			h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 200, time.Since(start).Seconds(), ttft)
 			return false
 		}
@@ -308,7 +326,8 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 	}
 	cost := h.settle(p.Team, providerName, upstream, lastUsage, table)
 	h.observeTokens(model, providerName, p.Team, lastUsage)
-	h.auditCompleted(p, model, upstream, 200, usage, cost)
+	h.auditCompleted(p, model, upstream, 200, usage, cost, tracing.TraceID(req.Context()))
+	recordSpanResponse(req, prov.Name(), upstream, usage, true)
 	h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 200, time.Since(start).Seconds(), ttft)
 	return false
 }
@@ -371,11 +390,23 @@ func estimateTokens(raw []byte) int64 {
 	return n
 }
 
-func (h *ChatHandler) audit(p keystore.Principal, model, upstream string, outcome *audit.OutcomeRef) {
+// recordSpanResponse sets response-side GenAI attributes + terminal status on the
+// request span (ADR-011). ok=false ONLY on a terminal (non-retriable) outcome.
+func recordSpanResponse(req *http.Request, system, upstream string, usage *audit.UsageRef, ok bool) {
+	span := trace.SpanFromContext(req.Context())
+	var in, out int64
+	if usage != nil {
+		in, out = usage.InputTokens, usage.OutputTokens
+	}
+	tracing.SetGenAIResponse(span, system, upstream, in, out)
+	tracing.SetStatus(span, ok, "")
+}
+
+func (h *ChatHandler) audit(p keystore.Principal, model, upstream string, outcome *audit.OutcomeRef, traceID string) {
 	if h.aud == nil {
 		return
 	}
-	h.aud.Append(audit.Record{
+	rec := audit.Record{
 		SchemaVersion: 1,
 		Event:         "request_started",
 		ID:            ulid.New(),
@@ -383,14 +414,18 @@ func (h *ChatHandler) audit(p keystore.Principal, model, upstream string, outcom
 		Principal:     audit.PrincipalRef{KeyID: p.KeyID, Team: p.Team},
 		Request:       audit.RequestRef{Ingress: "openai", ModelRequested: model, ModelResolved: upstream},
 		Outcome:       outcome,
-	})
+	}
+	if traceID != "" {
+		rec.TraceID = &traceID
+	}
+	h.aud.Append(rec)
 }
 
-func (h *ChatHandler) auditCompleted(p keystore.Principal, model, upstream string, status int, usage *audit.UsageRef, cost *audit.CostRef) {
+func (h *ChatHandler) auditCompleted(p keystore.Principal, model, upstream string, status int, usage *audit.UsageRef, cost *audit.CostRef, traceID string) {
 	if h.aud == nil {
 		return
 	}
-	h.aud.Append(audit.Record{
+	rec := audit.Record{
 		SchemaVersion: 1,
 		Event:         "request_completed",
 		ID:            ulid.New(),
@@ -400,14 +435,18 @@ func (h *ChatHandler) auditCompleted(p keystore.Principal, model, upstream strin
 		Outcome:       &audit.OutcomeRef{Status: status},
 		Usage:         usage,
 		Cost:          cost,
-	})
+	}
+	if traceID != "" {
+		rec.TraceID = &traceID
+	}
+	h.aud.Append(rec)
 }
 
-func (h *ChatHandler) auditCompletedPartial(p keystore.Principal, model, upstream string, usage *audit.UsageRef) {
+func (h *ChatHandler) auditCompletedPartial(p keystore.Principal, model, upstream string, usage *audit.UsageRef, traceID string) {
 	if h.aud == nil {
 		return
 	}
-	h.aud.Append(audit.Record{
+	rec := audit.Record{
 		SchemaVersion: 1,
 		Event:         "request_completed",
 		ID:            ulid.New(),
@@ -416,7 +455,11 @@ func (h *ChatHandler) auditCompletedPartial(p keystore.Principal, model, upstrea
 		Request:       audit.RequestRef{Ingress: "openai", ModelRequested: model, ModelResolved: upstream},
 		Outcome:       &audit.OutcomeRef{Status: 200, Partial: true},
 		Usage:         usage,
-	})
+	}
+	if traceID != "" {
+		rec.TraceID = &traceID
+	}
+	h.aud.Append(rec)
 }
 
 func usageRef(u *schema.Usage) *audit.UsageRef {

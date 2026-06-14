@@ -85,11 +85,23 @@ func Init(ctx context.Context, cfg Config) (func(context.Context) error, error) 
 		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(ratio))),
 		sdktrace.WithResource(res),
 	)
+	SetTracerProvider(tp)
+	return tp.Shutdown, nil
+}
+
+// SetTracerProvider installs an explicit TracerProvider and enables tracing.
+// Init uses it; tests in other packages use it with a recorder-backed provider.
+func SetTracerProvider(tp trace.TracerProvider) {
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(prop)
 	tracer = tp.Tracer(scopeName)
 	enabled = true
-	return tp.Shutdown, nil
+}
+
+// Disable reverts to the no-op tracer (test cleanup).
+func Disable() {
+	tracer = tracenoop.NewTracerProvider().Tracer(scopeName)
+	enabled = false
 }
 
 // Enabled reports whether tracing is installed (false → no-op fast path).
@@ -128,17 +140,21 @@ func TraceID(ctx context.Context) string {
 	return sc.TraceID().String()
 }
 
-// SetGenAIRequest sets the GenAI request attributes (OTel semconv).
-func SetGenAIRequest(span trace.Span, system, model string) {
+// SetGenAIRequest sets the request-side GenAI attributes, known at span start
+// (the provider/system is only known after routing → SetGenAIResponse).
+func SetGenAIRequest(span trace.Span, model string) {
 	span.SetAttributes(
 		attribute.String("gen_ai.operation.name", "chat"),
-		attribute.String("gen_ai.system", system),
 		attribute.String("gen_ai.request.model", model),
 	)
 }
 
-// SetGenAIResponse sets the GenAI response attributes (upstream model + usage).
-func SetGenAIResponse(span trace.Span, model string, inputTokens, outputTokens int64) {
+// SetGenAIResponse sets the response-side GenAI attributes: the provider system,
+// the resolved upstream model, and token usage (set once the target is known).
+func SetGenAIResponse(span trace.Span, system, model string, inputTokens, outputTokens int64) {
+	if system != "" {
+		span.SetAttributes(attribute.String("gen_ai.system", system))
+	}
 	span.SetAttributes(attribute.String("gen_ai.response.model", model))
 	if inputTokens > 0 {
 		span.SetAttributes(attribute.Int64("gen_ai.usage.input_tokens", inputTokens))
