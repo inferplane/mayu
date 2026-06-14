@@ -128,8 +128,20 @@ Panel reality on this machine:
    - **ADR-008 Stage 2 is COMPLETE** (backend + console). Whole feature behind
      a P2 design gate (2 rounds) + P4 code gate (2 rounds) + T8 UI gate (codex+
      gemini PASS; kiro CHANGES-REQUIRED refuted with evidence).
-2. **PII masking plugin (#4)** — opt-in, with explicit cache-destruction +
-   cost-increase warning (per spec; honest trade-off vs silent-masking rivals).
+2. **PII masking plugin — DONE** (ADR-009, 2026-06-14; commits `44afb6c`→
+   `63d5305`). New top-level **`plugins/`** surface + `internal/filter`
+   (RequestFilter interface + registry + `Masking` predicate). `plugins/piimask`
+   masks request text (email/phone/card+Luhn/SSN/IPv4 → typed placeholders),
+   one-way (no vault, no PII at rest). Opt-in per-team via `plugins` config
+   (`buildMasking` resolves the registry; unknown name fails boot; enabling logs
+   the cache/cost warning). Wired into `/v1/messages` (masks BOTH RawBody AND
+   Parsed — the openai_compat path converts from Parsed; **fail-closed 400** on
+   masker error), `count_tokens` (200 + local estimate on error — never 500,
+   never leak), and `/v1/chat/completions` (**masked team rejected 400** — the
+   OpenAI ingress is not a bypass; audited). Metric
+   `inferplane_pii_mask_redactions_total{team}` + audit `pii_masked` (bool only).
+   2-round design gate (2 CRITICAL R1 + 1 CRITICAL R2) + P4 code gate, all
+   gemini+kiro (codex empty-streamed all session — a codex-CLI issue on this box).
 3. **S3 Object Lock audit anchoring (#5)** — upgrades tamper-EVIDENT → tamper-
    RESISTANT; periodic external anchoring of the hash chain.
 4. **Multi-replica HA** — Postgres key store, Redis/Valkey quota store +
