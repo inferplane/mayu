@@ -10,6 +10,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/inferplane/inferplane/internal/adminauth"
 )
@@ -153,10 +154,24 @@ type AuditBuffer struct {
 	Path string `json:"path"`
 }
 
+// AnchorConfig enables opt-in S3 Object Lock audit anchoring (ADR-012). Absent
+// (nil) → no anchoring (no-op). Interval is a Go duration (default 5m); bucket
+// required; RetainDays>0 sets per-object COMPLIANCE retention.
+type AnchorConfig struct {
+	Type       string `json:"type"` // "s3"
+	Bucket     string `json:"bucket"`
+	Prefix     string `json:"prefix,omitempty"`
+	Region     string `json:"region,omitempty"`
+	Endpoint   string `json:"endpoint,omitempty"`
+	Interval   string `json:"interval,omitempty"`
+	RetainDays int    `json:"retain_days,omitempty"`
+}
+
 type AuditConfig struct {
-	FailureMode string      `json:"failure_mode"` // buffer_then_block (default)
-	Buffer      AuditBuffer `json:"buffer"`
-	Sinks       []AuditSink `json:"sinks"`
+	FailureMode string        `json:"failure_mode"` // buffer_then_block (default)
+	Buffer      AuditBuffer   `json:"buffer"`
+	Sinks       []AuditSink   `json:"sinks"`
+	Anchor      *AnchorConfig `json:"anchor,omitempty"`
 }
 
 // RateLimitConfig is a team's instance-local token-bucket gate (§5.3): RPM and
@@ -296,7 +311,34 @@ func LoadRaw(path string) (*Config, error) {
 	if err := validateOTel(cfg.OTel); err != nil {
 		return nil, err
 	}
+	if err := validateAnchor(cfg.Audit.Anchor); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+// validateAnchor checks the opt-in audit-anchor block (ADR-012): type must be
+// "s3", bucket required, and interval (if set) must parse as a Go duration. nil
+// block (anchoring off) is valid.
+func validateAnchor(a *AnchorConfig) error {
+	if a == nil {
+		return nil
+	}
+	if a.Type != "s3" {
+		return fmt.Errorf("config: audit.anchor.type must be \"s3\", got %q", a.Type)
+	}
+	if a.Bucket == "" {
+		return fmt.Errorf("config: audit.anchor.bucket is required")
+	}
+	if a.Interval != "" {
+		if _, err := time.ParseDuration(a.Interval); err != nil {
+			return fmt.Errorf("config: audit.anchor.interval %q: %w", a.Interval, err)
+		}
+	}
+	if a.RetainDays < 0 {
+		return fmt.Errorf("config: audit.anchor.retain_days must be >= 0")
+	}
+	return nil
 }
 
 // validateOTel checks the opt-in tracing block (ADR-011): endpoint is required,

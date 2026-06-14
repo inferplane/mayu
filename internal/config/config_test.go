@@ -414,3 +414,34 @@ func TestOTelBlockParsesAndValidates(t *testing.T) {
 		t.Fatal("sample_ratio>1 must be rejected")
 	}
 }
+
+// --- T4: audit.anchor block (ADR-012) ---
+
+func TestAnchorBlockParsesAndValidates(t *testing.T) {
+	dir := t.TempDir()
+	write := func(n, b string) string { p := filepath.Join(dir, n); os.WriteFile(p, []byte(b), 0o600); return p }
+	cfg, err := Load(write("ok.json", `{"audit":{"buffer":{"path":"/x"},"sinks":[{"type":"stdout"}],"anchor":{"type":"s3","bucket":"b","prefix":"a","interval":"1m","retain_days":7}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Audit.Anchor == nil || cfg.Audit.Anchor.Bucket != "b" || cfg.Audit.Anchor.RetainDays != 7 {
+		t.Fatalf("anchor parse wrong: %+v", cfg.Audit.Anchor)
+	}
+	// absent → nil
+	cfgA, _ := Load(write("a.json", `{"audit":{"buffer":{"path":"/x"},"sinks":[{"type":"stdout"}]}}`))
+	if cfgA.Audit.Anchor != nil {
+		t.Fatal("anchor should be nil when absent")
+	}
+	// bucket missing → error
+	if _, err := Load(write("nob.json", `{"audit":{"anchor":{"type":"s3"}}}`)); err == nil {
+		t.Fatal("anchor without bucket must be rejected")
+	}
+	// bad type → error
+	if _, err := Load(write("badt.json", `{"audit":{"anchor":{"type":"gcs","bucket":"b"}}}`)); err == nil {
+		t.Fatal("non-s3 anchor type must be rejected")
+	}
+	// bad interval → error
+	if _, err := Load(write("badi.json", `{"audit":{"anchor":{"type":"s3","bucket":"b","interval":"5 minutes"}}}`)); err == nil {
+		t.Fatal("bad interval must be rejected")
+	}
+}
