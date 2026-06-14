@@ -165,10 +165,10 @@ func TestSelfServiceWhoamiUI(t *testing.T) {
 		}
 	}
 	// identity rendered via textContent, never innerHTML
-	if !strings.Contains(js, `line.textContent = "signed in as "`) {
+	if !strings.Contains(js, `line.textContent = note`) || !strings.Contains(js, `"signed in as "`) {
 		t.Fatal("identity must be rendered via textContent")
 	}
-	if strings.Contains(js, "whoami-line\").innerHTML") || strings.Contains(js, "innerHTML") {
+	if strings.Contains(js, "innerHTML") {
 		t.Fatal("app.js must not use innerHTML (CSP / XSS)")
 	}
 }

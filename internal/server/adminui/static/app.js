@@ -389,11 +389,17 @@ async function loadWhoami() {
     return; // identity is advisory; the form still works (server enforces)
   }
   const line = $("whoami-line");
-  line.textContent = "signed in as " + me.subject + " · " + (me.auth_method || "");
-  line.hidden = false;
-
   const input = $("team"), sel = $("team-select");
   const teams = me.teams || [];
+  let note = "signed in as " + me.subject + " · " + (me.auth_method || "");
+  if (!me.is_admin && teams.length) {
+    // The select is advisory; the server is the entitlement authority (it 403s a
+    // cross-team request regardless of the UI).
+    note += " · you may issue keys for your team(s); entitlement is enforced server-side";
+  }
+  line.textContent = note;
+  line.hidden = false;
+
   if (!me.is_admin && teams.length) {
     sel.textContent = "";
     for (const t of teams) {

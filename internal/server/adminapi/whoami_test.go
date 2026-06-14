@@ -100,3 +100,12 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+// TestWhoamiNoIdentity401 pins the P4 fail-closed: no identity in context → 401,
+// never a zero-value identity at 200.
+func TestWhoamiNoIdentity401(t *testing.T) {
+	rec := whoamiReq(nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("whoami without identity = %d, want 401", rec.Code)
+	}
+}
