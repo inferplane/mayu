@@ -127,27 +127,78 @@
 
       <!-- ===== providers ===== -->
       <section id="view-providers" class="view" hidden>
-        <p class="hint">Upstream providers and model routing are declared in
+        <p class="hint" id="providers-mode-ro">Upstream providers and model routing are declared in
           <b>config</b> (policy-as-code, ADR-003) — this view is read-only.
           Secrets never appear here: only the env var / file path the gateway
           reads, or the IAM mode. <span class="ko">업스트림 프로바이더·모델
           라우팅은 config로 선언합니다(읽기 전용). 시크릿 값은 표시되지 않고,
           참조 이름/IAM 모드만 보입니다.</span></p>
+        <p class="hint" id="providers-mode-rw" hidden>This gateway has a <b>provider store</b> — you can
+          register and edit providers/routes here (ADR-008). You register only the
+          <b>reference</b> a provider authenticates with (an env var name or a file
+          path) — <b>never the secret value</b>; set the value in your platform's
+          secret store. Changes apply immediately (hot-reload). <span class="ko">프로바이더
+          스토어가 있어 여기서 등록·편집할 수 있습니다. 시크릿 값이 아니라 참조
+          이름(env/파일 경로)만 등록하세요 — 값은 본인 시크릿 스토어에 둡니다.</span></p>
 
         <div class="card">
           <div class="microlabel">providers</div>
           <table class="data" id="providers-table">
-            <thead><tr><th>name</th><th>type</th><th>endpoint</th><th>auth</th></tr></thead>
+            <thead><tr><th>name</th><th>type</th><th>endpoint</th><th>auth</th><th id="prov-act-col" hidden></th></tr></thead>
             <tbody><tr><td colspan="4" class="empty">connect to load…</td></tr></tbody>
           </table>
+        </div>
+
+        <!-- register/edit provider (shown only when a provider store is enabled) -->
+        <div class="card" id="provider-write" hidden>
+          <div class="microlabel">register / edit a provider</div>
+          <form id="provider-form" class="grid-form">
+            <input id="pf-name" type="text" placeholder="name (e.g. anthropic-prod)" required>
+            <select id="pf-type">
+              <option value="anthropic">anthropic</option>
+              <option value="openai_compatible">openai_compatible</option>
+              <option value="bedrock">bedrock</option>
+            </select>
+            <input id="pf-baseurl" type="text" placeholder="base_url (anthropic / openai_compatible)">
+            <select id="pf-refkind">
+              <option value="env">api_key_ref · env var NAME</option>
+              <option value="file">api_key_ref · file PATH</option>
+              <option value="none">no key (bedrock / keyless)</option>
+            </select>
+            <input id="pf-refval" type="text" placeholder="ref NAME or PATH — never the secret value">
+            <input id="pf-region" type="text" placeholder="region (bedrock)">
+            <input id="pf-authmode" type="text" placeholder="auth mode (bedrock, e.g. irsa)">
+            <button type="submit">SAVE PROVIDER</button>
+          </form>
+          <p class="hint warn-label">⚠ enter the env var NAME or file PATH — the gateway
+            never stores a secret value. Set the value in your secret store.</p>
+          <p id="provider-form-status" class="status"></p>
         </div>
 
         <div class="card">
           <div class="microlabel">model routing · primary → fallback</div>
           <table class="data" id="routes-table">
-            <thead><tr><th>model</th><th>route (provider · upstream model)</th></tr></thead>
+            <thead><tr><th>model</th><th>route (provider · upstream model)</th><th id="route-act-col" hidden></th></tr></thead>
             <tbody><tr><td colspan="2" class="empty">connect to load…</td></tr></tbody>
           </table>
+        </div>
+
+        <!-- add/edit model route (shown only when a provider store is enabled) -->
+        <div class="card" id="model-write" hidden>
+          <div class="microlabel">add / edit a model route</div>
+          <form id="model-form">
+            <div class="row">
+              <input id="mf-name" type="text" placeholder="model name (e.g. claude-sonnet-4-6)" required>
+            </div>
+            <div id="mf-targets"></div>
+            <div class="row">
+              <button id="mf-add-target" type="button" class="ghost">+ ADD TARGET</button>
+              <button type="submit">SAVE ROUTE</button>
+            </div>
+          </form>
+          <p class="hint">Targets are tried in order (target 1 = primary, the rest = fallback).
+            <code>api</code> is optional (bedrock: invoke_model / converse).</p>
+          <p id="model-form-status" class="status"></p>
         </div>
 
         <div class="card">
@@ -170,9 +221,17 @@
     { "provider": "bedrock-us", "model": "anthropic.claude-sonnet-4-6-v1:0", "api": "invoke_model" }
   ] }
 }</code></pre>
-          <p class="hint">Reload the gateway to apply (config is loaded at boot;
-            UI-write is a planned stage 2). Set the referenced secret in your
-            platform's secret store — never inline.</p>
+          <p class="hint">Without a provider store, config is loaded at boot —
+            edit config and reload (<code>kill -HUP</code>) to apply. Set the
+            referenced secret in your platform's secret store — never inline.</p>
+        </div>
+
+        <div class="card" id="export-card" hidden>
+          <div class="snippet-head"><span class="microlabel">git export · current topology (refs only, secret-free)</span>
+            <button id="export-btn" type="button" class="ghost">EXPORT</button></div>
+          <pre class="snippet"><code id="export-out">click EXPORT to render the committable config fragment…</code></pre>
+          <p class="hint">Commit this to Git for review / disaster recovery. The DB
+            is the live source of truth; this is the export half (ADR-008).</p>
         </div>
       </section>
 

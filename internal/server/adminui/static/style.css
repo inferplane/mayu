@@ -180,9 +180,25 @@ td .pill.err { background: rgba(255,93,93,0.12); color: var(--red); }
 td button { padding: 0.25rem 0.6rem; font-size: 0.68rem; background: transparent; color: var(--red); border: 1px solid rgba(255,93,93,0.4); }
 td button:hover { background: rgba(255,93,93,0.12); filter: none; }
 
-/* ---------- keys view ---------- */
+/* ---------- forms (keys + provider/model write, ADR-008) ---------- */
 .row { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
 .row input { flex: 1 1 12rem; margin-bottom: 0; }
+
+/* select shares the input look (no inline style — CSP default-src 'self'). */
+select {
+  width: 100%; background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 6px; color: var(--text); padding: 0.6rem 0.75rem; font: inherit;
+}
+select:focus { outline: none; border-color: var(--green); box-shadow: 0 0 0 3px rgba(61,220,151,0.12); }
+
+/* provider register/edit form — responsive 2-col grid; submit spans full width. */
+.grid-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.6rem; align-items: start; }
+.grid-form input, .grid-form select { margin-bottom: 0; }
+.grid-form button[type="submit"] { grid-column: 1 / -1; }
+
+/* model-route ordered-target rows. */
+#mf-targets { display: flex; flex-direction: column; gap: 0.5rem; margin: 0.6rem 0; }
+.target-row input { flex: 1 1 8rem; }
 #issue-card { margin-bottom: 0.9rem; }
 #plaintext-box {
   margin-top: 1rem; padding: 0.9rem 1rem;

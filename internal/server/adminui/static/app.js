@@ -18,7 +18,13 @@ async function api(method, path, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   if (resp.status === 401) throw new Error("unauthorized — check the admin token");
-  if (!resp.ok && resp.status !== 204) throw new Error("API error " + resp.status);
+  if (!resp.ok && resp.status !== 204) {
+    // Surface the server's own {"error":...} message when present (the write
+    // endpoints return sanitized, secret-free messages).
+    let msg = "API error " + resp.status;
+    try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch { /* keep generic */ }
+    throw new Error(msg);
+  }
   return resp.status === 204 ? null : resp.json();
 }
 
@@ -145,7 +151,8 @@ function emptyRow(span, text) {
   return tr;
 }
 
-/* ---------- providers (read-only topology, ADR-005) ---------- */
+/* ---------- providers (topology view, ADR-005; UI-write when a store is
+   enabled, ADR-008) ---------- */
 
 async function refreshProviders() {
   let view;
@@ -154,11 +161,22 @@ async function refreshProviders() {
   } catch {
     return; // keep last state; auth errors surface on the lock screen
   }
+  const writable = !!view.writable;
+  // Toggle write affordances (CSP-safe: the `hidden` DOM property, no inline style).
+  $("providers-mode-ro").hidden = writable;
+  $("providers-mode-rw").hidden = !writable;
+  $("provider-write").hidden = !writable;
+  $("model-write").hidden = !writable;
+  $("export-card").hidden = !writable;
+  $("prov-act-col").hidden = !writable;
+  $("route-act-col").hidden = !writable;
+  if (writable && !$("mf-targets").querySelector(".target-row")) addTargetRow();
+
   const pbody = $("providers-table").querySelector("tbody");
   pbody.textContent = "";
   const provs = view.providers || [];
   if (!provs.length) {
-    pbody.appendChild(emptyRow(4, "no providers configured"));
+    pbody.appendChild(emptyRow(writable ? 5 : 4, "no providers configured"));
   } else {
     for (const p of provs) {
       const tr = document.createElement("tr");
@@ -166,6 +184,7 @@ async function refreshProviders() {
       tr.appendChild(td(p.type));
       tr.appendChild(td(p.base_url || "(default)"));
       tr.appendChild(td(p.auth)); // ref name / IAM mode — never a secret value
+      if (writable) tr.appendChild(providerActions(p));
       pbody.appendChild(tr);
     }
   }
@@ -174,7 +193,7 @@ async function refreshProviders() {
   rbody.textContent = "";
   const models = view.models || [];
   if (!models.length) {
-    rbody.appendChild(emptyRow(2, "no model routes configured"));
+    rbody.appendChild(emptyRow(writable ? 3 : 2, "no model routes configured"));
   } else {
     for (const m of models) {
       const tr = document.createElement("tr");
@@ -183,10 +202,155 @@ async function refreshProviders() {
         .map((t) => t.provider + " · " + t.model + (t.api ? " (" + t.api + ")" : ""))
         .join("  →  ");
       tr.appendChild(td(route));
+      if (writable) tr.appendChild(routeActions(m));
       rbody.appendChild(tr);
     }
   }
 }
+
+// providerActions builds the edit/delete cell for a provider row (writable only).
+function providerActions(p) {
+  const cell = document.createElement("td");
+  const edit = document.createElement("button");
+  edit.className = "ghost"; edit.textContent = "edit";
+  edit.addEventListener("click", () => fillProviderForm(p));
+  const del = document.createElement("button");
+  del.className = "ghost"; del.textContent = "✕";
+  del.addEventListener("click", async () => {
+    if (!confirm("Delete provider " + p.name + "?")) return;
+    try { await api("DELETE", "/admin/providers/" + encodeURIComponent(p.name)); await refreshProviders(); }
+    catch (err) { $("provider-form-status").className = "status err"; $("provider-form-status").textContent = String(err.message || err); }
+  });
+  cell.append(edit, del);
+  return cell;
+}
+
+// routeActions builds the edit/delete cell for a model-route row.
+function routeActions(m) {
+  const cell = document.createElement("td");
+  const edit = document.createElement("button");
+  edit.className = "ghost"; edit.textContent = "edit";
+  edit.addEventListener("click", () => fillModelForm(m));
+  const del = document.createElement("button");
+  del.className = "ghost"; del.textContent = "✕";
+  del.addEventListener("click", async () => {
+    if (!confirm("Delete model route " + m.name + "?")) return;
+    try { await api("DELETE", "/admin/models/" + encodeURIComponent(m.name)); await refreshProviders(); }
+    catch (err) { $("model-form-status").className = "status err"; $("model-form-status").textContent = String(err.message || err); }
+  });
+  cell.append(edit, del);
+  return cell;
+}
+
+// fillProviderForm prefills the register/edit form from a provider view row.
+// The auth STRING is parsed back to the ref kind/name (never a secret value).
+function fillProviderForm(p) {
+  $("pf-name").value = p.name;
+  $("pf-type").value = p.type;
+  $("pf-baseurl").value = (p.base_url && p.base_url !== "(default)") ? p.base_url : "";
+  $("pf-region").value = p.region || "";
+  $("pf-authmode").value = "";
+  $("pf-refkind").value = "none";
+  $("pf-refval").value = "";
+  const a = p.auth || "";
+  if (a.indexOf("IAM · ") === 0) {
+    $("pf-authmode").value = a.slice("IAM · ".length);
+  } else if (a.indexOf("api key · env:") === 0) {
+    $("pf-refkind").value = "env"; $("pf-refval").value = a.slice("api key · env:".length);
+  } else if (a.indexOf("api key · file:") === 0) {
+    $("pf-refkind").value = "file"; $("pf-refval").value = a.slice("api key · file:".length);
+  }
+}
+
+// fillModelForm prefills the model-route form from a route view row.
+function fillModelForm(m) {
+  $("mf-name").value = m.name;
+  $("mf-targets").textContent = "";
+  for (const t of m.targets || []) addTargetRow(t.provider, t.model, t.api);
+  if (!(m.targets || []).length) addTargetRow();
+}
+
+// addTargetRow appends one ordered-target input row to the model form.
+function addTargetRow(provider, model, apiv) {
+  const row = document.createElement("div");
+  row.className = "row target-row";
+  const p = document.createElement("input");
+  p.type = "text"; p.placeholder = "provider"; p.className = "t-provider"; p.value = provider || "";
+  const m = document.createElement("input");
+  m.type = "text"; m.placeholder = "upstream model"; m.className = "t-model"; m.value = model || "";
+  const a = document.createElement("input");
+  a.type = "text"; a.placeholder = "api (optional)"; a.className = "t-api"; a.value = apiv || "";
+  const rm = document.createElement("button");
+  rm.type = "button"; rm.className = "ghost"; rm.textContent = "✕";
+  rm.addEventListener("click", () => row.remove());
+  row.append(p, m, a, rm);
+  $("mf-targets").appendChild(row);
+}
+
+// Provider register/edit: PUT replaces the named provider (upsert). The body
+// carries only the ref (env NAME / file PATH), never a secret value.
+$("provider-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const name = $("pf-name").value.trim();
+  const body = { type: $("pf-type").value };
+  const bu = $("pf-baseurl").value.trim(); if (bu) body.base_url = bu;
+  const region = $("pf-region").value.trim(); if (region) body.region = region;
+  const mode = $("pf-authmode").value.trim(); if (mode) body.auth = { mode: mode };
+  const kind = $("pf-refkind").value, val = $("pf-refval").value.trim();
+  if (kind === "env" && val) body.api_key_ref = { env: val };
+  else if (kind === "file" && val) body.api_key_ref = { file: val };
+  const status = $("provider-form-status");
+  try {
+    await api("PUT", "/admin/providers/" + encodeURIComponent(name), body);
+    status.className = "status"; status.textContent = "saved ✓ " + name;
+    $("provider-form").reset();
+    await refreshProviders();
+  } catch (err) {
+    status.className = "status err"; status.textContent = String(err.message || err);
+  }
+});
+
+// Model route save: PUT replaces the named route's ordered target chain.
+$("model-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const name = $("mf-name").value.trim();
+  const targets = [];
+  for (const row of $("mf-targets").querySelectorAll(".target-row")) {
+    const provider = row.querySelector(".t-provider").value.trim();
+    const model = row.querySelector(".t-model").value.trim();
+    const apiv = row.querySelector(".t-api").value.trim();
+    if (provider && model) {
+      const t = { provider: provider, model: model };
+      if (apiv) t.api = apiv;
+      targets.push(t);
+    }
+  }
+  const status = $("model-form-status");
+  if (!targets.length) {
+    status.className = "status err"; status.textContent = "add at least one target (provider + model)";
+    return;
+  }
+  try {
+    await api("PUT", "/admin/models/" + encodeURIComponent(name), { targets: targets });
+    status.className = "status"; status.textContent = "saved ✓ " + name;
+    $("mf-name").value = ""; $("mf-targets").textContent = ""; addTargetRow();
+    await refreshProviders();
+  } catch (err) {
+    status.className = "status err"; status.textContent = String(err.message || err);
+  }
+});
+
+$("mf-add-target").addEventListener("click", () => addTargetRow());
+
+// Git export: render the secret-free committable config fragment.
+$("export-btn").addEventListener("click", async () => {
+  try {
+    const out = await api("GET", "/admin/config/export");
+    $("export-out").textContent = JSON.stringify(out, null, 2);
+  } catch (err) {
+    $("export-out").textContent = String(err.message || err);
+  }
+});
 
 /* ---------- keys ---------- */
 

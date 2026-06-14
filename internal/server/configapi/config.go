@@ -20,6 +20,7 @@ type ProviderView struct {
 	Name    string `json:"name"`
 	Type    string `json:"type"`
 	BaseURL string `json:"base_url,omitempty"`
+	Region  string `json:"region,omitempty"` // bedrock region (non-secret) — lets the console prefill an edit
 	Auth    string `json:"auth"`
 }
 
@@ -39,6 +40,11 @@ type ModelView struct {
 type View struct {
 	Providers []ProviderView `json:"providers"`
 	Models    []ModelView    `json:"models"`
+	// Writable is true when a provider store is configured, so the console can
+	// offer register/edit/delete forms (ADR-008); false → file-authoritative,
+	// writes 405, the console shows the config-block guide only. It is NOT
+	// secret-bearing — purely a capability hint set by the assembly layer.
+	Writable bool `json:"writable"`
 }
 
 // ViewFrom builds the secret-free view from the loaded config. The auth string
@@ -51,6 +57,7 @@ func ViewFrom(providers map[string]config.ProviderConfig, models map[string]conf
 			Name:    name,
 			Type:    p.Type,
 			BaseURL: p.BaseURL,
+			Region:  p.Region,
 			Auth:    authString(p),
 		})
 	}
