@@ -104,6 +104,9 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// bypass PII masking by using /v1/chat/completions. Reject until OpenAI-ingress
 	// masking ships.
 	if h.mask.Enabled(p.Team) {
+		// Audit the security-critical rejection (a masking-bypass attempt) — a
+		// silent reject would be a blind spot in the tamper-evident chain (P4 gate).
+		h.audit(p, canonical.Model, "", &audit.OutcomeRef{Status: 400})
 		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 400, time.Since(start).Seconds(), 0)
 		writeErr(w, 400, "invalid_request_error", "PII masking is enabled for your team but not supported on the OpenAI-compatible endpoint yet; use /v1/messages")
 		return

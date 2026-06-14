@@ -39,3 +39,22 @@ func TestNamesSorted(t *testing.T) {
 		}
 	}
 }
+
+func TestMaskingEnabled(t *testing.T) {
+	var off *Masking // nil
+	if off.Enabled("any") {
+		t.Fatal("nil Masking must be disabled")
+	}
+	if (&Masking{Filter: nil, Global: true}).Enabled("any") {
+		t.Fatal("nil Filter must be disabled even if Global")
+	}
+	f := fakeFilter{name: "m"}
+	global := &Masking{Filter: f, Global: true}
+	if !global.Enabled("anything") {
+		t.Fatal("Global masking must enable every team")
+	}
+	scoped := &Masking{Filter: f, Teams: map[string]bool{"secure": true}}
+	if !scoped.Enabled("secure") || scoped.Enabled("other") {
+		t.Fatalf("scoped masking wrong: secure=%v other=%v", scoped.Enabled("secure"), scoped.Enabled("other"))
+	}
+}
