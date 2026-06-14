@@ -3,12 +3,22 @@ package configapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"regexp"
 	"strings"
 
 	"github.com/inferplane/inferplane/internal/providerstore"
 )
+
+// nameRe bounds a provider/model resource name (path segment): no slashes, no
+// surprises — config-bounded so it can safely appear in audit labels.
+var nameRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// maxWriteBody caps a write body — provider/model registrations are tiny.
+const maxWriteBody = 64 << 10
 
 // envRefRe is the allowed shape of an env-var secret ref: a POSIX-ish env var
 // name. A pasted secret (sk-…, dashes, mixed case with leading digits) fails it,
@@ -121,9 +131,89 @@ func ParseModelWrite(body []byte) ([]providerstore.Target, error) {
 // method runs the build-once-swap-once mutation under the gateway's reload lock
 // (validate the candidate effective topology, persist, swap the validated
 // generation). The handlers own only HTTP shape; the assembly owns topology.
+// ErrInvalidTopology (below) maps to 400; providerstore.ErrNotFound maps to 404.
 type Writer interface {
 	WriteProvider(ctx context.Context, row providerstore.ProviderRow) error
 	DeleteProvider(ctx context.Context, name string) error
 	WriteModel(ctx context.Context, name string, targets []providerstore.Target) error
 	DeleteModel(ctx context.Context, name string) error
+}
+
+// ErrInvalidTopology wraps a candidate-build failure (the proposed write would
+// not produce a valid topology — unknown type, unresolvable ref, route to a
+// missing provider). The assembly returns it; the handler maps it to 400. Its
+// message is safe to surface: refs are shape-validated (no secret value) and a
+// build error fires before any secret VALUE is produced.
+var ErrInvalidTopology = errors.New("invalid topology")
+
+// WriteHandler serves the provider/model write resources. resource is
+// "providers" or "models". When w is nil (no provider store configured) every
+// write returns 405 — registration stays config-driven (ADR-005, unchanged).
+func WriteHandler(resource string, w Writer) http.Handler {
+	prefix := "/admin/" + resource + "/"
+	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if w == nil {
+			writeErr(rw, http.StatusMethodNotAllowed, "provider store not enabled; registration is config-driven (set provider_store to enable UI writes, ADR-005/008)")
+			return
+		}
+		name := strings.TrimPrefix(r.URL.Path, prefix)
+		if name == "" || strings.Contains(name, "/") || !nameRe.MatchString(name) {
+			writeErr(rw, http.StatusBadRequest, "invalid resource name")
+			return
+		}
+		switch r.Method {
+		case http.MethodPut:
+			body, err := io.ReadAll(io.LimitReader(r.Body, maxWriteBody))
+			if err != nil {
+				writeErr(rw, http.StatusBadRequest, "cannot read body")
+				return
+			}
+			if resource == "providers" {
+				row, perr := ParseProviderWrite(name, body)
+				if perr != nil {
+					writeErr(rw, http.StatusBadRequest, perr.Error())
+					return
+				}
+				mapWriteResult(rw, w.WriteProvider(r.Context(), row))
+				return
+			}
+			targets, perr := ParseModelWrite(body)
+			if perr != nil {
+				writeErr(rw, http.StatusBadRequest, perr.Error())
+				return
+			}
+			mapWriteResult(rw, w.WriteModel(r.Context(), name, targets))
+		case http.MethodDelete:
+			if resource == "providers" {
+				mapWriteResult(rw, w.DeleteProvider(r.Context(), name))
+				return
+			}
+			mapWriteResult(rw, w.DeleteModel(r.Context(), name))
+		default:
+			writeErr(rw, http.StatusMethodNotAllowed, "use PUT or DELETE")
+		}
+	})
+}
+
+// mapWriteResult maps a Writer error to an HTTP status: nil→204, invalid
+// topology→400, not-found→404, else→500. The 400 message is the build error
+// (secret-free by construction — refs are shape-validated, the value is never in
+// the error).
+func mapWriteResult(rw http.ResponseWriter, err error) {
+	switch {
+	case err == nil:
+		rw.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, ErrInvalidTopology):
+		writeErr(rw, http.StatusBadRequest, err.Error())
+	case errors.Is(err, providerstore.ErrNotFound):
+		writeErr(rw, http.StatusNotFound, "not found")
+	default:
+		writeErr(rw, http.StatusInternalServerError, "write failed")
+	}
+}
+
+func writeErr(rw http.ResponseWriter, code int, msg string) {
+	rw.Header().Set("Content-Type", "application/json")
+	rw.WriteHeader(code)
+	_ = json.NewEncoder(rw).Encode(map[string]string{"error": msg})
 }

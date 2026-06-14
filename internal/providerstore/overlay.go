@@ -33,7 +33,15 @@ func Overlay(rawFileCfg *config.Config, store Store) (*config.Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	return OverlayFrom(rawFileCfg, provs, models), nil
+}
 
+// OverlayFrom is the pure topology overlay: a copy of rawFileCfg with its
+// Providers/Models replaced by the given DB rows/routes (refs only, unresolved).
+// It is shared by Overlay (boot/reload reads the store) and the write path
+// (which builds a candidate from the current store PLUS the pending mutation, so
+// the validated generation is the one published — build-once-swap-once).
+func OverlayFrom(rawFileCfg *config.Config, provs []ProviderRow, models map[string][]Target) *config.Config {
 	eff := *rawFileCfg // shallow copy; Providers/Models are replaced with fresh maps below
 	eff.Providers = make(map[string]config.ProviderConfig, len(provs))
 	for _, p := range provs {
@@ -43,7 +51,7 @@ func Overlay(rawFileCfg *config.Config, store Store) (*config.Config, error) {
 	for name, targets := range models {
 		eff.Models[name] = config.ModelConfig{Targets: targetsToConfig(targets)}
 	}
-	return &eff, nil
+	return &eff
 }
 
 // SeedIfEmpty performs the one-time file→DB import (ADR-008): if the store has

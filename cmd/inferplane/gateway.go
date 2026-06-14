@@ -21,6 +21,7 @@ import (
 	"github.com/inferplane/inferplane/internal/limiter"
 	"github.com/inferplane/inferplane/internal/live"
 	"github.com/inferplane/inferplane/internal/metrics"
+	"github.com/inferplane/inferplane/internal/providerstore"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/internal/server"
 	"github.com/inferplane/inferplane/internal/server/configapi"
@@ -37,7 +38,8 @@ type gateway struct {
 	aud      *audit.Writer
 	holder   *live.Holder
 	router   *router.Router
-	reloadMu sync.Mutex // serializes reloads (concurrent SIGHUPs/triggers)
+	pstore   providerstore.Store // nil unless provider_store is configured (ADR-008)
+	reloadMu sync.Mutex          // serializes reloads AND UI writes (concurrent SIGHUPs/triggers)
 	dataLn   net.Listener
 	adminLn  net.Listener
 	dataSrv  *http.Server
@@ -49,7 +51,10 @@ type gateway struct {
 // the data and admin listeners. On error every partially opened resource is
 // closed. The caller must call serve (which owns shutdown + resource closing).
 func newGateway(cfgPath string) (*gateway, error) {
-	cfg, err := config.Load(cfgPath)
+	// Parse the file WITHOUT resolving provider secrets (ADR-008 gate G1): when a
+	// provider store is authoritative, file providers may be stale/ignored, so
+	// resolving their refs here would crash boot before the overlay discards them.
+	raw, err := config.LoadRaw(cfgPath)
 	if err != nil {
 		return nil, err
 	}
@@ -59,31 +64,59 @@ func newGateway(cfgPath string) (*gateway, error) {
 	m := metrics.New()
 
 	// Virtual-key store: KeyAuth resolves client keys against it (§5.1).
-	store, err := keystore.OpenSQLite(cfg.KeyStore.Path)
+	store, err := keystore.OpenSQLite(raw.KeyStore.Path)
 	if err != nil {
 		return nil, fmt.Errorf("keystore: %w", err)
 	}
 
 	// Audit writer: build sinks from config, then the single-writer chain.
-	sinks, err := buildSinks(cfg.Audit.Sinks)
+	sinks, err := buildSinks(raw.Audit.Sinks)
 	if err != nil {
 		store.Close()
 		return nil, fmt.Errorf("audit sinks: %w", err)
 	}
-	aud, err := audit.NewWriter(instanceID(), cfg.Audit.Buffer.Path, sinks)
+	aud, err := audit.NewWriter(instanceID(), raw.Audit.Buffer.Path, sinks)
 	if err != nil {
 		store.Close()
 		return nil, fmt.Errorf("audit: %w", err)
 	}
 	aud.SetMetrics(m) // audit_write_failures / buffer_utilization
 
+	// Optional DB-authoritative provider/model store (ADR-008). Absent → file is
+	// authoritative and UI writes 405 (ADR-005, unchanged). Present → seed once
+	// from the file (durable marker) so a file-config deployment loses nothing,
+	// then the DB is authoritative for the reloadable topology.
+	var pstore providerstore.Store
+	if raw.ProviderStore != nil {
+		pstore, err = providerstore.OpenSQLite(raw.ProviderStore.Path)
+		if err != nil {
+			store.Close()
+			aud.Close()
+			return nil, fmt.Errorf("provider store: %w", err)
+		}
+		if err := providerstore.SeedIfEmpty(context.Background(), pstore, raw); err != nil {
+			pstore.Close()
+			store.Close()
+			aud.Close()
+			return nil, fmt.Errorf("provider store seed: %w", err)
+		}
+	}
+
+	// Effective config = raw file config, with providers/models overlaid from the
+	// DB (when a store is authoritative) and only the EFFECTIVE providers' secret
+	// refs resolved (ADR-008 gate G1). Without a store this is exactly config.Load.
+	cfg, err := buildEffective(raw, pstore)
+	if err != nil {
+		closeAll(pstore, store, aud)
+		return nil, err
+	}
+
 	// Topology generation (providers + routes + pricing) — built by the
 	// topology-only builder so the same path serves boot and hot reload
 	// (ADR-006). Published behind an atomic holder the router reads.
 	st, _, err := live.BuildState(cfg)
 	if err != nil {
-		store.Close()
-		aud.Close()
+		closeAll(pstore, store, aud)
 		return nil, err
 	}
 	holder := &live.Holder{}
@@ -115,22 +148,19 @@ func newGateway(cfgPath string) (*gateway, error) {
 	// deployments can terminate their own TLS; K8s terminates at ingress/mesh.
 	// The pair must be fully specified or fully empty.
 	if err := server.ValidateTLS(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile); err != nil {
-		store.Close()
-		aud.Close()
+		closeAll(pstore, store, aud)
 		return nil, err
 	}
 
 	dataLn, err := net.Listen("tcp", cfg.Server.Listen)
 	if err != nil {
-		store.Close()
-		aud.Close()
+		closeAll(pstore, store, aud)
 		return nil, fmt.Errorf("data listen %q: %w", cfg.Server.Listen, err)
 	}
 	adminLn, err := net.Listen("tcp", cfg.Server.AdminListen)
 	if err != nil {
 		dataLn.Close()
-		store.Close()
-		aud.Close()
+		closeAll(pstore, store, aud)
 		return nil, fmt.Errorf("admin listen %q: %w", cfg.Server.AdminListen, err)
 	}
 
@@ -142,18 +172,57 @@ func newGateway(cfgPath string) (*gateway, error) {
 		}
 	}
 
-	return &gateway{
-		cfgPath:  cfgPath,
-		cfg:      cfg,
-		store:    store,
-		aud:      aud,
-		holder:   holder,
-		router:   r,
-		dataLn:   dataLn,
-		adminLn:  adminLn,
-		dataSrv:  &http.Server{Handler: server.DataMux(r, store, aud, gov, m)},
-		adminSrv: &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder), auditFileSinks, aud, m)},
-	}, nil
+	g := &gateway{
+		cfgPath: cfgPath,
+		cfg:     cfg,
+		store:   store,
+		aud:     aud,
+		holder:  holder,
+		router:  r,
+		pstore:  pstore,
+		dataLn:  dataLn,
+		adminLn: adminLn,
+	}
+	// The gateway implements configapi.Writer (build-once-swap-once). Pass it as
+	// the write callback ONLY when a store is configured; nil → writes 405.
+	var writer configapi.Writer
+	if pstore != nil {
+		writer = g
+	}
+	g.dataSrv = &http.Server{Handler: server.DataMux(r, store, aud, gov, m)}
+	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder), auditFileSinks, aud, m, writer)}
+	return g, nil
+}
+
+// buildEffective resolves the effective config from the raw file config: with a
+// provider store it overlays the DB topology and resolves only those refs;
+// without one it resolves the file providers (== config.Load). Shared by boot
+// and reload so the topology source is consistent (ADR-008).
+func buildEffective(raw *config.Config, pstore providerstore.Store) (*config.Config, error) {
+	if pstore == nil {
+		if err := config.ResolveProviders(raw); err != nil {
+			return nil, err
+		}
+		return raw, nil
+	}
+	eff, err := providerstore.Overlay(raw, pstore)
+	if err != nil {
+		return nil, err
+	}
+	if err := config.ResolveProviders(eff); err != nil {
+		return nil, err
+	}
+	return eff, nil
+}
+
+// closeAll closes the partially-opened resources on a newGateway error path
+// (pstore may be nil).
+func closeAll(pstore providerstore.Store, store keystore.Store, aud *audit.Writer) {
+	if pstore != nil {
+		pstore.Close()
+	}
+	store.Close()
+	aud.Close()
 }
 
 // DataAddr is the bound data-plane address (host:port), valid once newGateway
@@ -168,11 +237,24 @@ func (g *gateway) AdminAddr() string { return g.adminLn.Addr().String() }
 // counters, keystore, audit writer, circuit breaker all persist; ADR-006).
 // Validate-then-swap: a config that fails to load/build leaves the current
 // generation serving and returns the error (fail-safe rollback). Serialized by
-// reloadMu so concurrent triggers never race.
+// reloadMu so concurrent SIGHUP triggers AND UI writes never race (ADR-008
+// gate C3 — reload and the write path funnel through the same mutex).
 func (g *gateway) reload() error {
 	g.reloadMu.Lock()
 	defer g.reloadMu.Unlock()
-	cfg, err := config.Load(g.cfgPath)
+	return g.reloadLocked()
+}
+
+// reloadLocked is the swap body; the caller MUST hold reloadMu. It exists so the
+// UI-write path can validate, persist, and swap under ONE lock acquisition
+// without a reentrant deadlock on reload() (ADR-008 gate C3). It rebuilds the
+// EFFECTIVE config (file + DB overlay) so SIGHUP picks up DB writes too.
+func (g *gateway) reloadLocked() error {
+	raw, err := config.LoadRaw(g.cfgPath)
+	if err != nil {
+		return fmt.Errorf("reload: %w", err)
+	}
+	cfg, err := buildEffective(raw, g.pstore)
 	if err != nil {
 		return fmt.Errorf("reload: %w", err)
 	}
@@ -183,6 +265,95 @@ func (g *gateway) reload() error {
 	g.holder.Swap(st)                   // one atomic publish — every reader flips together
 	g.router.RetainBreakers(identities) // drop breaker state for removed/re-pointed providers
 	return nil
+}
+
+// writeMutation is the build-once-swap-once core of the UI-write path (ADR-008
+// gates C2 + C3). Under reloadMu it: (1) builds a CANDIDATE effective topology
+// from the current store PLUS the pending mutation (in memory, not persisted)
+// and validates it via live.BuildState — on failure nothing is persisted and
+// ErrInvalidTopology is returned (→ 400); (2) persists the mutation; (3) swaps
+// the ALREADY-VALIDATED generation. The state published is byte-for-byte the one
+// validated, so the DB can never hold a row that fails to build.
+func (g *gateway) writeMutation(ctx context.Context, persist func(context.Context) error, mutate func(provs map[string]providerstore.ProviderRow, models map[string][]providerstore.Target)) error {
+	g.reloadMu.Lock()
+	defer g.reloadMu.Unlock()
+
+	raw, err := config.LoadRaw(g.cfgPath)
+	if err != nil {
+		return fmt.Errorf("%w: %v", configapi.ErrInvalidTopology, err)
+	}
+	provList, err := g.pstore.ListProviders(ctx)
+	if err != nil {
+		return err
+	}
+	models, err := g.pstore.ListModels(ctx)
+	if err != nil {
+		return err
+	}
+	provs := make(map[string]providerstore.ProviderRow, len(provList))
+	for _, p := range provList {
+		provs[p.Name] = p
+	}
+	mutate(provs, models) // apply the pending change in memory
+
+	provSlice := make([]providerstore.ProviderRow, 0, len(provs))
+	for _, p := range provs {
+		provSlice = append(provSlice, p)
+	}
+	eff := providerstore.OverlayFrom(raw, provSlice, models)
+	if err := config.ResolveProviders(eff); err != nil {
+		return fmt.Errorf("%w: %v", configapi.ErrInvalidTopology, err)
+	}
+	st, identities, err := live.BuildState(eff)
+	if err != nil {
+		return fmt.Errorf("%w: %v", configapi.ErrInvalidTopology, err)
+	}
+
+	// Validated — persist, then publish the validated generation.
+	if err := persist(ctx); err != nil {
+		return err // e.g. providerstore.ErrNotFound on DELETE → 404; nothing swapped
+	}
+	g.holder.Swap(st)
+	g.router.RetainBreakers(identities)
+	return nil
+}
+
+// WriteProvider / DeleteProvider / WriteModel / DeleteModel implement
+// configapi.Writer via writeMutation (ADR-008 T5).
+func (g *gateway) WriteProvider(ctx context.Context, row providerstore.ProviderRow) error {
+	return g.writeMutation(ctx,
+		func(ctx context.Context) error { return g.pstore.UpsertProvider(ctx, row) },
+		func(provs map[string]providerstore.ProviderRow, _ map[string][]providerstore.Target) {
+			provs[row.Name] = row
+		},
+	)
+}
+
+func (g *gateway) DeleteProvider(ctx context.Context, name string) error {
+	return g.writeMutation(ctx,
+		func(ctx context.Context) error { return g.pstore.DeleteProvider(ctx, name) },
+		func(provs map[string]providerstore.ProviderRow, _ map[string][]providerstore.Target) {
+			delete(provs, name)
+		},
+	)
+}
+
+func (g *gateway) WriteModel(ctx context.Context, name string, targets []providerstore.Target) error {
+	return g.writeMutation(ctx,
+		func(ctx context.Context) error { return g.pstore.SetModel(ctx, name, targets) },
+		func(_ map[string]providerstore.ProviderRow, models map[string][]providerstore.Target) {
+			models[name] = targets
+		},
+	)
+}
+
+func (g *gateway) DeleteModel(ctx context.Context, name string) error {
+	return g.writeMutation(ctx,
+		func(ctx context.Context) error { return g.pstore.DeleteModel(ctx, name) },
+		func(_ map[string]providerstore.ProviderRow, models map[string][]providerstore.Target) {
+			delete(models, name)
+		},
+	)
 }
 
 // reloadWorker serializes reload triggers (SIGHUP) on a single goroutine and
@@ -213,6 +384,9 @@ func (g *gateway) reloadWorker(ctx context.Context, trigger <-chan os.Signal, do
 func (g *gateway) serve(ctx context.Context) error {
 	defer g.store.Close()
 	defer g.aud.Close()
+	if g.pstore != nil {
+		defer g.pstore.Close()
+	}
 
 	// SIGHUP → hot reload, on one worker with a clean lifecycle: signal.Stop on
 	// exit, and wait for the worker to drain before serve returns (no leak).
