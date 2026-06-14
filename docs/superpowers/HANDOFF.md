@@ -89,15 +89,35 @@ Panel reality on this machine:
 
 ## Remaining roadmap (suggested order)
 
-1. **UI-write provider registration (Stage 2)** — the decided design:
-   **DB-authoritative source of truth, Git export** (ADR-005/006 deferred this).
-   Builds on the hot-reload `reload()` + `live.Holder`: a write endpoint
-   (`POST/PUT /admin/config` or `/admin/providers`) persists to a DB store, then
-   triggers the SAME `reload()`. **Secrets never enter the gateway** — the UI
-   registers WHICH ref a provider uses (env var name / file path), not the
-   value; guide the operator to set it in their platform secret store. Needs a
-   new ADR for the DB store + write contract + how it reconciles with the file
-   config (DB authoritative, file/Git as export). This is the largest item.
+1. **UI-write provider registration (Stage 2)** — **BACKEND DONE** (ADR-008,
+   2026-06-14). Shipped behind a 2-round P2 design gate + 2-round P4 code gate
+   (codex+gemini; kiro skips — its CLI ignores piped stdin). Commits `a6be00f`
+   (T0) → `1fa4dcc` (T9 docs), all on `main`, 28→? pkg green under `-race`.
+   - `internal/providerstore` — opt-in SQLite store (`provider_store` config
+     block): `providers` (refs only, **no secret column**), `model_targets`,
+     `meta` (durable `seeded` marker, NOT row count → deleting all providers
+     never resurrects the file topology). `Overlay`/`OverlayFrom` build the
+     effective config (file + DB topology), `SeedIfEmpty` one-time file→DB import
+     (validates ref shape first).
+   - `config.LoadRaw`/`ResolveProviders` split — file providers are parsed but
+     NOT resolved when a store is authoritative (G1 boot-crash fix);
+     `config.ValidateSecretRef` is the shared ref-shape guard (env name charset /
+     absolute file path / not-both) used by BOTH the write path and the seed.
+   - Write path: `PUT`/`DELETE /admin/providers/{name}` + `/admin/models/{name}`
+     (`configapi.WriteHandler`, behind AdminAuth; 405 when no store). The
+     assembly (`cmd/inferplane` gateway `writeMutation`) is **build-once-swap-
+     once** under ONE `reloadMu` (split `reload()`/`reloadLocked()`): build the
+     candidate `live.State`, validate, persist, swap the validated state.
+     Invalid topology → fixed sanitized 400 (detail logged server-side, never
+     echoes a ref). Secret-free admin audit events (`provider_*`/`model_route_*`).
+   - `GET /admin/config/export` — secret-free Git export (`ProviderConfig.APIKey`
+     is `json:"-"`), mounted unconditionally.
+   - **STILL TODO — T8 console write UI** (deferred this session per user): add
+     register/edit/delete provider + model-route forms to the `internal/server/
+     adminui/` Providers tab, CSP `default-src 'self'` (no inline handlers, DOM-
+     set values, token in JS memory), collecting the REF name + showing the
+     out-of-band secret-store step. Plan task T8 in
+     `docs/superpowers/plans/2026-06-14-ui-write-provider-registration.md`.
 2. **PII masking plugin (#4)** — opt-in, with explicit cache-destruction +
    cost-increase warning (per spec; honest trade-off vs silent-masking rivals).
 3. **S3 Object Lock audit anchoring (#5)** — upgrades tamper-EVIDENT → tamper-
