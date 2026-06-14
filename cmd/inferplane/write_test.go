@@ -168,3 +168,26 @@ func TestProviderStoreUnsupportedType(t *testing.T) {
 		t.Fatal("unsupported provider_store.type must be rejected at boot")
 	}
 }
+
+// TestOTelInitNonFatal pins ADR-011 T4: an otel block pointing at an unreachable
+// collector must NOT fail boot (tracing is best-effort, exporter connects lazily).
+func TestOTelInitNonFatal(t *testing.T) {
+	t.Setenv("E2E_ADMIN_TOKEN", e2eAdminToken)
+	dir := t.TempDir()
+	cfgPath := dir + "/config.json"
+	rewriteConfig(t, cfgPath, `{
+	  "server": {"listen":"127.0.0.1:0","admin_listen":"127.0.0.1:0","admin_auth":{"token_refs":[{"env":"E2E_ADMIN_TOKEN"}]}},
+	  "key_store":{"type":"sqlite","path":"`+dir+`/keys.db"},
+	  "audit":{"buffer":{"path":"`+dir+`/audit.wal"},"sinks":[{"type":"stdout"}]},
+	  "otel":{"endpoint":"127.0.0.1:1","protocol":"http","insecure":true}
+	}`)
+	g, err := newGateway(cfgPath)
+	if err != nil {
+		t.Fatalf("otel config with unreachable collector must not fail boot: %v", err)
+	}
+	if g.otelDown == nil {
+		t.Fatal("otelDown should be set when otel is configured")
+	}
+	g.store.Close()
+	g.aud.Close()
+}

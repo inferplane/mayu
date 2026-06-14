@@ -26,6 +26,7 @@ import (
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/internal/server"
 	"github.com/inferplane/inferplane/internal/server/configapi"
+	"github.com/inferplane/inferplane/internal/tracing"
 	"github.com/inferplane/inferplane/pkg/ulid"
 )
 
@@ -39,8 +40,9 @@ type gateway struct {
 	aud      *audit.Writer
 	holder   *live.Holder
 	router   *router.Router
-	pstore   providerstore.Store // nil unless provider_store is configured (ADR-008)
-	reloadMu sync.Mutex          // serializes reloads AND UI writes (concurrent SIGHUPs/triggers)
+	pstore   providerstore.Store         // nil unless provider_store is configured (ADR-008)
+	otelDown func(context.Context) error // OTel TracerProvider shutdown (nil unless otel configured, ADR-011)
+	reloadMu sync.Mutex                  // serializes reloads AND UI writes (concurrent SIGHUPs/triggers)
 	dataLn   net.Listener
 	adminLn  net.Listener
 	dataSrv  *http.Server
@@ -189,16 +191,31 @@ func newGateway(cfgPath string) (*gateway, error) {
 		return nil, err
 	}
 
+	// OpenTelemetry tracing (ADR-011): opt-in. Init failure is NON-FATAL — tracing
+	// is best-effort observability and must never block boot; the exporter
+	// connects lazily so an unreachable collector at boot is fine.
+	var otelDown func(context.Context) error
+	if cfg.OTel != nil {
+		sd, terr := tracing.Init(context.Background(), tracingConfig(cfg.OTel))
+		if terr != nil {
+			fmt.Fprintln(os.Stderr, "inferplane: otel init failed (tracing disabled):", terr)
+		} else {
+			otelDown = sd
+			fmt.Println("inferplane: otel tracing enabled →", cfg.OTel.Endpoint)
+		}
+	}
+
 	g := &gateway{
-		cfgPath: cfgPath,
-		cfg:     cfg,
-		store:   store,
-		aud:     aud,
-		holder:  holder,
-		router:  r,
-		pstore:  pstore,
-		dataLn:  dataLn,
-		adminLn: adminLn,
+		cfgPath:  cfgPath,
+		cfg:      cfg,
+		store:    store,
+		aud:      aud,
+		holder:   holder,
+		router:   r,
+		pstore:   pstore,
+		otelDown: otelDown,
+		dataLn:   dataLn,
+		adminLn:  adminLn,
 	}
 	// The gateway implements configapi.Writer (build-once-swap-once). Pass it as
 	// the write callback ONLY when a store is configured; nil → writes 405.
@@ -259,6 +276,18 @@ func buildMasking(cfg *config.Config) (*filter.Masking, error) {
 		fmt.Fprintf(os.Stderr, "inferplane: plugin %q enabled (%s) — WARNING: masked traffic re-serializes the body, abandoning verbatim forwarding, so prompt-cache hits are lost (up to ~10x cost); this is opt-in by design (ADR-009)\n", pc.Name, scope)
 	}
 	return masking, nil
+}
+
+// tracingConfig maps the file config block to the tracing package's mirror type
+// (tracing imports no config — ADR-011 gate).
+func tracingConfig(o *config.OTelConfig) tracing.Config {
+	return tracing.Config{
+		Endpoint:    o.Endpoint,
+		Protocol:    o.Protocol,
+		Insecure:    o.Insecure,
+		SampleRatio: o.SampleRatio,
+		ServiceName: o.ServiceName,
+	}
 }
 
 // closeAll closes the partially-opened resources on a newGateway error path
@@ -436,6 +465,17 @@ func (g *gateway) serve(ctx context.Context) error {
 	defer g.aud.Close()
 	if g.pstore != nil {
 		defer g.pstore.Close()
+	}
+	if g.otelDown != nil {
+		// Flush spans on teardown under a bounded timeout; errors are logged, never
+		// fatal (ADR-011 — tracing is best-effort, off the critical path).
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := g.otelDown(ctx); err != nil {
+				fmt.Fprintln(os.Stderr, "inferplane: otel shutdown:", err)
+			}
+		}()
 	}
 
 	// SIGHUP → hot reload, on one worker with a clean lifecycle: signal.Stop on
