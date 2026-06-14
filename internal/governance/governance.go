@@ -113,6 +113,9 @@ func (g *Governor) Settle(team, provider, model string, u pricing.Usage, table *
 	p := g.teams[team]
 	if p.TokensPerDay > 0 {
 		g.lim.DebitQuota("quota:"+team, u.Input+u.Output, 24*time.Hour)
+		// Reflect the post-debit daily quota utilization into the gauge (0..1).
+		used := g.lim.QuotaUsed("quota:"+team, 24*time.Hour)
+		g.metrics.SetQuotaUtilization(team, "day", float64(used)/float64(p.TokensPerDay))
 	}
 	if table == nil {
 		costMicros, pricingMissing = 0, true

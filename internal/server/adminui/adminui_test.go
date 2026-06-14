@@ -80,3 +80,25 @@ func TestUnknownPath404(t *testing.T) {
 		t.Fatalf("GET /nope.txt: status %d, want 404", resp.StatusCode)
 	}
 }
+
+// TestGovernanceTabCSPAndAuth pins the V3 invariants: the new Governance tab
+// adds no inline style/handler attributes (CSP default-src 'self') and the
+// verify button goes through the token-gated api() helper, never a bare
+// unauthenticated fetch to /admin/audit/verify.
+func TestGovernanceTabCSPAndAuth(t *testing.T) {
+	_, html := get(t, "/")
+	for _, banned := range []string{"onclick=", "style=", "onload="} {
+		if strings.Contains(html, banned) {
+			t.Errorf("index.html contains inline %q (CSP default-src 'self' bans it)", banned)
+		}
+	}
+	_, js := get(t, "/app.js")
+	// the verify handler must call api("GET", "/admin/audit/verify") — the
+	// token-gated path — not a raw fetch to it.
+	if !strings.Contains(js, `api("GET", "/admin/audit/verify")`) {
+		t.Fatal("verify button must use the token-gated api() helper")
+	}
+	if strings.Contains(js, `fetch("/admin/audit/verify")`) {
+		t.Fatal("verify button must NOT bare-fetch /admin/audit/verify (would be unauthenticated)")
+	}
+}

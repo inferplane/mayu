@@ -26,6 +26,9 @@ type LimiterStore interface {
 	CheckQuota(key string, estimate, limit int64, window time.Duration) Decision
 	// DebitQuota records actual usage in the current window.
 	DebitQuota(key string, actual int64, window time.Duration)
+	// QuotaUsed reports tokens used in the current window (0 if none) — for the
+	// quota-utilization observability gauge.
+	QuotaUsed(key string, window time.Duration) int64
 }
 
 type bucket struct {
@@ -93,6 +96,13 @@ func (m *Memory) DebitQuota(key string, actual int64, window time.Duration) {
 	defer m.mu.Unlock()
 	q := m.curWindow(key, window)
 	q.used += actual
+}
+
+// QuotaUsed reports tokens used in the current window (0 if none/elapsed).
+func (m *Memory) QuotaUsed(key string, window time.Duration) int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.curWindow(key, window).used
 }
 
 // curWindow returns the live window for key, resetting if elapsed. Caller holds mu.

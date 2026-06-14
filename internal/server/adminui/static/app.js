@@ -24,7 +24,7 @@ async function api(method, path, body) {
 
 /* ---------- views ---------- */
 
-const VIEWS = { overview: "Overview", keys: "Virtual keys", providers: "Providers", quickstart: "Quickstart" };
+const VIEWS = { overview: "Overview", keys: "Virtual keys", providers: "Providers", governance: "Governance", quickstart: "Quickstart" };
 
 function showView(name) {
   for (const v of Object.keys(VIEWS)) $("view-" + v).hidden = v !== name;
@@ -33,6 +33,7 @@ function showView(name) {
   $("view-title").textContent = VIEWS[name];
   if (name === "overview") refreshOverview();
   if (name === "providers") refreshProviders();
+  if (name === "governance") refreshGovernance();
 }
 
 document.querySelectorAll("[data-view]").forEach((b) =>
@@ -270,6 +271,113 @@ document.querySelectorAll(".copy-snippet").forEach((b) =>
   b.addEventListener("click", async () => {
     await navigator.clipboard.writeText($(b.dataset.target).textContent);
   }));
+
+
+/* ---------- governance (quota gauges, budget spend, audit verify) ---------- */
+
+// parseLabeled returns [{labels:{...}, value}] for every sample of metricName.
+function parseLabeled(text, metricName) {
+  const out = [];
+  for (const line of text.split("\n")) {
+    if (!line.startsWith(metricName + "{")) continue;
+    const m = line.match(/\{(.*)\}\s+([0-9.eE+-]+)\s*$/);
+    if (!m) continue;
+    const labels = {};
+    for (const kv of m[1].match(/(\w+)="([^"]*)"/g) || []) {
+      const mm = kv.match(/(\w+)="([^"]*)"/);
+      labels[mm[1]] = mm[2];
+    }
+    out.push({ labels, value: Number(m[2]) });
+  }
+  return out;
+}
+
+async function refreshGovernance() {
+  let text = "";
+  try {
+    text = await (await fetch("/metrics")).text();
+  } catch {
+    return;
+  }
+  // quota utilization ratio gauge (team, window)
+  const qbody = $("quota-table").querySelector("tbody");
+  qbody.textContent = "";
+  const quota = parseLabeled(text, "inferplane_quota_utilization_ratio");
+  if (!quota.length) {
+    qbody.appendChild(emptyRow(3, "no quota utilization reported yet"));
+  } else {
+    for (const q of quota.sort((a, b) => (a.labels.team || "").localeCompare(b.labels.team || ""))) {
+      const tr = document.createElement("tr");
+      tr.appendChild(td(q.labels.team || ""));
+      tr.appendChild(td(q.labels.window || ""));
+      const cell = document.createElement("td");
+      const pct = Math.max(0, Math.min(1, q.value)) * 100;
+      const bar = document.createElement("div");
+      bar.className = "bar";
+      const fill = document.createElement("div");
+      fill.className = "bar-fill";
+      fill.style.width = pct.toFixed(0) + "%"; // width % is dynamic data, set via JS (CSP: no inline style attr in HTML)
+      bar.appendChild(fill);
+      cell.appendChild(bar);
+      const label = document.createElement("span");
+      label.className = "bar-label";
+      label.textContent = pct.toFixed(0) + "%";
+      cell.appendChild(label);
+      tr.appendChild(cell);
+      qbody.appendChild(tr);
+    }
+  }
+  // budget spend — CUMULATIVE counter since process start (honest label).
+  const sbody = $("spend-table").querySelector("tbody");
+  sbody.textContent = "";
+  const spend = {};
+  for (const s of parseLabeled(text, "inferplane_budget_spend_usd_total")) {
+    const team = s.labels.team || "";
+    spend[team] = (spend[team] || 0) + s.value;
+  }
+  const teams = Object.keys(spend).sort();
+  if (!teams.length) {
+    sbody.appendChild(emptyRow(2, "no spend reported yet"));
+  } else {
+    for (const team of teams) {
+      const tr = document.createElement("tr");
+      tr.appendChild(td(team));
+      tr.appendChild(td("$" + spend[team].toFixed(6)));
+      sbody.appendChild(tr);
+    }
+  }
+}
+
+// Verify the audit chain via the token-gated admin API (NOT a bare fetch — it
+// goes through api() so it carries the in-memory admin token and handles 401).
+$("verify-audit").addEventListener("click", async () => {
+  const box = $("verify-result");
+  box.textContent = "verifying…";
+  box.className = "";
+  try {
+    const out = await api("GET", "/admin/audit/verify");
+    const sinks = out.sinks || [];
+    if (!sinks.length) {
+      box.textContent = "no file audit sink configured (stdout-only deployment)";
+      return;
+    }
+    box.textContent = "";
+    for (const s of sinks) {
+      const line = document.createElement("div");
+      line.className = "verify-line " + (s.ok ? "ok" : "err");
+      if (s.ok) {
+        line.textContent = "✓ " + s.path + " — chain OK (" + (s.records || 0) + " records)" +
+          (s.partial_tail ? " [complete prefix; trailing partial line ignored]" : "");
+      } else {
+        line.textContent = "✗ " + s.path + " — " + (s.broken_at ? "BROKEN at record " + s.broken_at : (s.reason || "not OK"));
+      }
+      box.appendChild(line);
+    }
+  } catch (err) {
+    box.className = "status err";
+    box.textContent = String(err.message || err);
+  }
+});
 
 /* ---------- session ---------- */
 

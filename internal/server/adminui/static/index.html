@@ -36,6 +36,7 @@
         <button class="nav active" data-view="overview">⌂&ensp;Overview</button>
         <button class="nav" data-view="keys">⚿&ensp;Virtual keys</button>
         <button class="nav" data-view="providers">⇄&ensp;Providers</button>
+        <button class="nav" data-view="governance">◷&ensp;Governance</button>
         <button class="nav" data-view="quickstart">▸&ensp;Quickstart</button>
       </nav>
       <div class="side-foot">
@@ -172,6 +173,40 @@
           <p class="hint">Reload the gateway to apply (config is loaded at boot;
             UI-write is a planned stage 2). Set the referenced secret in your
             platform's secret store — never inline.</p>
+        </div>
+      </section>
+
+      <!-- ===== governance ===== -->
+      <section id="view-governance" class="view" hidden>
+        <p class="hint">Per-team enforcement, read live from <code>/metrics</code>.
+          Quota utilization is a ratio gauge; budget spend is a cumulative
+          counter since process start (not a utilization gauge — a true budget
+          gauge needs the configured limit). <span class="ko">팀별 집행 현황을
+          /metrics에서 실시간으로 읽습니다. 쿼터는 비율 게이지, 예산 지출은
+          프로세스 시작 이후 누적 카운터입니다.</span></p>
+
+        <div class="card">
+          <div class="microlabel">quota utilization · per team / window</div>
+          <table class="data" id="quota-table">
+            <thead><tr><th>team</th><th>window</th><th>utilization</th></tr></thead>
+            <tbody><tr><td colspan="3" class="empty">connect to load…</td></tr></tbody>
+          </table>
+        </div>
+
+        <div class="card">
+          <div class="microlabel">budget spend · cumulative since start</div>
+          <table class="data" id="spend-table">
+            <thead><tr><th>team</th><th>spend (USD, cumulative)</th></tr></thead>
+            <tbody><tr><td colspan="2" class="empty">connect to load…</td></tr></tbody>
+          </table>
+        </div>
+
+        <div class="card">
+          <div class="microlabel">audit integrity</div>
+          <p class="hint">Verify the tamper-evident hash chain of each file
+            sink, on demand.</p>
+          <button id="verify-audit" type="button">VERIFY CHAIN</button>
+          <div id="verify-result"></div>
         </div>
       </section>
 

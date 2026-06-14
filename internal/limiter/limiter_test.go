@@ -62,3 +62,15 @@ func TestQuotaWindowResets(t *testing.T) {
 		t.Fatal("after window reset, should allow")
 	}
 }
+
+func TestQuotaUsedReportsCurrentWindow(t *testing.T) {
+	m := NewMemory()
+	if u := m.QuotaUsed("q:t", time.Hour); u != 0 {
+		t.Fatalf("fresh QuotaUsed = %d, want 0", u)
+	}
+	m.DebitQuota("q:t", 300, time.Hour)
+	m.DebitQuota("q:t", 200, time.Hour)
+	if u := m.QuotaUsed("q:t", time.Hour); u != 500 {
+		t.Fatalf("QuotaUsed = %d, want 500", u)
+	}
+}
