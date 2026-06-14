@@ -368,3 +368,49 @@ func TestPluginsAbsentNil(t *testing.T) {
 		t.Fatalf("plugins should be nil when absent, got %+v", cfg.Plugins)
 	}
 }
+
+// --- T1: otel block (ADR-011) ---
+
+func TestOTelBlockParsesAndValidates(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		os.WriteFile(p, []byte(body), 0o600)
+		return p
+	}
+	// valid
+	cfg, err := Load(write("ok.json", `{"otel":{"endpoint":"c:4318","protocol":"http","sample_ratio":0.25}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.OTel == nil || cfg.OTel.Endpoint != "c:4318" || cfg.OTel.SampleRatio == nil || *cfg.OTel.SampleRatio != 0.25 {
+		t.Fatalf("otel parse wrong: %+v", cfg.OTel)
+	}
+	// explicit 0.0 preserved (≠ unset)
+	cfg0, _ := Load(write("z.json", `{"otel":{"endpoint":"c","sample_ratio":0.0}}`))
+	if cfg0.OTel.SampleRatio == nil || *cfg0.OTel.SampleRatio != 0 {
+		t.Fatalf("explicit 0.0 not preserved: %+v", cfg0.OTel)
+	}
+	// unset ratio → nil pointer (assembly defaults to 1.0)
+	cfgN, _ := Load(write("n.json", `{"otel":{"endpoint":"c"}}`))
+	if cfgN.OTel.SampleRatio != nil {
+		t.Fatalf("unset ratio should be nil, got %v", *cfgN.OTel.SampleRatio)
+	}
+	// absent → nil
+	cfgA, _ := Load(write("a.json", `{"providers":{}}`))
+	if cfgA.OTel != nil {
+		t.Fatalf("otel should be nil when absent")
+	}
+	// endpoint missing → error
+	if _, err := Load(write("noep.json", `{"otel":{"protocol":"http"}}`)); err == nil {
+		t.Fatal("otel without endpoint must be rejected")
+	}
+	// bad protocol → error
+	if _, err := Load(write("badproto.json", `{"otel":{"endpoint":"c","protocol":"thrift"}}`)); err == nil {
+		t.Fatal("bad otel.protocol must be rejected")
+	}
+	// ratio out of range → error
+	if _, err := Load(write("badratio.json", `{"otel":{"endpoint":"c","sample_ratio":2.0}}`)); err == nil {
+		t.Fatal("sample_ratio>1 must be rejected")
+	}
+}

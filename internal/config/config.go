@@ -215,6 +215,18 @@ type PluginConfig struct {
 	Teams []string `json:"teams,omitempty"`
 }
 
+// OTelConfig enables opt-in OpenTelemetry tracing (ADR-011). Absent (nil) →
+// no tracer installed (no-op, zero overhead). SampleRatio is a NULLABLE pointer:
+// nil → 1.0 (sample all), explicit 0.0 → sample none (the two are
+// distinguishable); validated to [0,1]. Protocol is "http" (default) or "grpc".
+type OTelConfig struct {
+	Endpoint    string   `json:"endpoint"`
+	Protocol    string   `json:"protocol,omitempty"`
+	Insecure    bool     `json:"insecure,omitempty"`
+	SampleRatio *float64 `json:"sample_ratio,omitempty"`
+	ServiceName string   `json:"service_name,omitempty"`
+}
+
 type Config struct {
 	Server        ServerConfig              `json:"server"`
 	Providers     map[string]ProviderConfig `json:"providers"`
@@ -225,6 +237,7 @@ type Config struct {
 	Teams         map[string]TeamConfig     `json:"teams"`
 	Pricing       PricingConfig             `json:"pricing"`
 	Plugins       []PluginConfig            `json:"plugins,omitempty"`
+	OTel          *OTelConfig               `json:"otel,omitempty"`
 }
 
 // Load parses the config and resolves every secret ref — the back-compat entry
@@ -280,7 +293,31 @@ func LoadRaw(path string) (*Config, error) {
 	if err := validateOIDC(&cfg.Server.AdminAuth); err != nil {
 		return nil, err
 	}
+	if err := validateOTel(cfg.OTel); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+// validateOTel checks the opt-in tracing block (ADR-011): endpoint is required,
+// protocol must be http/grpc (empty = http), and sample_ratio (when set) must be
+// in [0,1]. nil block (tracing off) is valid.
+func validateOTel(o *OTelConfig) error {
+	if o == nil {
+		return nil
+	}
+	if o.Endpoint == "" {
+		return fmt.Errorf("config: otel.endpoint is required when the otel block is present")
+	}
+	switch o.Protocol {
+	case "", "http", "grpc":
+	default:
+		return fmt.Errorf("config: otel.protocol must be \"http\" or \"grpc\", got %q", o.Protocol)
+	}
+	if o.SampleRatio != nil && (*o.SampleRatio < 0 || *o.SampleRatio > 1) {
+		return fmt.Errorf("config: otel.sample_ratio must be in [0,1], got %v", *o.SampleRatio)
+	}
+	return nil
 }
 
 // ResolveProviders resolves every provider's secret ref into ProviderConfig.APIKey,
