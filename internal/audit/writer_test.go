@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestWriterChainsPrevHash(t *testing.T) {
@@ -147,4 +148,57 @@ func splitLines(s string) []string {
 		}
 	}
 	return out
+}
+
+// TestHeadHashAdvances pins the ADR-012 chain-head snapshot: genesis before any
+// record, then advancing hash + count after each durable Append.
+func TestHeadHashAdvances(t *testing.T) {
+	dir := t.TempDir()
+	w, err := NewWriter("inst-1", dir+"/a.wal", []Sink{NewStdoutSink()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if h, c := w.HeadHash(); h != genesisHash || c != 0 {
+		t.Fatalf("pre-append head = %q,%d want genesis,0", h, c)
+	}
+	w.Append(Record{SchemaVersion: 1, Event: "request_started", ID: "1", TS: "t"})
+	w.Append(Record{SchemaVersion: 1, Event: "request_completed", ID: "2", TS: "t"})
+	// poll until both records drained (single writer goroutine)
+	var h string
+	var c int64
+	for i := 0; i < 200; i++ {
+		h, c = w.HeadHash()
+		if c == 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if c != 2 || h == genesisHash {
+		t.Fatalf("after 2 appends head = %q,%d want advanced count 2", h, c)
+	}
+}
+
+// TestHeadHashRaceClean reads the head concurrently with heavy appends (run
+// under -race): the single-atomic snapshot must never tear.
+func TestHeadHashRaceClean(t *testing.T) {
+	dir := t.TempDir()
+	w, err := NewWriter("inst-1", dir+"/a.wal", []Sink{NewStdoutSink()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 500; i++ {
+			h, c := w.HeadHash()
+			_ = h
+			_ = c
+		}
+		close(done)
+	}()
+	for i := 0; i < 500; i++ {
+		w.Append(Record{SchemaVersion: 1, Event: "e", ID: "x", TS: "t"})
+	}
+	<-done
 }

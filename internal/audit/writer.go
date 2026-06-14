@@ -3,11 +3,19 @@ package audit
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"sync/atomic"
 
 	"github.com/inferplane/inferplane/internal/metrics"
 )
 
 const genesisHash = "sha256:genesis"
+
+// chainHead is the immutable {head hash, record count} snapshot published as ONE
+// atomic value (ADR-012) so HeadHash() can never return a torn hash/count mix.
+type chainHead struct {
+	hash  string
+	count int64
+}
 
 // Writer is the SINGLE writer goroutine for the audit chain. Handlers enqueue
 // records via Append (non-blocking); the goroutine assigns prev_hash, persists
@@ -21,7 +29,20 @@ type Writer struct {
 	sinks    []Sink
 	prevHash string
 	pending  int
-	metrics  *metrics.Metrics // nil-safe: no-op when nil
+	count    int64                     // records written (loop-local; published via head)
+	head     atomic.Pointer[chainHead] // race-safe chain-head snapshot for anchoring (ADR-012)
+	metrics  *metrics.Metrics          // nil-safe: no-op when nil
+}
+
+// HeadHash returns a race-safe snapshot of the current chain head (the last
+// durably-written record's hash) and the number of records written. Before the
+// first record it is (genesis, 0). Used by the audit anchor worker (ADR-012).
+func (w *Writer) HeadHash() (string, int64) {
+	h := w.head.Load()
+	if h == nil {
+		return genesisHash, 0
+	}
+	return h.hash, h.count
 }
 
 // SetMetrics attaches the Prometheus metrics sink. On a required-sink write
@@ -68,6 +89,10 @@ func (w *Writer) loop() {
 		// record in the WAL for replay (buffer_then_block; §5.4).
 		_ = w.wal.Append(canon)
 		w.pending++ // records persisted to the WAL, not yet confirmed delivered
+		// Publish the chain head ONLY after the record is durable (ADR-012): an
+		// anchor must never witness a hash for a record a crash could lose.
+		w.count++
+		w.head.Store(&chainHead{hash: w.prevHash, count: w.count})
 		flushedAll := true
 		for _, s := range w.sinks {
 			if err := s.Write(canon); err != nil {
