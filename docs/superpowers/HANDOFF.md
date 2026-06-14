@@ -158,10 +158,19 @@ Panel reality on this machine:
    IAM). 3-family P2 + P4 gate. aws-sdk-go-v2/service/s3 added (pure-Go). E2E
    needs real AWS S3 (verified offline via a stub S3 client).
 
-### Still remaining
-4. **Multi-replica HA** — Postgres key store, Redis/Valkey quota store +
-   distributed rate limit. LARGE; needs Postgres/Redis for live verification —
-   recommend interface/migration DESIGN only in this environment.
+### Roadmap status — ALL ITEMS ADDRESSED
+4. **Multi-replica HA — DESIGN DONE, implementation deferred** (ADR-013,
+   `ecc4cb5`). Design: Postgres (keystore + providerstore) + Redis/Valkey
+   (quota/budget/rate) behind the existing interfaces; zero-dep SQLite/in-memory
+   stays the default. 3-family design gate refined it: atomic reserve/settle-
+   delta/rollback counter contract (over-spend race), cross-replica topology
+   invalidation (LISTEN/NOTIFY + generation) + optimistic-lock, HA state
+   inventory (breaker/JWKS intentionally instance-local), Redis server-clock/
+   integer/retry, secret-ref hardening, audit segment-collection, Redis-fail-
+   closed. **Implementation needs a Postgres+Redis env** (none here) — pick this
+   up there; an implementation ADR supersedes the design ADR.
 
-Start the next session by picking a remaining item and running
-`/co-agent:consensus` to plan → gate → implement it.
+All five roadmap items are now done (1,2,3,5 implemented + gated; 4 designed +
+gated, implementation deferred to a PG/Redis env). ADRs 008–013. ~46 commits on
+`main` since v0.2.0, all local (never pushed). Next session: implement #4 in a
+PG/Redis env, or cut a v0.3.0 release (push/tag/CHANGELOG) — operator decision.
