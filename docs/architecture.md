@@ -140,6 +140,15 @@ Client -> KeyAuth(RBAC) -> Governor.PreCheck -> Router(fallback+breaker) -> Prov
   error rejects, never forwards unmasked; the OpenAI ingress refuses masked teams
   in v1). A new filter = one package under `plugins/` + one blank import.
 
+- **Opt-in OpenTelemetry tracing (`internal/tracing`, ADR-011)** -- a configured
+  `otel` block installs an OTLP exporter (http/grpc) + GenAI-semconv spans on the
+  generative endpoints + W3C trace-context propagation (joins the client trace,
+  correlates the upstream call) + `trace_id` in the audit chain. **No-op by
+  default** (no `otel` → no spans, deps inert, request path byte-identical). One
+  span per request owned across the fallback loop (`defer End`, error-only-on-
+  terminal); best-effort — never on the critical path. Pure-Go, exports to the
+  operator's own collector (no SaaS).
+
 ## Key Design Decisions
 
 - **Canonical schema = Anthropic-superset, not OpenAI** -- preserves thinking blocks and `cache_control` that the OpenAI shape cannot represent; same-protocol round-trips stay lossless.

@@ -19,5 +19,7 @@
     "claude-sonnet-4-6-bedrock": { "targets": [ { "provider": "bedrock-us", "model": "anthropic.claude-sonnet-4-6-v1:0", "api": "invoke_model" } ] }
   },
   "_comment_plugins": "OPT-IN PII masking (ADR-009). WARNING: masking re-serializes the request body, abandoning verbatim forwarding, so prompt-cache hits are LOST for masked teams (up to ~10x cost). Omit Teams for global. Masked teams are rejected on the OpenAI-compatible endpoint in v1. Uncomment to enable:",
-  "_plugins_example": [ { "name": "pii-mask", "teams": [ "regulated-team" ] } ]
+  "_plugins_example": [ { "name": "pii-mask", "teams": [ "regulated-team" ] } ],
+  "_comment_otel": "OPT-IN OpenTelemetry tracing (ADR-011). Exports OTLP spans (GenAI semconv) to your own collector; no-op when absent. protocol http|grpc; sample_ratio omitted = 1.0, explicit 0.0 = none. Rename to \"otel\" to enable:",
+  "_otel_example": { "endpoint": "otel-collector:4318", "protocol": "http", "insecure": true, "sample_ratio": 1.0, "service_name": "inferplane" }
 }
