@@ -142,12 +142,20 @@ Panel reality on this machine:
    `inferplane_pii_mask_redactions_total{team}` + audit `pii_masked` (bool only).
    2-round design gate (2 CRITICAL R1 + 1 CRITICAL R2) + P4 code gate, all
    gemini+kiro (codex empty-streamed all session — a codex-CLI issue on this box).
-3. **S3 Object Lock audit anchoring (#5)** — upgrades tamper-EVIDENT → tamper-
-   RESISTANT; periodic external anchoring of the hash chain.
-4. **Multi-replica HA** — Postgres key store, Redis/Valkey quota store +
-   distributed rate limit (summed enforcement across replicas).
-5. **OTel trace spans** (v0.2 GenAI conventions) and the **self-service key
-   page** (OIDC login → issue my own key) on the existing console.
+5. **OTel trace spans + self-service key page — DONE** (ADR-010 self-service:
+   `GET /admin/whoami` + console team-scoped issuance; ADR-011 OTel: opt-in OTLP
+   exporter + GenAI-semconv spans + W3C propagation + audit `trace_id`, no-op
+   default, `internal/tracing` + `internal/filter`-style seam). Each behind a
+   3-family P2 + P4 gate. OTel deps added (go.opentelemetry.io/otel v1.44,
+   pure-Go; CGO=0 build still green).
 
-Start the next session by picking item 1 (or whichever the user names) and
-running `/co-agent:consensus` to plan → gate → implement it.
+### Still remaining
+3. **S3 Object Lock audit anchoring** — tamper-EVIDENT → tamper-RESISTANT;
+   periodic external anchoring of the hash chain. Implementable behind an
+   interface + fake for unit tests; true E2E needs real AWS S3.
+4. **Multi-replica HA** — Postgres key store, Redis/Valkey quota store +
+   distributed rate limit. LARGE; needs Postgres/Redis for live verification —
+   recommend interface/migration DESIGN only in this environment.
+
+Start the next session by picking a remaining item and running
+`/co-agent:consensus` to plan → gate → implement it.
