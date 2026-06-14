@@ -93,6 +93,7 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// per-key model allow-list BEFORE resolving/forwarding (§3.1, §5.1).
 	p, ok := principal.From(req.Context())
 	if !ok {
+		tracing.SetStatus(span, false, "no principal")
 		writeErr(w, 401, "authentication_error", "no principal")
 		return
 	}
@@ -101,6 +102,7 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		h.audit(p, parsed.Model, "", &audit.OutcomeRef{Status: 403}, false, traceID)
 		// Pre-resolution reject: model is still attacker-controlled → sentinel label.
 		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 403, time.Since(start).Seconds(), 0)
+		tracing.SetStatus(span, false, "model not allowed")
 		writeErr(w, 403, "permission_error", "model not allowed for this key: "+parsed.Model)
 		return
 	}
@@ -111,6 +113,7 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		h.audit(p, parsed.Model, "", &audit.OutcomeRef{Status: 404}, false, traceID)
 		// Pre-resolution reject: model is still attacker-controlled → sentinel label.
 		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 404, time.Since(start).Seconds(), 0)
+		tracing.SetStatus(span, false, "unknown model")
 		writeErr(w, 404, "not_found_error", "unknown model: "+parsed.Model)
 		return
 	}
@@ -125,6 +128,7 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		if err != nil {
 			h.audit(p, parsed.Model, chain[0].Upstream, &audit.OutcomeRef{Status: 400}, false, traceID)
 			h.metrics.ObserveRequest(ingressName, parsed.Model, chain[0].ProviderName, p.Team, 400, time.Since(start).Seconds(), 0)
+			tracing.SetStatus(span, false, "pii mask failed")
 			writeErr(w, 400, "invalid_request_error", "request could not be PII-masked")
 			return
 		}
@@ -133,6 +137,7 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			if err := json.Unmarshal(masked, &reparsed); err != nil {
 				h.audit(p, parsed.Model, chain[0].Upstream, &audit.OutcomeRef{Status: 400}, false, traceID)
 				h.metrics.ObserveRequest(ingressName, parsed.Model, chain[0].ProviderName, p.Team, 400, time.Since(start).Seconds(), 0)
+				tracing.SetStatus(span, false, "pii mask failed")
 				writeErr(w, 400, "invalid_request_error", "request could not be PII-masked")
 				return
 			}
@@ -152,6 +157,7 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		if !dec.Allowed {
 			h.audit(p, parsed.Model, chain[0].Upstream, &audit.OutcomeRef{Status: dec.Status}, false, traceID)
 			h.metrics.ObserveRequest(ingressName, parsed.Model, chain[0].ProviderName, p.Team, dec.Status, time.Since(start).Seconds(), 0)
+			tracing.SetStatus(span, false, "governance deny")
 			writeErr(w, dec.Status, govErrType(dec.Status), dec.Reason)
 			return
 		}
@@ -325,6 +331,7 @@ func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, 
 	cost := h.settle(p.Team, providerName, model, upstream, lastUsage, table)
 	h.observeTokens(model, providerName, p.Team, lastUsage)
 	h.auditCompleted(p, model, upstream, 200, usage, cost, tracing.TraceID(req.Context()))
+	recordSpanResponse(req, prov.Name(), upstream, usage, true) // committed stream success
 	h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 200, time.Since(start).Seconds(), ttft)
 	return false
 }

@@ -106,6 +106,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// allow-list BEFORE resolving/forwarding (§3.1, §5.1).
 	p, ok := principal.From(req.Context())
 	if !ok {
+		tracing.SetStatus(span, false, "no principal")
 		writeErr(w, 401, "authentication_error", "no principal")
 		return
 	}
@@ -118,6 +119,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		// silent reject would be a blind spot in the tamper-evident chain (P4 gate).
 		h.audit(p, canonical.Model, "", &audit.OutcomeRef{Status: 400}, traceID)
 		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 400, time.Since(start).Seconds(), 0)
+		tracing.SetStatus(span, false, "pii mask bypass blocked")
 		writeErr(w, 400, "invalid_request_error", "PII masking is enabled for your team but not supported on the OpenAI-compatible endpoint yet; use /v1/messages")
 		return
 	}
@@ -125,6 +127,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		h.audit(p, canonical.Model, "", &audit.OutcomeRef{Status: 403}, traceID)
 		// Pre-resolution reject: model is still attacker-controlled → sentinel label.
 		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 403, time.Since(start).Seconds(), 0)
+		tracing.SetStatus(span, false, "model not allowed")
 		writeErr(w, 403, "permission_error", "model not allowed for this key: "+canonical.Model)
 		return
 	}
@@ -133,6 +136,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		h.audit(p, canonical.Model, "", &audit.OutcomeRef{Status: 404}, traceID)
 		// Pre-resolution reject: model is still attacker-controlled → sentinel label.
 		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 404, time.Since(start).Seconds(), 0)
+		tracing.SetStatus(span, false, "unknown model")
 		writeErr(w, 404, "not_found_error", "unknown model: "+canonical.Model)
 		return
 	}
@@ -144,6 +148,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		if !dec.Allowed {
 			h.audit(p, canonical.Model, chain[0].Upstream, &audit.OutcomeRef{Status: dec.Status}, traceID)
 			h.metrics.ObserveRequest(ingressName, canonical.Model, chain[0].ProviderName, p.Team, dec.Status, time.Since(start).Seconds(), 0)
+			tracing.SetStatus(span, false, "governance deny")
 			writeErr(w, dec.Status, govErrType(dec.Status), dec.Reason)
 			return
 		}
