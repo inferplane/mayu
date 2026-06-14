@@ -144,3 +144,31 @@ func TestProviderWriteUICSPAndContract(t *testing.T) {
 		}
 	}
 }
+
+// TestSelfServiceWhoamiUI pins ADR-010 T2: the console fetches identity via the
+// token-gated api() (never a bare fetch), exposes the constrained team select,
+// and renders identity via textContent (no innerHTML/concat into markup).
+func TestSelfServiceWhoamiUI(t *testing.T) {
+	_, html := get(t, "/")
+	for _, id := range []string{`id="whoami-line"`, `id="team-select"`} {
+		if !strings.Contains(html, id) {
+			t.Errorf("index.html missing self-service element %s", id)
+		}
+	}
+	_, js := get(t, "/app.js")
+	if !strings.Contains(js, `api("GET", "/admin/whoami")`) {
+		t.Fatal("whoami must be fetched via the token-gated api() helper")
+	}
+	for _, bad := range []string{`fetch("/admin/whoami`, "fetch(`/admin/whoami"} {
+		if strings.Contains(js, bad) {
+			t.Errorf("app.js bare-fetches whoami %q (must use api())", bad)
+		}
+	}
+	// identity rendered via textContent, never innerHTML
+	if !strings.Contains(js, `line.textContent = "signed in as "`) {
+		t.Fatal("identity must be rendered via textContent")
+	}
+	if strings.Contains(js, "whoami-line\").innerHTML") || strings.Contains(js, "innerHTML") {
+		t.Fatal("app.js must not use innerHTML (CSP / XSS)")
+	}
+}

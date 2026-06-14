@@ -102,8 +102,10 @@
       <section id="view-keys" class="view" hidden>
         <div class="card" id="issue-card">
           <div class="microlabel">issue a virtual key</div>
+          <p id="whoami-line" class="hint" hidden></p>
           <form id="create-form" class="row">
             <input id="team" type="text" placeholder="team (e.g. demo)" required>
+            <select id="team-select" hidden></select>
             <input id="models" type="text" placeholder="allowed models — comma-separated, * for all" required>
             <button type="submit">ISSUE KEY</button>
           </form>

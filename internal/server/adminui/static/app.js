@@ -377,9 +377,55 @@ async function refreshKeys() {
   }
 }
 
+// loadWhoami fetches the caller's resolved identity (ADR-010) and adapts the
+// issue-key form: a non-admin with entitled teams picks from a constrained
+// <select> (so the UI never invites a cross-team request the server would 403);
+// an admin keeps the free-text team input. Identity is rendered via textContent.
+async function loadWhoami() {
+  let me;
+  try {
+    me = await api("GET", "/admin/whoami");
+  } catch {
+    return; // identity is advisory; the form still works (server enforces)
+  }
+  const line = $("whoami-line");
+  line.textContent = "signed in as " + me.subject + " · " + (me.auth_method || "");
+  line.hidden = false;
+
+  const input = $("team"), sel = $("team-select");
+  const teams = me.teams || [];
+  if (!me.is_admin && teams.length) {
+    sel.textContent = "";
+    for (const t of teams) {
+      const opt = document.createElement("option");
+      opt.value = t;
+      opt.textContent = t;
+      sel.appendChild(opt);
+    }
+    sel.value = teams[0];
+    sel.hidden = false;
+    sel.required = true;
+    input.hidden = true;
+    input.required = false;
+  } else {
+    // admin / break-glass / no mapped team → free entry (unchanged)
+    sel.hidden = true;
+    sel.required = false;
+    input.hidden = false;
+    input.required = true;
+  }
+}
+
+// currentTeam reads whichever team control is active (select for self-service,
+// text input for admin free-entry).
+function currentTeam() {
+  const sel = $("team-select");
+  return sel.hidden ? $("team").value.trim() : sel.value;
+}
+
 $("create-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const team = $("team").value.trim();
+  const team = currentTeam();
   const models = $("models").value.split(",").map((s) => s.trim()).filter(Boolean);
   const out = await api("POST", "/admin/keys", { team: team, allowed_models: models });
   // Plaintext is rendered once, kept only in the DOM/page until reload.
@@ -559,6 +605,7 @@ $("token-form").addEventListener("submit", async (e) => {
     $("shell").hidden = false;
     $("origin-chip").textContent = window.location.origin;
     renderUsage(lastIssuedKey || null);
+    await loadWhoami(); // self-service identity + team scoping (ADR-010)
     showView("overview");
     pollHealth();
     setInterval(pollHealth, 15000);
