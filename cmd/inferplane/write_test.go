@@ -151,3 +151,20 @@ func TestWriteKeepsStatefulComponents(t *testing.T) {
 		t.Fatal("UI write must publish a new topology generation")
 	}
 }
+
+// TestProviderStoreUnsupportedType pins the P4 MINOR: an unimplemented backend
+// type is rejected at boot rather than silently using SQLite.
+func TestProviderStoreUnsupportedType(t *testing.T) {
+	t.Setenv("E2E_ADMIN_TOKEN", e2eAdminToken)
+	dir := t.TempDir()
+	cfgPath := dir + "/config.json"
+	rewriteConfig(t, cfgPath, `{
+	  "server": {"listen":"127.0.0.1:0","admin_listen":"127.0.0.1:0","admin_auth":{"token_refs":[{"env":"E2E_ADMIN_TOKEN"}]}},
+	  "key_store":{"type":"sqlite","path":"`+dir+`/keys.db"},
+	  "provider_store":{"type":"postgres","path":"`+dir+`/p.db"},
+	  "audit":{"buffer":{"path":"`+dir+`/audit.wal"},"sinks":[{"type":"stdout"}]}
+	}`)
+	if _, err := newGateway(cfgPath); err == nil {
+		t.Fatal("unsupported provider_store.type must be rejected at boot")
+	}
+}

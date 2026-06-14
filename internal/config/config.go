@@ -8,10 +8,43 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/inferplane/inferplane/internal/adminauth"
 )
+
+// envRefShape is the allowed shape of an env-var secret ref: a POSIX-ish env var
+// NAME. A pasted secret (sk-…, dashes, mixed case) fails it, so a secret value
+// can never be accepted/persisted as a "ref" (ADR-008 gate C1).
+var envRefShape = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// ValidateSecretRef checks a ref's SHAPE (not resolvability): a nil ref is valid
+// (keyless provider); a non-nil ref must set exactly one of env/file — the env
+// an environment-variable NAME, the file an ABSOLUTE path. This is the single
+// shared guard for both the UI write path (configapi) and the file→DB seed path
+// (providerstore), so a malformed/secret-shaped ref is rejected before it can be
+// persisted, exported, or audited. Error messages never echo the ref value.
+func ValidateSecretRef(ref *SecretRef) error {
+	if ref == nil {
+		return nil
+	}
+	switch {
+	case ref.Env != "" && ref.File != "":
+		return fmt.Errorf("secret ref must set either env or file, not both")
+	case ref.Env != "":
+		if !envRefShape.MatchString(ref.Env) {
+			return fmt.Errorf("secret ref env must be an environment variable name (it is a reference, not the secret value)")
+		}
+	case ref.File != "":
+		if !strings.HasPrefix(ref.File, "/") {
+			return fmt.Errorf("secret ref file must be an absolute path (it is a reference, not the secret value)")
+		}
+	default:
+		return fmt.Errorf("secret ref must set env or file")
+	}
+	return nil
+}
 
 type SecretRef struct {
 	Env  string `json:"env,omitempty"`

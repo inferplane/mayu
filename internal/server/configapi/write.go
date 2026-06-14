@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/inferplane/inferplane/internal/audit"
+	"github.com/inferplane/inferplane/internal/config"
 	"github.com/inferplane/inferplane/internal/principal"
 	"github.com/inferplane/inferplane/internal/providerstore"
 	"github.com/inferplane/inferplane/pkg/ulid"
@@ -23,11 +24,6 @@ var nameRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 // maxWriteBody caps a write body — provider/model registrations are tiny.
 const maxWriteBody = 64 << 10
-
-// envRefRe is the allowed shape of an env-var secret ref: a POSIX-ish env var
-// name. A pasted secret (sk-…, dashes, mixed case with leading digits) fails it,
-// so a secret value can never be stored as a "ref" (ADR-008 gate C1).
-var envRefRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // secretRefWrite is the auth reference in a write body — a NAME, never a value.
 type secretRefWrite struct {
@@ -91,21 +87,15 @@ func ParseProviderWrite(name string, body []byte) (providerstore.ProviderRow, er
 		AuthMode: w.Auth.Mode, AuthProfile: w.Auth.Profile,
 	}
 	if w.APIKeyRef != nil {
-		switch {
-		case w.APIKeyRef.Env != "" && w.APIKeyRef.File != "":
-			return zero, fmt.Errorf("api_key_ref must set either env or file, not both")
-		case w.APIKeyRef.Env != "":
-			if !envRefRe.MatchString(w.APIKeyRef.Env) {
-				// Do NOT echo the value — it may be a pasted secret.
-				return zero, fmt.Errorf("api_key_ref.env must be an environment variable NAME (it is a reference, not the secret value)")
-			}
-			row.APIKeyRefEnv = w.APIKeyRef.Env
-		case w.APIKeyRef.File != "":
-			if !strings.HasPrefix(w.APIKeyRef.File, "/") {
-				return zero, fmt.Errorf("api_key_ref.file must be an absolute path (it is a reference, not the secret value)")
-			}
-			row.APIKeyRefFile = w.APIKeyRef.File
+		// Validate the ref SHAPE through the shared guard (config.ValidateSecretRef
+		// — the same check the file→DB seed path runs), so a pasted secret is
+		// rejected and the error never echoes the value (ADR-008 gate C1).
+		ref := &config.SecretRef{Env: w.APIKeyRef.Env, File: w.APIKeyRef.File}
+		if err := config.ValidateSecretRef(ref); err != nil {
+			return zero, fmt.Errorf("api_key_ref invalid: %w", err)
 		}
+		row.APIKeyRefEnv = ref.Env
+		row.APIKeyRefFile = ref.File
 	}
 	return row, nil
 }
@@ -240,15 +230,16 @@ func emitEvent(emit func(audit.Record), r *http.Request, event, provider, model 
 }
 
 // mapWriteResult maps a Writer error to an HTTP status: nil→204, invalid
-// topology→400, not-found→404, else→500. The 400 message is the build error
-// (secret-free by construction — refs are shape-validated, the value is never in
-// the error).
+// topology→400, not-found→404, else→500. The 400 carries a FIXED, sanitized
+// message (ADR-008 gate C1 + P4 M1) — the raw build/resolve error is NEVER
+// echoed to the client, because it could carry a ref or (after resolution) a
+// provider-construction detail; the assembly logs the detail server-side.
 func mapWriteResult(rw http.ResponseWriter, err error) {
 	switch {
 	case err == nil:
 		rw.WriteHeader(http.StatusNoContent)
 	case errors.Is(err, ErrInvalidTopology):
-		writeErr(rw, http.StatusBadRequest, err.Error())
+		writeErr(rw, http.StatusBadRequest, "the provider/model configuration is invalid (check the type, endpoint, routes, and that the api_key_ref resolves); see the gateway logs for detail")
 	case errors.Is(err, providerstore.ErrNotFound):
 		writeErr(rw, http.StatusNotFound, "not found")
 	default:

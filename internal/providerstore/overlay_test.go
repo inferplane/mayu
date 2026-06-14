@@ -117,3 +117,26 @@ func TestSeedIfEmptySeedsOnceFromFile(t *testing.T) {
 		t.Fatalf("second SeedIfEmpty must be a no-op, got %+v", pl2)
 	}
 }
+
+// TestSeedRejectsMalformedRef pins the P4 CRITICAL: the file→DB seed path
+// validates ref SHAPE before persisting, so a secret-shaped file ref never
+// reaches the DB (and the store is not marked seeded).
+func TestSeedRejectsMalformedRef(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	bad := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			// A pasted secret in the env ref field — not a valid env var name.
+			"p": {Type: "anthropic", APIKeyRef: &config.SecretRef{Env: "sk-ant-PASTED-SECRET"}},
+		},
+	}
+	if err := SeedIfEmpty(ctx, s, bad); err == nil {
+		t.Fatal("seed must reject a secret-shaped ref")
+	}
+	if list, _ := s.ListProviders(ctx); len(list) != 0 {
+		t.Fatalf("nothing must be persisted on a rejected seed, got %d providers", len(list))
+	}
+	if ok, _ := s.Seeded(ctx); ok {
+		t.Fatal("store must NOT be marked seeded after a rejected seed")
+	}
+}

@@ -38,8 +38,9 @@ type ProviderRow struct {
 }
 
 // Target is one entry in a model's ordered fallback chain. It mirrors
-// config.Target but is defined here so the store stays a leaf (no config import);
-// the overlay layer translates between the two.
+// config.Target but is defined locally so the core store (sqlite.go / models.go)
+// needs no config import; only overlay.go (the file↔DB translation) imports
+// config, and it converts between providerstore.Target and config.Target.
 type Target struct {
 	Provider string
 	Model    string

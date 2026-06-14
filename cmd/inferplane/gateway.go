@@ -88,6 +88,13 @@ func newGateway(cfgPath string) (*gateway, error) {
 	// then the DB is authoritative for the reloadable topology.
 	var pstore providerstore.Store
 	if raw.ProviderStore != nil {
+		// Only "sqlite" is implemented; reject typos / unimplemented backends
+		// (e.g. "postgres") rather than silently using SQLite (P4 MINOR).
+		if t := raw.ProviderStore.Type; t != "" && t != "sqlite" {
+			store.Close()
+			aud.Close()
+			return nil, fmt.Errorf("provider store: unsupported type %q (only \"sqlite\" is implemented)", t)
+		}
 		pstore, err = providerstore.OpenSQLite(raw.ProviderStore.Path)
 		if err != nil {
 			store.Close()
@@ -302,11 +309,15 @@ func (g *gateway) writeMutation(ctx context.Context, persist func(context.Contex
 	}
 	eff := providerstore.OverlayFrom(raw, provSlice, models)
 	if err := config.ResolveProviders(eff); err != nil {
-		return fmt.Errorf("%w: %v", configapi.ErrInvalidTopology, err)
+		// Log the detail server-side; the client gets a fixed, sanitized 400 so a
+		// ref / build detail never leaks in the response (P4 M1).
+		fmt.Fprintln(os.Stderr, "inferplane: rejected UI write (resolve):", err)
+		return configapi.ErrInvalidTopology
 	}
 	st, identities, err := live.BuildState(eff)
 	if err != nil {
-		return fmt.Errorf("%w: %v", configapi.ErrInvalidTopology, err)
+		fmt.Fprintln(os.Stderr, "inferplane: rejected UI write (build):", err)
+		return configapi.ErrInvalidTopology
 	}
 
 	// Validated — persist, then publish the validated generation.

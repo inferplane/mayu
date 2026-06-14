@@ -2,6 +2,7 @@ package providerstore
 
 import (
 	"context"
+	"fmt"
 	"log"
 
 	"github.com/inferplane/inferplane/internal/config"
@@ -62,6 +63,12 @@ func OverlayFrom(rawFileCfg *config.Config, provs []ProviderRow, models map[stri
 func SeedIfEmpty(ctx context.Context, store Store, rawFileCfg *config.Config) error {
 	provs := make([]ProviderRow, 0, len(rawFileCfg.Providers))
 	for name, pc := range rawFileCfg.Providers {
+		// Validate the ref SHAPE through the SAME shared guard the UI write path
+		// uses, BEFORE any DB insert (P4 CRITICAL): a malformed/secret-shaped file
+		// ref must never be persisted/exported/audited via the seed path.
+		if err := config.ValidateSecretRef(pc.APIKeyRef); err != nil {
+			return fmt.Errorf("providerstore: seed provider %q: %w", name, err)
+		}
 		provs = append(provs, rowFromProviderConfig(name, pc))
 	}
 	models := make(map[string][]Target, len(rawFileCfg.Models))
