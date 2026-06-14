@@ -149,10 +149,16 @@ Panel reality on this machine:
    3-family P2 + P4 gate. OTel deps added (go.opentelemetry.io/otel v1.44,
    pure-Go; CGO=0 build still green).
 
+3. **S3 Object Lock audit anchoring — DONE** (ADR-012; commits 16204f3→c496d13).
+   `audit.Writer.HeadHash()` (single-atomic, post-durable) + `Anchorer` interface
+   + `internal/audit/s3anchor` (PutObject, optional COMPLIANCE retention, MinIO
+   endpoint) + opt-in `audit.anchor` config + periodic worker (retry-on-failure,
+   final anchor AFTER writer drain under bounded ctx) + runbook
+   (docs/runbooks/audit-anchoring.md, conditional on Object Lock + restricted
+   IAM). 3-family P2 + P4 gate. aws-sdk-go-v2/service/s3 added (pure-Go). E2E
+   needs real AWS S3 (verified offline via a stub S3 client).
+
 ### Still remaining
-3. **S3 Object Lock audit anchoring** — tamper-EVIDENT → tamper-RESISTANT;
-   periodic external anchoring of the hash chain. Implementable behind an
-   interface + fake for unit tests; true E2E needs real AWS S3.
 4. **Multi-replica HA** — Postgres key store, Redis/Valkey quota store +
    distributed rate limit. LARGE; needs Postgres/Redis for live verification —
    recommend interface/migration DESIGN only in this environment.
