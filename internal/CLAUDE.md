@@ -10,7 +10,7 @@ are leaves that others depend on).
 - `router/` — model→provider resolution (reads topology from `live.Holder`, one snapshot per `ResolveChain`), priority fallback, per-provider circuit breaker keyed by identity (`breaker.go`, pruned on reload).
 - `governance/` — `Governor` (PreCheck/Settle); `fromconfig.go` maps config → policy (USD→µUSD).
 - `keystore/` — virtual-key `Store` (SQLite), `Principal`, RBAC `Allows()`.
-- `audit/` — single-writer hash-chain writer, WAL, `verify.go`, metrics hooks.
+- `audit/` — single-writer hash-chain writer, WAL, `verify.go`, metrics hooks; `HeadHash()` race-safe chain-head snapshot + `Anchorer` interface; `audit/s3anchor/` opt-in S3 Object Lock anchoring (tamper-evident → tamper-resistant, ADR-012).
 - `pricing/` — integer microUSD table, round-half-even (`math/big`), bundled defaults.
 - `limiter/`, `budget/` — in-memory two-phase governance stores with injectable clocks.
 - `metrics/` — Prometheus registry + GenAI collectors + nil-safe hooks.

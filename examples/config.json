@@ -7,7 +7,9 @@
   "audit": {
     "failure_mode": "buffer_then_block",
     "buffer": { "path": "/var/lib/inferplane/audit.wal" },
-    "sinks": [ { "type": "stdout" }, { "type": "file", "path": "/var/lib/inferplane/audit.jsonl" } ]
+    "sinks": [ { "type": "stdout" }, { "type": "file", "path": "/var/lib/inferplane/audit.jsonl" } ],
+    "_comment_anchor": "OPT-IN WORM anchoring (ADR-012). Rename to \"anchor\" + create the bucket with Object Lock COMPLIANCE retention (see docs/runbooks/audit-anchoring.md). Tamper-resistance is CONDITIONAL on Object Lock + restricted IAM.",
+    "_anchor_example": { "type": "s3", "bucket": "my-audit-anchors", "prefix": "anchors", "region": "us-west-2", "interval": "5m", "retain_days": 365 }
   },
   "providers": {
     "anthropic-direct": { "type": "anthropic", "base_url": "https://api.anthropic.com", "api_key_ref": { "env": "ANTHROPIC_API_KEY" } },

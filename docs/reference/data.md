@@ -21,6 +21,7 @@ backends are a swap, not a rewrite.
 | Audit writer | `internal/audit/writer.go` | single-writer hash chain, WAL truncation |
 | Audit WAL | `internal/audit/wal.go` | disk buffer for `buffer_then_block` durability |
 | Audit verify | `internal/audit/verify.go` | per-instance segmented chain verification |
+| Audit anchoring | `internal/audit/s3anchor/` | opt-in WORM (S3 Object Lock) chain-head anchoring → tamper-resistant (ADR-012); refs/PII-free anchor objects |
 | Limiter store | `internal/limiter/limiter.go` | in-memory token bucket (TPM/RPM), two-phase |
 | Budget store | `internal/budget/budget.go` | in-memory microUSD budget, two-phase |
 | ULID | `pkg/ulid/ulid.go` | monotonic record IDs (Crockford base32) |
