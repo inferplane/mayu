@@ -353,3 +353,28 @@ func TestAdminMuxAuditVerifyBehindAuth(t *testing.T) {
 		t.Fatalf("audit/verify with token = %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestAdminMuxWhoami (ADR-010): /admin/whoami is behind AdminAuth (401 unauth)
+// and returns the identity for a valid token.
+func TestAdminMuxWhoami(t *testing.T) {
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, func() configapi.View { return configapi.View{} }, nil, nil, nil, nil, nil)
+
+	// no token → 401 (no identity leak)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/admin/whoami", nil))
+	if rec.Code != 401 {
+		t.Fatalf("whoami without token = %d, want 401", rec.Code)
+	}
+
+	// break-glass admin token → 200, is_admin true
+	req := httptest.NewRequest("GET", "/admin/whoami", nil)
+	req.Header.Set("Authorization", "Bearer admin-tok")
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("whoami with token = %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"is_admin":true`) {
+		t.Fatalf("break-glass whoami should be admin: %s", rec.Body.String())
+	}
+}

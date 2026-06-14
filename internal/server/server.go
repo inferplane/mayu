@@ -86,6 +86,10 @@ func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier,
 	guard := AdminAuth(adminTokens, verifier, mapping, denied, keys)
 	mux.Handle("/admin/keys", guard)
 	mux.Handle("/admin/keys/", guard)
+	// Self-service identity (ADR-010): the caller's resolved identity (opaque
+	// subject + entitled teams + flags), secret-free, behind the same AdminAuth.
+	// Lets the console offer self-service key issuance scoped to the user's teams.
+	mux.Handle("/admin/whoami", AdminAuth(adminTokens, verifier, mapping, denied, adminapi.WhoamiHandler()))
 	// Read-only provider/model topology (ADR-005), behind the same AdminAuth —
 	// secret-free, so it carries no governance weight beyond authentication.
 	mux.Handle("/admin/config", AdminAuth(adminTokens, verifier, mapping, denied, configapi.Handler(configView)))
