@@ -17,5 +17,7 @@
     "claude-sonnet-4-6": { "targets": [ { "provider": "anthropic-direct", "model": "claude-sonnet-4-6" } ] },
     "claude-opus-4-8": { "targets": [ { "provider": "anthropic-direct", "model": "claude-opus-4-8" } ] },
     "claude-sonnet-4-6-bedrock": { "targets": [ { "provider": "bedrock-us", "model": "anthropic.claude-sonnet-4-6-v1:0", "api": "invoke_model" } ] }
-  }
+  },
+  "_comment_plugins": "OPT-IN PII masking (ADR-009). WARNING: masking re-serializes the request body, abandoning verbatim forwarding, so prompt-cache hits are LOST for masked teams (up to ~10x cost). Omit Teams for global. Masked teams are rejected on the OpenAI-compatible endpoint in v1. Uncomment to enable:",
+  "_plugins_example": [ { "name": "pii-mask", "teams": [ "regulated-team" ] } ]
 }

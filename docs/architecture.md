@@ -131,6 +131,15 @@ Client -> KeyAuth(RBAC) -> Governor.PreCheck -> Router(fallback+breaker) -> Prov
 
 - **UI-write provider registration (`internal/providerstore`, ADR-008)** -- an opt-in `provider_store` makes the DB authoritative for the reloadable topology (providers + model routes); `PUT`/`DELETE /admin/providers|models` register changes build-once-swap-once through the same `reload()` mechanism (validate the candidate generation, persist, swap the validated state, all under one `reloadMu`). **Secrets never enter the gateway** -- only the ref (env var name / file path) is stored; `GET /admin/config/export` emits a secret-free config fragment for Git. Absent `provider_store` → file-authoritative, writes 405 (ADR-005).
 
+- **Opt-in PII masking filter (`plugins/piimask`, ADR-009)** -- a request-filter
+  chain (`internal/filter`) with an opt-in, per-team PII masker. Masking
+  re-serializes the body, abandoning verbatim forwarding → it **destroys the
+  prompt cache** for masked traffic (up to 10× cost) — so it is opt-in and the
+  cost is made explicit (boot warning + `inferplane_pii_mask_redactions_total` +
+  audit `pii_masked`). One-way (no vault, no PII at rest); fails CLOSED (a masker
+  error rejects, never forwards unmasked; the OpenAI ingress refuses masked teams
+  in v1). A new filter = one package under `plugins/` + one blank import.
+
 ## Key Design Decisions
 
 - **Canonical schema = Anthropic-superset, not OpenAI** -- preserves thinking blocks and `cache_control` that the OpenAI shape cannot represent; same-protocol round-trips stay lossless.

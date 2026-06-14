@@ -20,6 +20,7 @@ are leaves that others depend on).
 - `providerstore/` — opt-in DB-authoritative provider/model topology store (ADR-008, Stage 2 of ADR-005). SQLite, Postgres-portable TEXT-only DDL: `providers` (refs only — **no secret column**), `model_targets` (ordered routes), `meta` (durable `seeded` marker — seed-once is marker-gated, never row-count, so deleting all providers never resurrects). `Overlay`/`OverlayFrom` build the effective config (file + DB topology, refs unresolved); `SeedIfEmpty` one-time file→DB import (validates ref shape first). UI writes go build-once-swap-once through the assembly's `reloadMu` (see `cmd/inferplane` gateway `writeMutation`); secrets never enter the store (refs only).
 - `config/` — config loading + secret-ref resolution (inline secrets rejected); OIDC block validation (https issuer, mandatory client_id, JWT-shaped static tokens rejected).
 - `principal/` — request-scoped principal context (leaf, breaks import cycles).
+- `filter/` — request-transform filter seam (ADR-009): `RequestFilter` interface + name registry + `Masking` (resolved per-team decision). Core imports this; concrete filters live under `plugins/<name>/` and register via blank import (like providers). Leaf (imports only `sort`).
 
 ## Rules
 - Pre-check BEFORE billing, settle AFTER. `on_exceeded` block wins on tie.
