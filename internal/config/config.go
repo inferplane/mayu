@@ -205,6 +205,16 @@ type PricingConfig struct {
 	Overrides map[string]map[string]RateConfig `json:"overrides"`  // provider → model → rate
 }
 
+// PluginConfig enables a request-transform filter plugin (the spec's filter
+// chain ⑥, ADR-009). Name must match a registered filter (e.g. "pii-mask").
+// Teams scopes it to those teams; an empty Teams means GLOBAL (all teams). The
+// filter name is resolved against the registry at assembly (boot); an unknown
+// name is rejected there.
+type PluginConfig struct {
+	Name  string   `json:"name"`
+	Teams []string `json:"teams,omitempty"`
+}
+
 type Config struct {
 	Server        ServerConfig              `json:"server"`
 	Providers     map[string]ProviderConfig `json:"providers"`
@@ -214,6 +224,7 @@ type Config struct {
 	Audit         AuditConfig               `json:"audit"`
 	Teams         map[string]TeamConfig     `json:"teams"`
 	Pricing       PricingConfig             `json:"pricing"`
+	Plugins       []PluginConfig            `json:"plugins,omitempty"`
 }
 
 // Load parses the config and resolves every secret ref — the back-compat entry

@@ -333,3 +333,38 @@ func TestResolveSecretRefExported(t *testing.T) {
 		t.Fatalf("ResolveSecretRef = %q", got)
 	}
 }
+
+// --- T4: plugins block (ADR-009) ---
+
+func TestPluginsBlockParses(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "c.json")
+	os.WriteFile(f, []byte(`{"plugins":[{"name":"pii-mask","teams":["alpha","beta"]},{"name":"other"}]}`), 0o600)
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Plugins) != 2 {
+		t.Fatalf("want 2 plugins, got %+v", cfg.Plugins)
+	}
+	if cfg.Plugins[0].Name != "pii-mask" || len(cfg.Plugins[0].Teams) != 2 {
+		t.Fatalf("plugin[0] wrong: %+v", cfg.Plugins[0])
+	}
+	// empty Teams = global
+	if cfg.Plugins[1].Name != "other" || len(cfg.Plugins[1].Teams) != 0 {
+		t.Fatalf("plugin[1] (global) wrong: %+v", cfg.Plugins[1])
+	}
+}
+
+func TestPluginsAbsentNil(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "c.json")
+	os.WriteFile(f, []byte(`{"providers":{}}`), 0o600)
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Plugins != nil {
+		t.Fatalf("plugins should be nil when absent, got %+v", cfg.Plugins)
+	}
+}
