@@ -1,0 +1,153 @@
+# ADR-014: Provider registration UX — LiteLLM-parity guided "Add Model", secret-ref-honest
+
+**Date:** 2026-06-15
+**Status:** Proposed — design doc; implementation plan in
+`docs/superpowers/plans/2026-06-15-provider-registration-ux.md`. To be hardened
+through the `/co-agent:consensus` multi-model gate before implementation.
+**Related:** ADR-008 (UI-write provider registration — the DB-authoritative
+store + write API this builds on), ADR-002 (console grows but stays
+toolchain-free), ADR-005 (provider visibility), ADR-003 (governance/usability
+differentiation vs LiteLLM), spec §7 (secret-ref mandate — inline keys rejected),
+§4.5/§5.4 (hot-reload semantics), §8 (provider isolation / zero-core-diff)
+
+## Context
+
+ADR-008 shipped UI-write provider registration: a `providerstore` (SQLite,
+refs-only) plus `PUT/DELETE /admin/providers|models` and a console form (T8).
+First operator reaction (2026-06-15): the registration UX feels *weak next to
+LiteLLM*. Concretely, the current console (`adminui/static/index.html:155-204`)
+is **two flat forms** with every field always visible and **no feedback loop**:
+
+1. **Provider form** shows `base_url`, `region`, `auth mode`, `api_key_ref`
+   kind/value all at once — irrelevant fields for the chosen type are still
+   shown (region/auth on an `anthropic` provider; base_url on `bedrock`).
+2. **No connection test.** You register a provider *blind*: the form cannot tell
+   you whether the env/file ref actually resolves, whether the endpoint is
+   reachable, or whether the key is valid. The first signal is a failed *real*
+   coding-agent request later.
+3. **Model routes are free-text.** The operator hand-types both the public model
+   name and each upstream model id and the provider name — a typo routes to a
+   non-existent provider and only surfaces at request time.
+4. **No model catalog / typeahead**, no health status, no guided flow.
+
+LiteLLM's admin UI is the benchmark operators compare against. Its "Add Model"
+flow (verified via litellm.ai docs, 2026-06):
+- a **provider dropdown** that **morphs the form** — pick Vertex AI and you get
+  Vertex Project/Location/Credentials; pick OpenAI and you get API Base/API Key;
+- **reusable credentials** — add a credential once, reuse it across models via an
+  "Existing Credentials" dropdown;
+- a **Test Connection** button (on both the add page and the model-info page)
+  that makes a real probe and shows pass/fail + the error detail;
+- a **health-status column** in the model list (pass/fail, last-checked, error);
+- **public model name vs litellm model name** mapping with wildcard support;
+- multiple deployments under one public name for **load balancing** (rpm/tpm/
+  weight); add/edit/delete live via `/model/new` with **no restart**.
+
+The product's stated differentiator (ADR-003) is governance *with* usability.
+LiteLLM matches usability and paywalls governance; we must at least match the
+**registration usability** while keeping our governance + security edge.
+
+## The hard constraint LiteLLM ignores
+
+LiteLLM lets the operator **paste a raw API key** into the UI; the proxy stores
+it in its DB. inferplane's **secret-ref mandate (§7)** forbids this: the console
+and the store hold a **reference** (`{env: NAME}` / `{file: PATH}`) only — never
+a secret value (`ProviderWrite` has no field that can carry one;
+`ParseProviderWrite` rejects inline `api_key`). So we **cannot** copy LiteLLM's
+"paste key → test" flow verbatim.
+
+The honest adaptation: the gateway **resolves the registered ref server-side**
+and probes the upstream **itself**. The client sends no secret in either the
+register or the test call. This is *more* secure than LiteLLM's flow and gives
+the same UX payoff (pass/fail before you trust the route).
+
+## Decision
+
+Upgrade the provider/model registration UX to LiteLLM parity **within the
+existing envelope** — vanilla HTML/CSS/JS + `go:embed` (ADR-002), DB-authoritative
+`providerstore` (ADR-008), zero-core-diff provider isolation (§8), secret-ref
+mandate (§7). Six capabilities:
+
+### D1 — Provider-aware dynamic form
+The provider form fields **morph by `type`** (data-driven from a small JS field
+schema). `anthropic` → `base_url` + `api_key_ref`; `openai_compatible` →
+`base_url` + `api_key_ref`; `bedrock` → `region` + `auth.mode`/`auth.profile`,
+no key field. Irrelevant fields are hidden, not just ignored. No new write-API
+fields — the DTO (`ProviderWrite`) is unchanged.
+
+### D2 — Server-side connection probe (the headline feature)
+New endpoint **`POST /admin/providers/{name}/test`** (admin-gated). It:
+1. loads the **stored** provider row (refs only),
+2. **resolves the ref server-side** (the same `config` resolution the data plane
+   uses) — the client sends **no** secret,
+3. invokes a new **optional** provider capability `HealthChecker.HealthCheck(ctx)`
+   — a minimal, cheap upstream probe (anthropic/openai_compatible → `GET
+   /v1/models`; bedrock → a bounded `ListFoundationModels`/tiny converse),
+4. returns `{ok: bool, latency_ms: int, detail: string}` with a **sanitized**
+   detail that never echoes the ref value or the secret, under a **bounded
+   timeout**.
+`HealthChecker` is optional (like `TokenCounter`): a provider that doesn't
+implement it returns a "probe unsupported" result, never an error. Adding it
+touches only `providers/<name>/` + the interface decl — zero core diff (§8).
+
+### D3 — Embedded model catalog + typeahead
+A small embedded per-type catalog (`GET /admin/providers/catalog?type=<t>` →
+known public model ids) backs an HTML `<datalist>` so the operator picks a model
+instead of hand-typing it. Static (no upstream call); a follow-up may enrich it
+from a live `/v1/models` probe.
+
+### D4 — Route targets reference registered providers
+The model-route target's provider field becomes a **dropdown populated from the
+registered providers** (the secret-ref-honest analog of LiteLLM's "Existing
+Credentials" reuse), and the upstream-model field gets the D3 typeahead. A route
+can no longer be saved pointing at a provider that does not exist — the failure
+moves from request-time to save-time. (Server-side validation already rejects
+this via the candidate-topology build; this makes the UI match.)
+
+### D5 — Health-status column
+The providers table gains a **status cell** (●ok / ●fail / ○untested + last-
+probe time), populated on demand by D2 (the same on-demand pattern as audit
+`VERIFY CHAIN`). Periodic background probing is an explicit follow-up, not v1.
+
+### D6 — Guided "Add Model" affordance
+The two cards are unified behind a single guided flow (select-or-create provider
+→ test → pick model → save route), keeping the two underlying APIs. Bilingual
+(EN/KO) copy consistent with the existing console.
+
+## What we deliberately do NOT adopt from LiteLLM (and why)
+
+- **Pasting raw keys into the UI / storing them in the DB** — violates §7. We
+  test via server-resolved refs instead (strictly more secure).
+- **Weighted load balancing (rpm/tpm/weight per deployment)** — that is a
+  routing-engine change (shared-state rate accounting → ADR-013 HA territory),
+  not a registration-UX change. Out of scope; tracked as a follow-up. Our route
+  targets remain an **ordered fallback chain** (router `ResolveChain`).
+- **Periodic/auto health checks** — v1 is on-demand (D5); background probing is a
+  follow-up (it needs a scheduler + cardinality-bounded status storage).
+
+## Consequences
+
+- **Positive:** registration UX reaches LiteLLM parity on the dimensions that
+  matter (dynamic form, test-before-trust, catalog, route safety, status) while
+  *keeping* the secret-ref security edge LiteLLM lacks; no toolchain added; no
+  write-API schema change; provider probe is zero-core-diff.
+- **Negative / risks (for the gate to scrutinize):**
+  - The probe makes an **outbound upstream call from the admin plane** — must be
+    admin-gated, bounded-timeout, error-sanitized (no secret/ref echo), and not
+    abusable as an SSRF/amplification vector (esp. `openai_compatible` with an
+    operator-supplied `base_url`).
+  - Probe cost/latency: `GET /v1/models` is cheap but non-zero; must be explicit
+    and on-demand.
+  - The embedded catalog goes stale as upstream model lists change — accept
+    free-text fallback; never *block* a save on catalog membership.
+- **Neutral:** load-balancing parity is explicitly deferred; this ADR is scoped
+  to registration UX only.
+
+## Alternatives considered
+
+1. **Adopt LiteLLM's paste-the-key test verbatim.** Rejected — violates §7; the
+   server-resolved-ref probe achieves the same UX more securely.
+2. **Client-side-only form polish (no probe).** Rejected — the test-before-trust
+   loop is the single biggest UX gap; cosmetic-only would not close it.
+3. **Full SPA / framework rewrite of the console.** Rejected — violates ADR-002's
+   no-toolchain envelope; the dynamic form is achievable in vanilla JS.
