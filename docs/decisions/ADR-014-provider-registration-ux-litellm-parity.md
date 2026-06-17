@@ -1,12 +1,15 @@
 # ADR-014: Provider registration UX — LiteLLM-parity guided "Add Model", secret-ref-honest
 
 **Date:** 2026-06-15
-**Status:** Proposed — design doc; implementation plan in
-`docs/superpowers/plans/2026-06-15-provider-registration-ux.md`. Hardened through
-the `/co-agent:consensus` plan gate (antigravity/Gemini 3.1 Pro High; codex
-unavailable on this host — 404 "Engine not found", as in ADR-009). Round 1: 2
-CRITICAL (test-before-save endpoint shape; probe SSRF/secret-exfil) + 1 MAJOR
-(bedrock IAM) + 2 MINOR (ephemeral status; wildcard scope) folded in below.
+**Status:** Accepted — implemented (T1–T11) on `feat/provider-registration-ux`.
+Plan in `docs/superpowers/plans/2026-06-15-provider-registration-ux.md`. Hardened
+through the `/co-agent:consensus` plan gate (antigravity/Gemini 3.1 Pro High;
+codex unavailable on this host — 404 "Engine not found", as in ADR-009) over
+3 rounds: R1 → 2 CRITICAL (test-before-save endpoint shape; probe SSRF/
+secret-exfil) + 1 MAJOR (bedrock IAM) + 2 MINOR; R2 confirmed C1/C2, added
+cache-poisoning + bedrock-AccessDenied + DNS-rebinding fixes; R3 closed the
+bedrock classification by an inverse rule. Each task shipped behind TDD + scope
+guard; a P4 cumulative gate runs on the full diff.
 **Related:** ADR-008 (UI-write provider registration — the DB-authoritative
 store + write API this builds on), ADR-002 (console grows but stays
 toolchain-free), ADR-005 (provider visibility), ADR-003 (governance/usability

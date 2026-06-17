@@ -6,7 +6,7 @@ lives in its own package. This is the project's headline extensibility promise
 (design §8): **a new provider is one package + one blank-import line, with zero core diff.**
 
 ## Key Files
-- `provider.go` — the `Provider` interface (`Name`, `Models`, `Complete`, `Stream`), optional `TokenCounter`, and transport types (`ProxyRequest`, `ProxyResponse`, `StreamEvent`, `IngressProtocol`).
+- `provider.go` — the `Provider` interface (`Name`, `Models`, `Complete`, `Stream`), optional `TokenCounter` and `HealthChecker` (connection-probe capability, ADR-014: anthropic/openai_compatible probe `GET /v1/models`, bedrock a 1-token converse classified by SigV4-vs-service error; a non-implementer is "probe unsupported"), and transport types (`ProxyRequest`, `ProxyResponse`, `StreamEvent`, `IngressProtocol`). `Config.HTTPClient` (optional) lets the probe inject an SSRF-guarded client; nil ⇒ default.
 - `registry.go` — `Register(type, factory)` / `New(Config)`.
 - `errors.go` — `UpstreamError{StatusCode, Body, Header}` (so non-2xx upstream responses tee through losslessly).
 - `anthropic/` — Messages passthrough; verbatim body, gateway-injected `x-api-key`; byte-exact SSE reader.
