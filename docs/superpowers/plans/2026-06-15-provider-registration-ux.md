@@ -129,6 +129,12 @@ unsupported for this provider type"}` at HTTP 200 (never 500).
 
 - Modify: `internal/server/server.go`
 - Modify: `cmd/inferplane/gateway.go`
+- Modify: `internal/config/config.go`
+- Test: `internal/server/probe_wire_test.go`
+
+**Scope note:** the optional `probe.allowed_hosts` allowlist (ADR-014 D2) needs a
+config field, so `config.go` gains a small `Probe` block; `probe_wire_test.go`
+is the server-level wiring test (auth + full-admin gate).
 
 Register `POST /admin/providers/test` and `GET /admin/providers/catalog`. The
 probe route is gated to **full admin only** (`IsAdmin`) — NOT the team-mapped
