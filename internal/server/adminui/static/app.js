@@ -167,6 +167,7 @@ async function refreshProviders() {
   $("providers-mode-rw").hidden = !writable;
   $("provider-write").hidden = !writable;
   $("model-write").hidden = !writable;
+  lastProviders = view.providers || [];
   $("export-card").hidden = !writable;
   $("prov-act-col").hidden = !writable;
   $("prov-status-col").hidden = !writable;
@@ -259,6 +260,30 @@ const PROVIDER_FIELDS = {
 };
 const PROVIDER_FIELD_IDS = ["pf-baseurl", "pf-refkind", "pf-refval", "pf-region", "pf-authmode"];
 
+// Registered providers from the last topology load, used to populate the route
+// target dropdown + typeahead (ADR-014 D4). catalogCache memoizes type→models.
+let lastProviders = [];
+let catalogCache = {};
+let targetSeq = 0;
+
+// loadCatalog returns known model ids for a provider type (ADR-014 D3),
+// memoized. Advisory only — failures degrade to free-text (empty list).
+async function loadCatalog(type) {
+  if (!type) return [];
+  if (catalogCache[type]) return catalogCache[type];
+  try {
+    const out = await api("GET", "/admin/providers/catalog?type=" + encodeURIComponent(type));
+    catalogCache[type] = (out && out.models) || [];
+  } catch { catalogCache[type] = []; }
+  return catalogCache[type];
+}
+
+// providerType returns the configured type for a provider name (or "").
+function providerType(name) {
+  const p = lastProviders.find((x) => x.name === name);
+  return p ? p.type : "";
+}
+
 function applyProviderTypeFields() {
   const shown = PROVIDER_FIELDS[$("pf-type").value] || [];
   for (const id of PROVIDER_FIELD_IDS) $(id).hidden = !shown.includes(id);
@@ -293,20 +318,51 @@ function fillModelForm(m) {
   if (!(m.targets || []).length) addTargetRow();
 }
 
-// addTargetRow appends one ordered-target input row to the model form.
+// addTargetRow appends one ordered-target row to the model form (ADR-014 D4).
+// The provider is a <select> populated from the registered providers (a route to
+// a missing provider is rejected server-side, so this moves the failure to
+// authoring time). The upstream model is a free-text input with a <datalist>
+// typeahead sourced from the provider type's catalog (advisory — never blocks).
 function addTargetRow(provider, model, apiv) {
   const row = document.createElement("div");
   row.className = "row target-row";
-  const p = document.createElement("input");
-  p.type = "text"; p.placeholder = "provider"; p.className = "t-provider"; p.value = provider || "";
+
+  const p = document.createElement("select");
+  p.className = "t-provider";
+  const names = lastProviders.map((x) => x.name);
+  if (provider && !names.includes(provider)) names.unshift(provider); // preserve on edit
+  for (const name of names) {
+    const opt = document.createElement("option");
+    opt.value = name; opt.textContent = name;
+    if (name === provider) opt.selected = true;
+    p.appendChild(opt);
+  }
+
+  const dlId = "tgt-models-" + (++targetSeq);
+  const dl = document.createElement("datalist");
+  dl.id = dlId;
   const m = document.createElement("input");
   m.type = "text"; m.placeholder = "upstream model"; m.className = "t-model"; m.value = model || "";
+  m.setAttribute("list", dlId);
+
+  const fillModels = async () => {
+    const models = await loadCatalog(providerType(p.value));
+    dl.textContent = "";
+    for (const id of models) {
+      const opt = document.createElement("option");
+      opt.value = id;
+      dl.appendChild(opt);
+    }
+  };
+  p.addEventListener("change", fillModels);
+  fillModels(); // initial population for the selected provider
+
   const a = document.createElement("input");
   a.type = "text"; a.placeholder = "api (optional)"; a.className = "t-api"; a.value = apiv || "";
   const rm = document.createElement("button");
   rm.type = "button"; rm.className = "ghost"; rm.textContent = "✕";
   rm.addEventListener("click", () => row.remove());
-  row.append(p, m, a, rm);
+  row.append(p, m, dl, a, rm);
   $("mf-targets").appendChild(row);
 }
 
