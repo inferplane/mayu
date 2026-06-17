@@ -96,4 +96,9 @@ type Config struct {
 	APIKey   string // resolved secret (never logged)
 	Models   []schema.ModelInfo
 	Settings map[string]string // provider-specific extras
+	// HTTPClient, when non-nil, is used by HTTP-based providers (anthropic,
+	// openai_compatible) instead of a default client. It lets the admin probe
+	// inject a client with an SSRF-guarded DialContext (ADR-014 D2). nil ⇒
+	// default client, so the data plane is unchanged. Ignored by bedrock (AWS SDK).
+	HTTPClient *http.Client
 }

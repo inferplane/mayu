@@ -32,7 +32,11 @@ type provider struct {
 }
 
 func factory(cfg providers.Config) (providers.Provider, error) {
-	return &provider{baseURL: cfg.BaseURL, apiKey: cfg.APIKey, client: &http.Client{}}, nil
+	client := cfg.HTTPClient
+	if client == nil {
+		client = &http.Client{}
+	}
+	return &provider{baseURL: cfg.BaseURL, apiKey: cfg.APIKey, client: client}, nil
 }
 
 func (p *provider) Name() string { return "openai_compatible" }
