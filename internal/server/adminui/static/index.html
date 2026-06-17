@@ -153,7 +153,7 @@
 
         <!-- register/edit provider (shown only when a provider store is enabled) -->
         <div class="card" id="provider-write" hidden>
-          <div class="microlabel">register / edit a provider</div>
+          <div class="microlabel">① register &amp; test a provider · <span class="ko">프로바이더 등록 &amp; 연결 테스트</span></div>
           <form id="provider-form" class="grid-form">
             <input id="pf-name" type="text" placeholder="name (e.g. anthropic-prod)" required>
             <select id="pf-type">
@@ -175,6 +175,9 @@
           </form>
           <p class="hint warn-label">⚠ enter the env var NAME or file PATH — the gateway
             never stores a secret value. Set the value in your secret store.</p>
+          <p class="hint">TEST CONNECTION resolves the ref server-side and probes the
+            upstream — you never paste a key. <span class="ko">TEST CONNECTION은 시크릿
+            참조를 서버에서 해석해 업스트림에 연결을 시험합니다 — 키를 붙여넣지 않습니다.</span></p>
           <p id="provider-form-status" class="status"></p>
         </div>
 
@@ -188,7 +191,7 @@
 
         <!-- add/edit model route (shown only when a provider store is enabled) -->
         <div class="card" id="model-write" hidden>
-          <div class="microlabel">add / edit a model route</div>
+          <div class="microlabel">② add a model route · <span class="ko">모델 라우트 추가</span></div>
           <form id="model-form">
             <div class="row">
               <input id="mf-name" type="text" placeholder="model name (e.g. claude-sonnet-4-6)" required>
