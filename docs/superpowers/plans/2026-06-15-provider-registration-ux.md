@@ -63,10 +63,14 @@ Implement `HealthCheck` as a **bounded 1-token `InvokeModel`/`Converse`** via th
 existing AWS client seam (`providers/bedrock/client.go` interface) — the **same
 IAM action (`bedrock:InvokeModel`) the data plane already needs**, NOT
 `ListFoundationModels` (which would demand an extra grant most deployments lack;
-gate finding). Map errors to a sanitized `Detail`.
+gate finding). **A model-level `AccessDeniedException`/`ModelNotReadyException`
+is mapped to `OK:true`** (+ note in `Detail`): AWS validates SigV4 *before* the
+model-access check, so that error proves the credentials resolve; a real
+credential failure (SigV4/`UnrecognizedClientException`) maps to `OK:false`. Map
+all errors to a sanitized `Detail`.
 
-- [ ] Write failing test mocking the bedrock client: OK path + error path; assert no credential in detail
-- [ ] Implement `HealthCheck` in `providers/bedrock` using a 1-token invoke/converse
+- [ ] Write failing test mocking the bedrock client: OK path; model-access-denied→OK+note; SigV4/credential error→not-OK; assert no credential in detail
+- [ ] Implement `HealthCheck` in `providers/bedrock` (1-token invoke/converse; access-denied = healthy-cred)
 - [ ] `go test ./providers/bedrock/...` green; commit `feat(bedrock): health probe via 1-token invoke (ADR-014 T3)`
 
 ### Task 4: server-side provider connection probe handler
@@ -79,17 +83,19 @@ body** (refs only — enables testing a *draft* provider before save; gate
 finding). It: (1) 405 when no provider store; (2) parses + validates the body via
 the existing `ParseProviderWrite` guard (rejects inline secrets); (3) resolves
 the ref server-side (same `config` resolution the data plane uses — client sends
-no secret); (4) applies the **SSRF guard** — reject a `base_url` resolving to the
-cloud metadata endpoint (169.254.169.254 / fd00:ec2::254), and reject hosts
-outside `probe.allowed_hosts` when that config is set; (5) builds the live
-provider and calls `HealthCheck` under a bounded `context.WithTimeout`; (6)
-returns `{ok, latency_ms, detail}` JSON, caching the result in a **process-local
-in-memory map keyed by provider name** (survives page refresh; not persisted). A
-provider without `HealthChecker` ⇒ `{ok:false, detail:"probe unsupported for
-this provider type"}` at HTTP 200 (never 500).
+no secret); (4) applies the **SSRF guard inside the probe HTTP client's
+`DialContext`** — reject a *connect-time* IP of the cloud metadata endpoint
+(169.254.169.254 / fd00:ec2::254), and reject hosts outside `probe.allowed_hosts`
+when that config is set; enforcing at dial time defeats DNS-rebinding (TOCTOU);
+(5) builds the live provider and calls `HealthCheck` under a bounded
+`context.WithTimeout`; (6) returns `{ok, latency_ms, detail}` JSON. The endpoint
+is **stateless — no server-side cache** (a draft test keyed by name would poison
+the saved provider's status; the console caches the result in `sessionStorage`
+instead). A provider without `HealthChecker` ⇒ `{ok:false, detail:"probe
+unsupported for this provider type"}` at HTTP 200 (never 500).
 
-- [ ] Write failing tests: 405 (no store); inline-secret body rejected; metadata-endpoint base_url rejected; allowlist-violation rejected; unsupported-capability 200; sanitized detail (fake failing provider → body has neither ref value nor secret); timeout honored
-- [ ] Implement `probe.go` (body parse + SSRF guard + in-memory result cache)
+- [ ] Write failing tests: 405 (no store); inline-secret body rejected; metadata-IP dial rejected (incl. a host that resolves to it); allowlist-violation rejected; unsupported-capability 200; sanitized detail (fake failing provider → body has neither ref value nor secret); timeout honored
+- [ ] Implement `probe.go` (body parse + DialContext SSRF guard; stateless, no cache)
 - [ ] `go test ./internal/server/configapi/...` green; commit `feat(configapi): draft-provider connection probe + SSRF guard (ADR-014 T4)`
 
 ### Task 5: embedded model catalog endpoint
@@ -141,10 +147,12 @@ auth, no key field). No write-API change; no inline secret field.
 - Modify: `internal/server/adminui/static/style.css`
 
 Add a TEST CONNECTION button to the provider form and a status cell to the
-providers table; both call `POST /admin/providers/{name}/test` and render
-●ok(latency) / ●fail(detail) / ○untested. Sanitized detail only.
+providers table; both POST the current form fields (a `ProviderWrite` body) to
+`POST /admin/providers/test` and render ●ok(latency) / ●fail(detail) /
+○untested. Cache the last result in `sessionStorage` keyed by provider name so
+status survives a page refresh. Sanitized detail only.
 
-- [ ] Add button + status-cell rendering in `app.js`/`index.html`; style badges in `style.css`
+- [ ] Add button + status-cell rendering + `sessionStorage` cache in `app.js`/`index.html`; style badges in `style.css`
 - [ ] `bash tests/run-all.sh` green; commit `feat(adminui): connection test + provider health status (ADR-014 T8)`
 
 ### Task 9: route provider dropdown + model typeahead (D3/D4)
@@ -180,7 +188,7 @@ change.
 - Modify: `providers/CLAUDE.md`
 - Modify: `docs/decisions/ADR-014-provider-registration-ux-litellm-parity.md`
 
-Document `POST /admin/providers/{name}/test` + `GET /admin/providers/catalog`
+Document `POST /admin/providers/test` + `GET /admin/providers/catalog`
 (api.md), the configapi probe/catalog (internal/CLAUDE.md), the `HealthChecker`
 capability (providers/CLAUDE.md), and flip ADR-014 status → Accepted after the
 gate.

@@ -93,7 +93,11 @@ fields). It:
    /v1/models`; bedrock → a **bounded 1-token `InvokeModel`/`Converse`**, which
    uses the **same IAM action the data plane already needs** — NOT
    `ListFoundationModels`, which would require an extra `bedrock:ListFoundation
-   Models` grant most deployments don't have),
+   Models` grant most deployments don't have). **The bedrock probe treats a
+   model-level `AccessDeniedException`/`ModelNotReadyException` as a *healthy
+   credential*** (`OK:true` + a note): AWS validates the SigV4 signature *before*
+   the model-access check, so reaching that error proves the credentials resolve
+   — a credential failure surfaces as a SigV4/`UnrecognizedClient` error instead,
 4. returns `{ok: bool, latency_ms: int, detail: string}` with a **sanitized**
    detail that never echoes the ref value or the secret, under a **bounded
    timeout**.
@@ -108,8 +112,10 @@ exfiltrate via a single data-plane request. The probe is therefore gated to
 **`IsAdmin` only**, NOT the team-mapped lower-privilege provider-write tier
 contemplated in ADR-008 (alt. 5): that tier must never be able to resolve a
 secret to an arbitrary host. Defense-in-depth, regardless of caller:
-- the probe **rejects a `base_url` that resolves to the cloud metadata endpoint
-  (169.254.169.254 / fd00:ec2::254)** — no legitimate LLM upstream lives there;
+- the probe **blocks the cloud metadata endpoint (169.254.169.254 /
+  fd00:ec2::254)** — no legitimate LLM upstream lives there — and enforces it in
+  the probe HTTP client's **`DialContext`** (checking the *connect-time* IP), not
+  as a pre-request string check, so **DNS rebinding (TOCTOU) cannot bypass it**;
 - an **optional `probe.allowed_hosts` allowlist** (config) constrains probe
   targets when set (unset = any host, preserving the internal-vLLM use case,
   which is a legitimate private address — so we do **not** blanket-block RFC1918).
@@ -132,11 +138,12 @@ this via the candidate-topology build; this makes the UI match.)
 ### D5 — Health-status column
 The providers table gains a **status cell** (●ok / ●fail / ○untested + last-
 probe time), populated on demand by D2 (the same on-demand pattern as audit
-`VERIFY CHAIN`). Probe results are cached in a **process-local in-memory map
-keyed by provider name** (bounded by provider count — no cardinality concern),
-so the status **survives a page refresh within the process lifetime**; it is
-**not persisted** across restarts. Persistent status storage and periodic
-background probing are explicit follow-ups, not v1.
+`VERIFY CHAIN`). The probe endpoint is **stateless** — it does **not** cache
+server-side (caching a *draft* test by provider name would poison the saved
+provider's status, and there is no read path). Instead the **console caches the
+last result in `sessionStorage`**, keyed by provider name, so status survives a
+page refresh without backend state or cross-contamination. Persistent
+server-side status and periodic background probing are explicit follow-ups.
 
 ### D6 — Guided "Add Model" affordance
 The two cards are unified behind a single guided flow (select-or-create provider
