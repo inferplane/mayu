@@ -68,6 +68,26 @@ type TokenCounter interface {
 	CountTokens(ctx context.Context, req *ProxyRequest) (int64, error)
 }
 
+// HealthResult is the outcome of a provider connection probe (ADR-014 D2).
+// Detail is a SANITIZED, human-readable status — it MUST never echo the
+// api-key ref value or any secret. LatencyMS is the round-trip time of the
+// probe call.
+type HealthResult struct {
+	OK        bool   `json:"ok"`
+	LatencyMS int64  `json:"latency_ms"`
+	Detail    string `json:"detail"`
+}
+
+// HealthChecker is an optional capability (like TokenCounter): providers that
+// can probe their upstream cheaply implement it so the admin console can test
+// a provider's connectivity before trusting a route (ADR-014). A provider that
+// does NOT implement it is reported as "probe unsupported" — never an error.
+// The probe uses credentials the gateway already resolved server-side; the
+// client never sends a secret.
+type HealthChecker interface {
+	HealthCheck(ctx context.Context) HealthResult
+}
+
 // Config is the per-provider settings slice the registry hands to a factory.
 // Kept minimal for M2; providers read what they need.
 type Config struct {
