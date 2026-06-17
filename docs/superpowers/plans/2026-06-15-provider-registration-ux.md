@@ -59,30 +59,38 @@ client.
 - Create: `providers/bedrock/health.go`
 - Test: `providers/bedrock/health_test.go`
 
-Implement `HealthCheck` as a bounded `ListFoundationModels` (or 1-token converse)
-via the existing AWS client seam (`providers/bedrock/client.go` interface); map
-errors to a sanitized `Detail`.
+Implement `HealthCheck` as a **bounded 1-token `InvokeModel`/`Converse`** via the
+existing AWS client seam (`providers/bedrock/client.go` interface) — the **same
+IAM action (`bedrock:InvokeModel`) the data plane already needs**, NOT
+`ListFoundationModels` (which would demand an extra grant most deployments lack;
+gate finding). Map errors to a sanitized `Detail`.
 
 - [ ] Write failing test mocking the bedrock client: OK path + error path; assert no credential in detail
-- [ ] Implement `HealthCheck` in `providers/bedrock`
-- [ ] `go test ./providers/bedrock/...` green; commit `feat(bedrock): health probe via ListFoundationModels (ADR-014 T3)`
+- [ ] Implement `HealthCheck` in `providers/bedrock` using a 1-token invoke/converse
+- [ ] `go test ./providers/bedrock/...` green; commit `feat(bedrock): health probe via 1-token invoke (ADR-014 T3)`
 
 ### Task 4: server-side provider connection probe handler
 
 - Create: `internal/server/configapi/probe.go`
 - Test: `internal/server/configapi/probe_test.go`
 
-Handler for `POST /admin/providers/{name}/test`: (1) 405 when no provider store;
-(2) 404 when the named provider is unknown; (3) load the stored row, resolve its
-ref server-side (same `config` resolution the data plane uses — client sends no
-secret), build the live provider, call `HealthCheck` under a bounded
-`context.WithTimeout`; (4) return `{ok, latency_ms, detail}` JSON. A provider
-without `HealthChecker` ⇒ `{ok:false, detail:"probe unsupported for this
-provider type"}` at HTTP 200 (never 500).
+Handler for **`POST /admin/providers/test`** that accepts a **`ProviderWrite`
+body** (refs only — enables testing a *draft* provider before save; gate
+finding). It: (1) 405 when no provider store; (2) parses + validates the body via
+the existing `ParseProviderWrite` guard (rejects inline secrets); (3) resolves
+the ref server-side (same `config` resolution the data plane uses — client sends
+no secret); (4) applies the **SSRF guard** — reject a `base_url` resolving to the
+cloud metadata endpoint (169.254.169.254 / fd00:ec2::254), and reject hosts
+outside `probe.allowed_hosts` when that config is set; (5) builds the live
+provider and calls `HealthCheck` under a bounded `context.WithTimeout`; (6)
+returns `{ok, latency_ms, detail}` JSON, caching the result in a **process-local
+in-memory map keyed by provider name** (survives page refresh; not persisted). A
+provider without `HealthChecker` ⇒ `{ok:false, detail:"probe unsupported for
+this provider type"}` at HTTP 200 (never 500).
 
-- [ ] Write failing tests: 405 (no store), 404 (unknown), unsupported-capability 200, sanitized detail (fake failing provider → body has neither ref value nor secret), timeout honored
-- [ ] Implement `probe.go`
-- [ ] `go test ./internal/server/configapi/...` green; commit `feat(configapi): server-side provider connection probe (ADR-014 T4)`
+- [ ] Write failing tests: 405 (no store); inline-secret body rejected; metadata-endpoint base_url rejected; allowlist-violation rejected; unsupported-capability 200; sanitized detail (fake failing provider → body has neither ref value nor secret); timeout honored
+- [ ] Implement `probe.go` (body parse + SSRF guard + in-memory result cache)
+- [ ] `go test ./internal/server/configapi/...` green; commit `feat(configapi): draft-provider connection probe + SSRF guard (ADR-014 T4)`
 
 ### Task 5: embedded model catalog endpoint
 
@@ -103,12 +111,14 @@ provider type"}` at HTTP 200 (never 500).
 - Modify: `internal/server/server.go`
 - Modify: `cmd/inferplane/gateway.go`
 
-Register `POST /admin/providers/{name}/test` and `GET /admin/providers/catalog`
-behind the same `AdminAuth` guard as the other write routes; pass the
-providerstore + ref resolver from the assembly.
+Register `POST /admin/providers/test` and `GET /admin/providers/catalog`. The
+probe route is gated to **full admin only** (`IsAdmin`) — NOT the team-mapped
+provider-write tier (it resolves a secret to an arbitrary host; gate finding);
+the catalog route uses the standard `AdminAuth` guard. Pass the providerstore +
+ref resolver + `probe.allowed_hosts` from the assembly.
 
-- [ ] Write failing server-level test: both routes require auth (401 without token); 405/404 wiring matches Task 4
-- [ ] Wire routes in `server.go` + pass deps from `gateway.go`
+- [ ] Write failing server-level test: both routes require auth (401 without token); probe route rejects a non-admin OIDC identity (403); 405 wiring matches Task 4
+- [ ] Wire routes in `server.go` (full-admin gate on probe) + pass deps from `gateway.go`
 - [ ] `go test ./internal/server/... ./cmd/...` green; commit `feat(server): wire provider probe + catalog routes (ADR-014 T6)`
 
 ### Task 7: provider-aware dynamic register form (D1)

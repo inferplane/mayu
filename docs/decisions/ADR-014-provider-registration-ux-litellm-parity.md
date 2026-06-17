@@ -2,8 +2,11 @@
 
 **Date:** 2026-06-15
 **Status:** Proposed — design doc; implementation plan in
-`docs/superpowers/plans/2026-06-15-provider-registration-ux.md`. To be hardened
-through the `/co-agent:consensus` multi-model gate before implementation.
+`docs/superpowers/plans/2026-06-15-provider-registration-ux.md`. Hardened through
+the `/co-agent:consensus` plan gate (antigravity/Gemini 3.1 Pro High; codex
+unavailable on this host — 404 "Engine not found", as in ADR-009). Round 1: 2
+CRITICAL (test-before-save endpoint shape; probe SSRF/secret-exfil) + 1 MAJOR
+(bedrock IAM) + 2 MINOR (ephemeral status; wildcard scope) folded in below.
 **Related:** ADR-008 (UI-write provider registration — the DB-authoritative
 store + write API this builds on), ADR-002 (console grows but stays
 toolchain-free), ADR-005 (provider visibility), ADR-003 (governance/usability
@@ -76,19 +79,41 @@ no key field. Irrelevant fields are hidden, not just ignored. No new write-API
 fields — the DTO (`ProviderWrite`) is unchanged.
 
 ### D2 — Server-side connection probe (the headline feature)
-New endpoint **`POST /admin/providers/{name}/test`** (admin-gated). It:
-1. loads the **stored** provider row (refs only),
+New endpoint **`POST /admin/providers/test`** (full-admin-gated). It accepts a
+**`ProviderWrite` body** (refs only — the DTO has no field that can carry a
+secret), so an operator can **test a *draft* provider before saving it** (the
+"test-before-trust" loop; a stored provider is tested by submitting its current
+fields). It:
+1. parses + validates the `ProviderWrite` body (rejects inline secrets, same
+   guard as the register path),
 2. **resolves the ref server-side** (the same `config` resolution the data plane
    uses) — the client sends **no** secret,
 3. invokes a new **optional** provider capability `HealthChecker.HealthCheck(ctx)`
    — a minimal, cheap upstream probe (anthropic/openai_compatible → `GET
-   /v1/models`; bedrock → a bounded `ListFoundationModels`/tiny converse),
+   /v1/models`; bedrock → a **bounded 1-token `InvokeModel`/`Converse`**, which
+   uses the **same IAM action the data plane already needs** — NOT
+   `ListFoundationModels`, which would require an extra `bedrock:ListFoundation
+   Models` grant most deployments don't have),
 4. returns `{ok: bool, latency_ms: int, detail: string}` with a **sanitized**
    detail that never echoes the ref value or the secret, under a **bounded
    timeout**.
 `HealthChecker` is optional (like `TokenCounter`): a provider that doesn't
 implement it returns a "probe unsupported" result, never an error. Adding it
 touches only `providers/<name>/` + the interface decl — zero core diff (§8).
+
+**Probe trust boundary + SSRF guard (gate-hardened).** The probe resolves a
+secret ref and sends it to the request's `base_url`. For a **full admin** this
+grants **no new capability** — the same admin can already register a route and
+exfiltrate via a single data-plane request. The probe is therefore gated to
+**`IsAdmin` only**, NOT the team-mapped lower-privilege provider-write tier
+contemplated in ADR-008 (alt. 5): that tier must never be able to resolve a
+secret to an arbitrary host. Defense-in-depth, regardless of caller:
+- the probe **rejects a `base_url` that resolves to the cloud metadata endpoint
+  (169.254.169.254 / fd00:ec2::254)** — no legitimate LLM upstream lives there;
+- an **optional `probe.allowed_hosts` allowlist** (config) constrains probe
+  targets when set (unset = any host, preserving the internal-vLLM use case,
+  which is a legitimate private address — so we do **not** blanket-block RFC1918).
+This boundary is documented in the runbook and the API reference.
 
 ### D3 — Embedded model catalog + typeahead
 A small embedded per-type catalog (`GET /admin/providers/catalog?type=<t>` →
@@ -107,7 +132,11 @@ this via the candidate-topology build; this makes the UI match.)
 ### D5 — Health-status column
 The providers table gains a **status cell** (●ok / ●fail / ○untested + last-
 probe time), populated on demand by D2 (the same on-demand pattern as audit
-`VERIFY CHAIN`). Periodic background probing is an explicit follow-up, not v1.
+`VERIFY CHAIN`). Probe results are cached in a **process-local in-memory map
+keyed by provider name** (bounded by provider count — no cardinality concern),
+so the status **survives a page refresh within the process lifetime**; it is
+**not persisted** across restarts. Persistent status storage and periodic
+background probing are explicit follow-ups, not v1.
 
 ### D6 — Guided "Add Model" affordance
 The two cards are unified behind a single guided flow (select-or-create provider
@@ -122,6 +151,10 @@ The two cards are unified behind a single guided flow (select-or-create provider
   routing-engine change (shared-state rate accounting → ADR-013 HA territory),
   not a registration-UX change. Out of scope; tracked as a follow-up. Our route
   targets remain an **ordered fallback chain** (router `ResolveChain`).
+- **Wildcard model mapping (`openai/*`)** — LiteLLM maps a wildcard public name
+  to a provider endpoint. inferplane routes are **exact** `model → ordered
+  targets`; wildcard matching is a router-engine change, not a registration-UX
+  change. Explicitly out of scope for ADR-014; tracked as a follow-up.
 - **Periodic/auto health checks** — v1 is on-demand (D5); background probing is a
   follow-up (it needs a scheduler + cardinality-bounded status storage).
 
@@ -132,10 +165,12 @@ The two cards are unified behind a single guided flow (select-or-create provider
   *keeping* the secret-ref security edge LiteLLM lacks; no toolchain added; no
   write-API schema change; provider probe is zero-core-diff.
 - **Negative / risks (for the gate to scrutinize):**
-  - The probe makes an **outbound upstream call from the admin plane** — must be
-    admin-gated, bounded-timeout, error-sanitized (no secret/ref echo), and not
-    abusable as an SSRF/amplification vector (esp. `openai_compatible` with an
-    operator-supplied `base_url`).
+  - The probe makes an **outbound upstream call from the admin plane** —
+    addressed by D2's trust boundary: full-admin-gated, bounded-timeout,
+    error-sanitized (no secret/ref echo), metadata-endpoint blocked, optional
+    host allowlist. Residual: a full admin can already exfiltrate via the data
+    plane, so the probe adds no escalation **for that role**; the lower-privilege
+    provider-write tier (ADR-008 alt. 5) must not be granted probe.
   - Probe cost/latency: `GET /v1/models` is cheap but non-zero; must be explicit
     and on-demand.
   - The embedded catalog goes stale as upstream model lists change — accept
