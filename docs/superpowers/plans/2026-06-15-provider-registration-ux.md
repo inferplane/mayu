@@ -63,14 +63,16 @@ Implement `HealthCheck` as a **bounded 1-token `InvokeModel`/`Converse`** via th
 existing AWS client seam (`providers/bedrock/client.go` interface) — the **same
 IAM action (`bedrock:InvokeModel`) the data plane already needs**, NOT
 `ListFoundationModels` (which would demand an extra grant most deployments lack;
-gate finding). **A model-level `AccessDeniedException`/`ModelNotReadyException`
-is mapped to `OK:true`** (+ note in `Detail`): AWS validates SigV4 *before* the
-model-access check, so that error proves the credentials resolve; a real
-credential failure (SigV4/`UnrecognizedClientException`) maps to `OK:false`. Map
-all errors to a sanitized `Detail`.
+gate finding). **Classify by an inverse rule** (SigV4 is validated before any
+service check): **only** signature/credential errors
+(`UnrecognizedClientException`, `InvalidSignatureException`,
+`ExpiredTokenException`, missing creds) → `OK:false`; **a 2xx OR any
+post-signature service error** (`AccessDenied`, `ModelNotReady`,
+`ValidationException`, `ResourceNotFoundException` from the dummy model id) →
+`OK:true` + note. Map all to a sanitized `Detail`.
 
-- [ ] Write failing test mocking the bedrock client: OK path; model-access-denied→OK+note; SigV4/credential error→not-OK; assert no credential in detail
-- [ ] Implement `HealthCheck` in `providers/bedrock` (1-token invoke/converse; access-denied = healthy-cred)
+- [ ] Write failing test mocking the bedrock client: 2xx→OK; ValidationException/ResourceNotFound/AccessDenied→OK+note; UnrecognizedClient/InvalidSignature→not-OK; assert no credential in detail
+- [ ] Implement `HealthCheck` in `providers/bedrock` (1-token invoke/converse; only SigV4/cred errors = unhealthy)
 - [ ] `go test ./providers/bedrock/...` green; commit `feat(bedrock): health probe via 1-token invoke (ADR-014 T3)`
 
 ### Task 4: server-side provider connection probe handler

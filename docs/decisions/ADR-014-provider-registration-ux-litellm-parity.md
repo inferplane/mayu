@@ -93,11 +93,16 @@ fields). It:
    /v1/models`; bedrock → a **bounded 1-token `InvokeModel`/`Converse`**, which
    uses the **same IAM action the data plane already needs** — NOT
    `ListFoundationModels`, which would require an extra `bedrock:ListFoundation
-   Models` grant most deployments don't have). **The bedrock probe treats a
-   model-level `AccessDeniedException`/`ModelNotReadyException` as a *healthy
-   credential*** (`OK:true` + a note): AWS validates the SigV4 signature *before*
-   the model-access check, so reaching that error proves the credentials resolve
-   — a credential failure surfaces as a SigV4/`UnrecognizedClient` error instead,
+   Models` grant most deployments don't have). **The bedrock probe classifies by
+   an inverse rule**: AWS validates the SigV4 signature *before* any
+   service-level check, so **only signature/credential errors**
+   (`UnrecognizedClientException`, `InvalidSignatureException`,
+   `ExpiredTokenException`, missing-credentials) map to `OK:false`; **every other
+   outcome — a 2xx OR any post-signature service error** (`AccessDenied`,
+   `ModelNotReady`, `ValidationException`, `ResourceNotFoundException` from the
+   probe's dummy model id) — maps to `OK:true` + a note, because reaching it
+   proves the credentials resolved. This closes the whole class rather than
+   enumerating exceptions,
 4. returns `{ok: bool, latency_ms: int, detail: string}` with a **sanitized**
    detail that never echoes the ref value or the secret, under a **bounded
    timeout**.
