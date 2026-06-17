@@ -109,7 +109,7 @@ func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier,
 	// provider store). The exact POST route is more specific than the
 	// /admin/providers/ prefix, so it wins for POST.
 	probeH := AdminAuth(adminTokens, verifier, mapping, denied,
-		requireAdmin(configapi.ProbeHandler(writer != nil, probeAllowedHosts)))
+		requireAdmin(configapi.ProbeHandler(writer != nil, probeAllowedHosts), emit))
 	mux.Handle("POST /admin/providers/test", probeH)
 	// Model catalog (ADR-014 D3): read-only typeahead hints, behind AdminAuth.
 	catalogH := AdminAuth(adminTokens, verifier, mapping, denied, configapi.CatalogHandler())
@@ -135,10 +135,21 @@ func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier,
 // D2). It runs INSIDE AdminAuth (the identity is already in context): a
 // team-mapped, non-admin OIDC identity is admitted by AdminAuth but rejected
 // here with 403. Fails closed if no identity is present.
-func requireAdmin(next http.Handler) http.Handler {
+func requireAdmin(next http.Handler, emit func(audit.Record)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id, ok := principal.AdminFrom(r.Context())
 		if !ok || !id.IsAdmin {
+			if ok && emit != nil {
+				sub, method := id.Subject, id.AuthMethod
+				emit(audit.Record{
+					SchemaVersion: 1,
+					Event:         "admin_denied",
+					ID:            ulid.New(),
+					TS:            time.Now().UTC().Format(time.RFC3339Nano),
+					Principal:     audit.PrincipalRef{User: &sub, AuthMethod: &method},
+					Request:       audit.RequestRef{Ingress: "admin"},
+				})
+			}
 			http.Error(w, `{"error":"admin only"}`, http.StatusForbidden)
 			return
 		}

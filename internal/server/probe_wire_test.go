@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/inferplane/inferplane/internal/adminauth"
+	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/principal"
 	"github.com/inferplane/inferplane/internal/server/configapi"
 )
@@ -54,9 +55,11 @@ func TestCatalogRoute_RequiresAuth(t *testing.T) {
 
 func TestRequireAdmin(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusTeapot) })
-	h := requireAdmin(next)
+	var recs []audit.Record
+	emit := func(rec audit.Record) { recs = append(recs, rec) }
+	h := requireAdmin(next, emit)
 
-	// full admin → passes through
+	// full admin → passes through, no denial audit
 	req := httptest.NewRequest(http.MethodPost, "/x", nil)
 	req = req.WithContext(principal.WithAdmin(req.Context(), principal.AdminIdentity{IsAdmin: true}))
 	rr := httptest.NewRecorder()
@@ -64,21 +67,31 @@ func TestRequireAdmin(t *testing.T) {
 	if rr.Code != http.StatusTeapot {
 		t.Fatalf("admin should pass, got %d", rr.Code)
 	}
+	if len(recs) != 0 {
+		t.Fatalf("admin pass must not audit, got %d records", len(recs))
+	}
 
-	// non-admin (team-mapped) identity → 403
+	// non-admin (team-mapped) identity → 403 + audited admin_denied (§5.5)
 	req = httptest.NewRequest(http.MethodPost, "/x", nil)
-	req = req.WithContext(principal.WithAdmin(req.Context(), principal.AdminIdentity{IsAdmin: false, Teams: []string{"demo"}}))
+	req = req.WithContext(principal.WithAdmin(req.Context(), principal.AdminIdentity{IsAdmin: false, Teams: []string{"demo"}, AuthMethod: "oidc"}))
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("non-admin should be 403, got %d", rr.Code)
 	}
+	if len(recs) != 1 || recs[0].Event != "admin_denied" {
+		t.Fatalf("authenticated 403 must emit one admin_denied record, got %+v", recs)
+	}
 
-	// no identity → 403 (fail closed)
+	// no identity → 403 (fail closed), NOT audited (401-equivalent never grows the chain)
+	recs = nil
 	req = httptest.NewRequest(http.MethodPost, "/x", nil)
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("no identity should be 403, got %d", rr.Code)
+	}
+	if len(recs) != 0 {
+		t.Fatalf("unauthenticated 403 must not audit, got %d records", len(recs))
 	}
 }
