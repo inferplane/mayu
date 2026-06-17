@@ -242,11 +242,28 @@ function routeActions(m) {
   return cell;
 }
 
+// PROVIDER_FIELDS maps a provider type to the form fields relevant to it
+// (ADR-014 D1). The form morphs on type change: anthropic/openai_compatible
+// authenticate with an api_key_ref over a base_url; bedrock uses an AWS region +
+// IAM auth mode and no key. Irrelevant fields are hidden, not just ignored.
+const PROVIDER_FIELDS = {
+  anthropic: ["pf-baseurl", "pf-refkind", "pf-refval"],
+  openai_compatible: ["pf-baseurl", "pf-refkind", "pf-refval"],
+  bedrock: ["pf-region", "pf-authmode"],
+};
+const PROVIDER_FIELD_IDS = ["pf-baseurl", "pf-refkind", "pf-refval", "pf-region", "pf-authmode"];
+
+function applyProviderTypeFields() {
+  const shown = PROVIDER_FIELDS[$("pf-type").value] || [];
+  for (const id of PROVIDER_FIELD_IDS) $(id).hidden = !shown.includes(id);
+}
+
 // fillProviderForm prefills the register/edit form from a provider view row.
 // The auth STRING is parsed back to the ref kind/name (never a secret value).
 function fillProviderForm(p) {
   $("pf-name").value = p.name;
   $("pf-type").value = p.type;
+  applyProviderTypeFields();
   $("pf-baseurl").value = (p.base_url && p.base_url !== "(default)") ? p.base_url : "";
   $("pf-region").value = p.region || "";
   $("pf-authmode").value = "";
@@ -341,6 +358,10 @@ $("model-form").addEventListener("submit", async (e) => {
 });
 
 $("mf-add-target").addEventListener("click", () => addTargetRow());
+
+// Morph the provider form to the selected type (ADR-014 D1).
+$("pf-type").addEventListener("change", applyProviderTypeFields);
+applyProviderTypeFields();
 
 // Git export: render the secret-free committable config fragment.
 $("export-btn").addEventListener("click", async () => {
