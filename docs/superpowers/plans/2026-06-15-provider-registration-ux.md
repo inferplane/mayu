@@ -79,6 +79,17 @@ post-signature service error** (`AccessDenied`, `ModelNotReady`,
 
 - Create: `internal/server/configapi/probe.go`
 - Test: `internal/server/configapi/probe_test.go`
+- Modify: `providers/provider.go`
+- Modify: `providers/anthropic/anthropic.go`
+- Modify: `providers/openaicompat/openaicompat.go`
+
+**Scope note (implementation-discovered):** enforcing the SSRF guard in the
+HTTP client's `DialContext` (round-2 requirement) needs the probe to inject a
+*guarded* `*http.Client` into the provider. The provider factories currently
+hardcode their client, so `providers.Config` gains an optional `HTTPClient`
+field that anthropic/openai_compatible use when set (nil ⇒ default, so the data
+plane is unchanged). Bedrock ignores it (AWS SDK). This is faithful to the gate
+finding, not scope creep.
 
 Handler for **`POST /admin/providers/test`** that accepts a **`ProviderWrite`
 body** (refs only — enables testing a *draft* provider before save; gate
