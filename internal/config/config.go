@@ -253,6 +253,14 @@ type Config struct {
 	Pricing       PricingConfig             `json:"pricing"`
 	Plugins       []PluginConfig            `json:"plugins,omitempty"`
 	OTel          *OTelConfig               `json:"otel,omitempty"`
+	Probe         ProbeConfig               `json:"probe,omitempty"`
+}
+
+// ProbeConfig configures the admin connection-test probe (ADR-014 D2).
+// AllowedHosts, when non-empty, restricts probe targets to those hostnames; an
+// empty list permits any host (the cloud metadata endpoint is always blocked).
+type ProbeConfig struct {
+	AllowedHosts []string `json:"allowed_hosts,omitempty"`
 }
 
 // Load parses the config and resolves every secret ref — the back-compat entry
