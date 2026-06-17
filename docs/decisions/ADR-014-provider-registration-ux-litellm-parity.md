@@ -148,10 +148,14 @@ The providers table gains a **status cell** (●ok / ●fail / ○untested + las
 probe time), populated on demand by D2 (the same on-demand pattern as audit
 `VERIFY CHAIN`). The probe endpoint is **stateless** — it does **not** cache
 server-side (caching a *draft* test by provider name would poison the saved
-provider's status, and there is no read path). Instead the **console caches the
-last result in `sessionStorage`**, keyed by provider name, so status survives a
-page refresh without backend state or cross-contamination. Persistent
-server-side status and periodic background probing are explicit follow-ups.
+provider's status, and there is no read path). The console caches the last
+result **in memory (page-session), keyed by provider name**, so status persists
+across table re-renders. It deliberately does **not** use `sessionStorage`/
+`localStorage`: the **data-free console invariant (ADR-001, enforced by
+`adminui_test`)** forbids any client-side persistence — so status resets on a
+full page reload (re-test to refresh). This invariant overrides the gate's
+round-2 preference for refresh-survival. Persistent server-side status and
+periodic background probing are explicit follow-ups.
 
 ### D6 — Guided "Add Model" affordance
 The two cards are unified behind a single guided flow (select-or-create provider

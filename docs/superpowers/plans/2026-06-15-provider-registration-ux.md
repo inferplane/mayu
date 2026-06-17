@@ -103,8 +103,8 @@ when that config is set; enforcing at dial time defeats DNS-rebinding (TOCTOU);
 (5) builds the live provider and calls `HealthCheck` under a bounded
 `context.WithTimeout`; (6) returns `{ok, latency_ms, detail}` JSON. The endpoint
 is **stateless — no server-side cache** (a draft test keyed by name would poison
-the saved provider's status; the console caches the result in `sessionStorage`
-instead). A provider without `HealthChecker` ⇒ `{ok:false, detail:"probe
+the saved provider's status; the console caches the result in an in-memory
+page-session map instead — the data-free invariant forbids sessionStorage). A provider without `HealthChecker` ⇒ `{ok:false, detail:"probe
 unsupported for this provider type"}` at HTTP 200 (never 500).
 
 - [ ] Write failing tests: 405 (no store); inline-secret body rejected; metadata-IP dial rejected (incl. a host that resolves to it); allowlist-violation rejected; unsupported-capability 200; sanitized detail (fake failing provider → body has neither ref value nor secret); timeout honored
@@ -168,10 +168,10 @@ auth, no key field). No write-API change; no inline secret field.
 Add a TEST CONNECTION button to the provider form and a status cell to the
 providers table; both POST the current form fields (a `ProviderWrite` body) to
 `POST /admin/providers/test` and render ●ok(latency) / ●fail(detail) /
-○untested. Cache the last result in `sessionStorage` keyed by provider name so
-status survives a page refresh. Sanitized detail only.
+○untested. Cache the last result in an in-memory (page-session) map keyed by provider
+name (the data-free console invariant, ADR-001, forbids sessionStorage). Sanitized detail only.
 
-- [ ] Add button + status-cell rendering + `sessionStorage` cache in `app.js`/`index.html`; style badges in `style.css`
+- [ ] Add button + status-cell rendering + in-memory page-session cache in `app.js`/`index.html`; style badges in `style.css`
 - [ ] `bash tests/run-all.sh` green; commit `feat(adminui): connection test + provider health status (ADR-014 T8)`
 
 ### Task 9: route provider dropdown + model typeahead (D3/D4)

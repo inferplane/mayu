@@ -381,17 +381,15 @@ function providerFormBody() {
   return { name, body };
 }
 
-// Probe results are cached client-side in sessionStorage keyed by provider name
-// (ADR-014 D5) — the server probe is stateless, so this is where status survives
-// a page refresh. Never holds a secret (refs/status only).
-function probeCacheKey(name) { return "probe:" + name; }
-function probeCacheGet(name) {
-  try { return JSON.parse(sessionStorage.getItem(probeCacheKey(name)) || "null"); }
-  catch { return null; }
-}
-function probeCacheSet(name, result) {
-  try { sessionStorage.setItem(probeCacheKey(name), JSON.stringify(result)); } catch { /* quota */ }
-}
+// Probe results are cached IN MEMORY (page-session only) keyed by provider name
+// (ADR-014 D5). The server probe is stateless; this client cache keeps the table
+// status across re-renders within the open page. It deliberately avoids any
+// browser-persistent store — the data-free console invariant (ADR-001, enforced
+// by adminui_test) forbids client-side persistence — so status resets on a full
+// page reload (re-test to refresh). Never holds a secret.
+const probeResults = {};
+function probeCacheGet(name) { return probeResults[name] || null; }
+function probeCacheSet(name, result) { probeResults[name] = result; }
 
 // probeBadge renders a provider's cached health into a table cell.
 function probeBadge(cell, result) {
