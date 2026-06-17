@@ -250,3 +250,9 @@ progress.bar.over::-moz-progress-bar { background: var(--red); }
 .verify-line { padding: 0.2rem 0; word-break: break-all; }
 .verify-line.ok { color: var(--ok); }
 .verify-line.err { color: var(--err); }
+
+/* connection-probe status badge (ADR-014 D5) */
+.probe-badge { font-size: 0.8rem; white-space: nowrap; }
+.probe-badge.ok { color: var(--green); }
+.probe-badge.fail { color: var(--red); }
+.probe-badge.untested { color: var(--dim); }

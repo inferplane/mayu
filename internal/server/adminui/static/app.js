@@ -169,6 +169,7 @@ async function refreshProviders() {
   $("model-write").hidden = !writable;
   $("export-card").hidden = !writable;
   $("prov-act-col").hidden = !writable;
+  $("prov-status-col").hidden = !writable;
   $("route-act-col").hidden = !writable;
   if (writable && !$("mf-targets").querySelector(".target-row")) addTargetRow();
 
@@ -176,7 +177,7 @@ async function refreshProviders() {
   pbody.textContent = "";
   const provs = view.providers || [];
   if (!provs.length) {
-    pbody.appendChild(emptyRow(writable ? 5 : 4, "no providers configured"));
+    pbody.appendChild(emptyRow(writable ? 6 : 4, "no providers configured"));
   } else {
     for (const p of provs) {
       const tr = document.createElement("tr");
@@ -184,7 +185,12 @@ async function refreshProviders() {
       tr.appendChild(td(p.type));
       tr.appendChild(td(p.base_url || "(default)"));
       tr.appendChild(td(p.auth)); // ref name / IAM mode — never a secret value
-      if (writable) tr.appendChild(providerActions(p));
+      if (writable) {
+        const statusCell = document.createElement("td");
+        probeBadge(statusCell, probeCacheGet(p.name));
+        tr.appendChild(statusCell);
+        tr.appendChild(providerActions(p));
+      }
       pbody.appendChild(tr);
     }
   }
@@ -304,10 +310,10 @@ function addTargetRow(provider, model, apiv) {
   $("mf-targets").appendChild(row);
 }
 
-// Provider register/edit: PUT replaces the named provider (upsert). The body
-// carries only the ref (env NAME / file PATH), never a secret value.
-$("provider-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
+// providerFormBody reads the register/edit form into a ProviderWrite body
+// (refs only — env NAME / file PATH, never a secret value). Shared by the save
+// and the connection-test paths (ADR-014 D2).
+function providerFormBody() {
   const name = $("pf-name").value.trim();
   const body = { type: $("pf-type").value };
   const bu = $("pf-baseurl").value.trim(); if (bu) body.base_url = bu;
@@ -316,11 +322,64 @@ $("provider-form").addEventListener("submit", async (e) => {
   const kind = $("pf-refkind").value, val = $("pf-refval").value.trim();
   if (kind === "env" && val) body.api_key_ref = { env: val };
   else if (kind === "file" && val) body.api_key_ref = { file: val };
+  return { name, body };
+}
+
+// Probe results are cached client-side in sessionStorage keyed by provider name
+// (ADR-014 D5) — the server probe is stateless, so this is where status survives
+// a page refresh. Never holds a secret (refs/status only).
+function probeCacheKey(name) { return "probe:" + name; }
+function probeCacheGet(name) {
+  try { return JSON.parse(sessionStorage.getItem(probeCacheKey(name)) || "null"); }
+  catch { return null; }
+}
+function probeCacheSet(name, result) {
+  try { sessionStorage.setItem(probeCacheKey(name), JSON.stringify(result)); } catch { /* quota */ }
+}
+
+// probeBadge renders a provider's cached health into a table cell.
+function probeBadge(cell, result) {
+  cell.className = "probe-badge";
+  if (!result) { cell.classList.add("untested"); cell.textContent = "○ untested"; return; }
+  if (result.ok) {
+    cell.classList.add("ok");
+    cell.textContent = "● ok" + (result.latency_ms ? " (" + result.latency_ms + "ms)" : "");
+  } else {
+    cell.classList.add("fail");
+    cell.textContent = "● " + (result.detail || "failed");
+  }
+}
+
+// Provider register/edit: PUT replaces the named provider (upsert). The body
+// carries only the ref (env NAME / file PATH), never a secret value.
+$("provider-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const { name, body } = providerFormBody();
   const status = $("provider-form-status");
   try {
     await api("PUT", "/admin/providers/" + encodeURIComponent(name), body);
     status.className = "status"; status.textContent = "saved ✓ " + name;
     $("provider-form").reset();
+    applyProviderTypeFields();
+    await refreshProviders();
+  } catch (err) {
+    status.className = "status err"; status.textContent = String(err.message || err);
+  }
+});
+
+// TEST CONNECTION: probe the DRAFT in the form (server resolves the ref; the
+// client sends no secret). Caches the result by provider name so the table
+// status survives a refresh (ADR-014 D2/D5).
+$("pf-test").addEventListener("click", async () => {
+  const { name, body } = providerFormBody();
+  const status = $("provider-form-status");
+  status.className = "status"; status.textContent = "testing…";
+  try {
+    const res = await api("POST", "/admin/providers/test", body);
+    if (name) { probeCacheSet(name, res); }
+    status.className = res.ok ? "status" : "status err";
+    status.textContent = (res.ok ? "✓ reachable" : "✗ " + (res.detail || "unreachable"))
+      + (res.latency_ms ? " · " + res.latency_ms + "ms" : "");
     await refreshProviders();
   } catch (err) {
     status.className = "status err"; status.textContent = String(err.message || err);

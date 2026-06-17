@@ -146,7 +146,7 @@
         <div class="card">
           <div class="microlabel">providers</div>
           <table class="data" id="providers-table">
-            <thead><tr><th>name</th><th>type</th><th>endpoint</th><th>auth</th><th id="prov-act-col" hidden></th></tr></thead>
+            <thead><tr><th>name</th><th>type</th><th>endpoint</th><th>auth</th><th id="prov-status-col" hidden>status</th><th id="prov-act-col" hidden></th></tr></thead>
             <tbody><tr><td colspan="4" class="empty">connect to load…</td></tr></tbody>
           </table>
         </div>
@@ -170,6 +170,7 @@
             <input id="pf-refval" type="text" placeholder="ref NAME or PATH — never the secret value">
             <input id="pf-region" type="text" placeholder="region (bedrock)">
             <input id="pf-authmode" type="text" placeholder="auth mode (bedrock, e.g. irsa)">
+            <button type="button" id="pf-test" class="ghost">TEST CONNECTION</button>
             <button type="submit">SAVE PROVIDER</button>
           </form>
           <p class="hint warn-label">⚠ enter the env var NAME or file PATH — the gateway
