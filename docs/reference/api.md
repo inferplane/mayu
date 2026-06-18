@@ -21,6 +21,8 @@ contract is in [docs/api-reference.md](../api-reference.md).
 | Whoami API | `internal/server/adminapi/whoami.go` | `GET /admin/whoami` secret-free resolved identity (subject/teams/is_admin/auth_method) for self-service key issuance (ADR-010) |
 | Admin key console | `internal/server/adminui/` | `/admin/ui/` embedded static console (data-free, unauthenticated; data via `/admin/keys`, ADR-001) |
 | Config view/write API | `internal/server/configapi/` | `GET /admin/config` read-only topology (ADR-005); `PUT`/`DELETE /admin/providers/{name}` + `PUT`/`DELETE /admin/models/{name}` UI-write (ADR-008; 405 unless `provider_store` enabled); `GET /admin/config/export` secret-free Git export |
+| Connection probe | `internal/server/configapi/probe.go` | `POST /admin/providers/test` — tests a **draft** provider (ProviderWrite body, refs only) by resolving the ref server-side and probing the upstream via the provider's `HealthChecker` (ADR-014). **Full-admin only**; SSRF-guarded (metadata endpoint blocked at dial time, optional `probe.allowed_hosts`); stateless (status cached client-side in memory (no sessionStorage; data-free invariant)). 405 unless `provider_store` enabled. Returns `{ok, latency_ms, detail}` (sanitized) |
+| Model catalog | `internal/server/configapi/catalog.go` | `GET /admin/providers/catalog?type=<t>` — embedded known-model ids for the console typeahead (ADR-014); advisory (unknown type ⇒ empty, never blocks a save) |
 | Provider store | `internal/providerstore/` | opt-in DB-authoritative provider/model topology (ADR-008); refs only (no secret column), durable seed marker, Postgres-portable DDL |
 | Audit verify API | `internal/server/auditapi/` | `GET /admin/audit/verify` per-sink hash-chain check (ADR-003 #2); complete-prefix, 16 MiB cap |
 | Metrics endpoint | `internal/server/metricsapi.go` | unauthenticated Prometheus `/metrics` |
@@ -59,6 +61,8 @@ HTTP 표면입니다. 두 인그레스(Anthropic Messages, OpenAI Chat Completio
 | Whoami API | `internal/server/adminapi/whoami.go` | `GET /admin/whoami` 시크릿 무노출 신원(subject/teams/is_admin/auth_method) — 셀프서비스 키 발급용 (ADR-010) |
 | 관리 키 콘솔 | `internal/server/adminui/` | `/admin/ui/` 내장 정적 콘솔(데이터 없음·무인증, 데이터는 `/admin/keys` 경유, ADR-001) |
 | Config 뷰/쓰기 API | `internal/server/configapi/` | `GET /admin/config` 읽기 전용 토폴로지 (ADR-005); `PUT`/`DELETE /admin/providers/{name}` + `PUT`/`DELETE /admin/models/{name}` UI 쓰기 (ADR-008; `provider_store` 미설정 시 405); `GET /admin/config/export` 시크릿 무노출 Git export |
+| 연결 프로브 | `internal/server/configapi/probe.go` | `POST /admin/providers/test` — **드래프트** 프로바이더(ProviderWrite 본문, 참조만)를 서버에서 ref 해석 후 `HealthChecker`로 업스트림 연결 시험 (ADR-014). **풀 어드민 전용**; SSRF 가드(메타데이터 차단, 선택적 `probe.allowed_hosts`); 무상태(상태는 클라이언트 인메모리 캐시). `provider_store` 미설정 시 405. `{ok, latency_ms, detail}`(살균) 반환 |
+| 모델 카탈로그 | `internal/server/configapi/catalog.go` | `GET /admin/providers/catalog?type=<t>` — 콘솔 typeahead용 내장 모델 ID (ADR-014); 어드바이저리(미지 타입 ⇒ 빈 목록, 저장 차단 안 함) |
 | Provider 스토어 | `internal/providerstore/` | 옵트인 DB 권위 프로바이더/모델 토폴로지 (ADR-008); ref만 저장(시크릿 컬럼 없음), durable seed 마커, Postgres 이식 가능 DDL |
 | Audit verify API | `internal/server/auditapi/` | `GET /admin/audit/verify` sink별 해시체인 검증 (ADR-003 #2); 완전 prefix, 16 MiB 캡 |
 | 메트릭 엔드포인트 | `internal/server/metricsapi.go` | 무인증 Prometheus `/metrics` |

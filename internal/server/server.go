@@ -10,6 +10,7 @@ import (
 	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
 	"github.com/inferplane/inferplane/internal/metrics"
+	"github.com/inferplane/inferplane/internal/principal"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/internal/server/adminapi"
 	"github.com/inferplane/inferplane/internal/server/adminui"
@@ -68,7 +69,7 @@ func negotiateModels(anthropicH, openaiH http.Handler) http.Handler {
 // receives admin-action audit records (key create/revoke + denials, §5.5
 // "admin API calls are audit events"); nil skips. When m is nil the /metrics
 // endpoint is omitted.
-func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier, mapping adminauth.MappingConfig, configView func() configapi.View, auditFileSinks []string, aud *audit.Writer, m *metrics.Metrics, writer configapi.Writer, configExport func() configapi.ExportDoc) http.Handler {
+func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier, mapping adminauth.MappingConfig, configView func() configapi.View, auditFileSinks []string, aud *audit.Writer, m *metrics.Metrics, writer configapi.Writer, configExport func() configapi.ExportDoc, probeAllowedHosts ...string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
@@ -101,6 +102,18 @@ func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier,
 	mux.Handle("/admin/providers/", providersW)
 	modelsW := AdminAuth(adminTokens, verifier, mapping, denied, configapi.WriteHandler("models", writer, emit))
 	mux.Handle("/admin/models/", modelsW)
+	// Connection probe (ADR-014 D2): tests a DRAFT provider's upstream before a
+	// route is trusted. FULL-ADMIN ONLY — it resolves a secret ref to an
+	// operator-supplied host, so the team-mapped provider-write tier must not
+	// reach it (requireAdmin). storeEnabled mirrors the write path (405 when no
+	// provider store). The exact POST route is more specific than the
+	// /admin/providers/ prefix, so it wins for POST.
+	probeH := AdminAuth(adminTokens, verifier, mapping, denied,
+		requireAdmin(configapi.ProbeHandler(writer != nil, probeAllowedHosts), emit))
+	mux.Handle("POST /admin/providers/test", probeH)
+	// Model catalog (ADR-014 D3): read-only typeahead hints, behind AdminAuth.
+	catalogH := AdminAuth(adminTokens, verifier, mapping, denied, configapi.CatalogHandler())
+	mux.Handle("GET /admin/providers/catalog", catalogH)
 	// Git export (ADR-008 §3): read-only, secret-free config fragment of the
 	// current effective topology, mounted unconditionally (works with or without
 	// a provider store). Behind the same AdminAuth.
@@ -116,6 +129,32 @@ func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier,
 	mux.Handle("/admin/ui/", http.StripPrefix("/admin/ui", adminui.Handler()))
 	mux.Handle("/admin/ui", http.RedirectHandler("/admin/ui/", http.StatusMovedPermanently))
 	return mux
+}
+
+// requireAdmin wraps a handler so only a FULL admin identity reaches it (ADR-014
+// D2). It runs INSIDE AdminAuth (the identity is already in context): a
+// team-mapped, non-admin OIDC identity is admitted by AdminAuth but rejected
+// here with 403. Fails closed if no identity is present.
+func requireAdmin(next http.Handler, emit func(audit.Record)) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id, ok := principal.AdminFrom(r.Context())
+		if !ok || !id.IsAdmin {
+			if ok && emit != nil {
+				sub, method := id.Subject, id.AuthMethod
+				emit(audit.Record{
+					SchemaVersion: 1,
+					Event:         "admin_denied",
+					ID:            ulid.New(),
+					TS:            time.Now().UTC().Format(time.RFC3339Nano),
+					Principal:     audit.PrincipalRef{User: &sub, AuthMethod: &method},
+					Request:       audit.RequestRef{Ingress: "admin"},
+				})
+			}
+			http.Error(w, `{"error":"admin only"}`, http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // adminDenialEmitter adapts the audit emit func to the AdminAuth denial hook:

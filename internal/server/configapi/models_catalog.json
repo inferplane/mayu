@@ -1,0 +1,27 @@
+{
+  "anthropic": [
+    "claude-opus-4-8",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5-20251001",
+    "claude-fable-5",
+    "claude-3-7-sonnet-latest",
+    "claude-3-5-haiku-latest"
+  ],
+  "openai_compatible": [
+    "gpt-4o",
+    "gpt-4o-mini",
+    "o3-mini",
+    "llama3.3",
+    "qwen2.5",
+    "mistral-small",
+    "deepseek-r1"
+  ],
+  "bedrock": [
+    "anthropic.claude-sonnet-4-6-v1:0",
+    "anthropic.claude-3-5-sonnet-20241022-v2:0",
+    "anthropic.claude-3-5-haiku-20241022-v1:0",
+    "amazon.nova-pro-v1:0",
+    "amazon.nova-lite-v1:0",
+    "meta.llama3-1-70b-instruct-v1:0"
+  ]
+}

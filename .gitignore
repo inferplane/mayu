@@ -19,3 +19,6 @@ coverage.out
 
 # operator-local notes (never commit)
 /secrets
+
+# serena tooling cache
+.serena/

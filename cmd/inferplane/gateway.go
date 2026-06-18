@@ -257,7 +257,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 		writer = g
 	}
 	g.dataSrv = &http.Server{Handler: server.DataMux(r, store, aud, gov, m, masking)}
-	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, m, writer, liveExport(holder))}
+	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, m, writer, liveExport(holder), cfg.Probe.AllowedHosts...)}
 	return g, nil
 }
 

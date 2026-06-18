@@ -167,8 +167,10 @@ async function refreshProviders() {
   $("providers-mode-rw").hidden = !writable;
   $("provider-write").hidden = !writable;
   $("model-write").hidden = !writable;
+  lastProviders = view.providers || [];
   $("export-card").hidden = !writable;
   $("prov-act-col").hidden = !writable;
+  $("prov-status-col").hidden = !writable;
   $("route-act-col").hidden = !writable;
   if (writable && !$("mf-targets").querySelector(".target-row")) addTargetRow();
 
@@ -176,7 +178,7 @@ async function refreshProviders() {
   pbody.textContent = "";
   const provs = view.providers || [];
   if (!provs.length) {
-    pbody.appendChild(emptyRow(writable ? 5 : 4, "no providers configured"));
+    pbody.appendChild(emptyRow(writable ? 6 : 4, "no providers configured"));
   } else {
     for (const p of provs) {
       const tr = document.createElement("tr");
@@ -184,7 +186,12 @@ async function refreshProviders() {
       tr.appendChild(td(p.type));
       tr.appendChild(td(p.base_url || "(default)"));
       tr.appendChild(td(p.auth)); // ref name / IAM mode — never a secret value
-      if (writable) tr.appendChild(providerActions(p));
+      if (writable) {
+        const statusCell = document.createElement("td");
+        probeBadge(statusCell, probeCacheGet(p.name));
+        tr.appendChild(statusCell);
+        tr.appendChild(providerActions(p));
+      }
       pbody.appendChild(tr);
     }
   }
@@ -242,11 +249,52 @@ function routeActions(m) {
   return cell;
 }
 
+// PROVIDER_FIELDS maps a provider type to the form fields relevant to it
+// (ADR-014 D1). The form morphs on type change: anthropic/openai_compatible
+// authenticate with an api_key_ref over a base_url; bedrock uses an AWS region +
+// IAM auth mode and no key. Irrelevant fields are hidden, not just ignored.
+const PROVIDER_FIELDS = {
+  anthropic: ["pf-baseurl", "pf-refkind", "pf-refval"],
+  openai_compatible: ["pf-baseurl", "pf-refkind", "pf-refval"],
+  bedrock: ["pf-region", "pf-authmode"],
+};
+const PROVIDER_FIELD_IDS = ["pf-baseurl", "pf-refkind", "pf-refval", "pf-region", "pf-authmode"];
+
+// Registered providers from the last topology load, used to populate the route
+// target dropdown + typeahead (ADR-014 D4). catalogCache memoizes type→models.
+let lastProviders = [];
+let catalogCache = {};
+let targetSeq = 0;
+
+// loadCatalog returns known model ids for a provider type (ADR-014 D3),
+// memoized. Advisory only — failures degrade to free-text (empty list).
+async function loadCatalog(type) {
+  if (!type) return [];
+  if (catalogCache[type]) return catalogCache[type];
+  try {
+    const out = await api("GET", "/admin/providers/catalog?type=" + encodeURIComponent(type));
+    catalogCache[type] = (out && out.models) || [];
+  } catch { catalogCache[type] = []; }
+  return catalogCache[type];
+}
+
+// providerType returns the configured type for a provider name (or "").
+function providerType(name) {
+  const p = lastProviders.find((x) => x.name === name);
+  return p ? p.type : "";
+}
+
+function applyProviderTypeFields() {
+  const shown = PROVIDER_FIELDS[$("pf-type").value] || [];
+  for (const id of PROVIDER_FIELD_IDS) $(id).hidden = !shown.includes(id);
+}
+
 // fillProviderForm prefills the register/edit form from a provider view row.
 // The auth STRING is parsed back to the ref kind/name (never a secret value).
 function fillProviderForm(p) {
   $("pf-name").value = p.name;
   $("pf-type").value = p.type;
+  applyProviderTypeFields();
   $("pf-baseurl").value = (p.base_url && p.base_url !== "(default)") ? p.base_url : "";
   $("pf-region").value = p.region || "";
   $("pf-authmode").value = "";
@@ -270,27 +318,58 @@ function fillModelForm(m) {
   if (!(m.targets || []).length) addTargetRow();
 }
 
-// addTargetRow appends one ordered-target input row to the model form.
+// addTargetRow appends one ordered-target row to the model form (ADR-014 D4).
+// The provider is a <select> populated from the registered providers (a route to
+// a missing provider is rejected server-side, so this moves the failure to
+// authoring time). The upstream model is a free-text input with a <datalist>
+// typeahead sourced from the provider type's catalog (advisory — never blocks).
 function addTargetRow(provider, model, apiv) {
   const row = document.createElement("div");
   row.className = "row target-row";
-  const p = document.createElement("input");
-  p.type = "text"; p.placeholder = "provider"; p.className = "t-provider"; p.value = provider || "";
+
+  const p = document.createElement("select");
+  p.className = "t-provider";
+  const names = lastProviders.map((x) => x.name);
+  if (provider && !names.includes(provider)) names.unshift(provider); // preserve on edit
+  for (const name of names) {
+    const opt = document.createElement("option");
+    opt.value = name; opt.textContent = name;
+    if (name === provider) opt.selected = true;
+    p.appendChild(opt);
+  }
+
+  const dlId = "tgt-models-" + (++targetSeq);
+  const dl = document.createElement("datalist");
+  dl.id = dlId;
   const m = document.createElement("input");
   m.type = "text"; m.placeholder = "upstream model"; m.className = "t-model"; m.value = model || "";
+  m.setAttribute("list", dlId);
+
+  const fillModels = async () => {
+    const models = await loadCatalog(providerType(p.value));
+    dl.textContent = "";
+    for (const id of models) {
+      const opt = document.createElement("option");
+      opt.value = id;
+      dl.appendChild(opt);
+    }
+  };
+  p.addEventListener("change", fillModels);
+  fillModels(); // initial population for the selected provider
+
   const a = document.createElement("input");
   a.type = "text"; a.placeholder = "api (optional)"; a.className = "t-api"; a.value = apiv || "";
   const rm = document.createElement("button");
   rm.type = "button"; rm.className = "ghost"; rm.textContent = "✕";
   rm.addEventListener("click", () => row.remove());
-  row.append(p, m, a, rm);
+  row.append(p, m, dl, a, rm);
   $("mf-targets").appendChild(row);
 }
 
-// Provider register/edit: PUT replaces the named provider (upsert). The body
-// carries only the ref (env NAME / file PATH), never a secret value.
-$("provider-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
+// providerFormBody reads the register/edit form into a ProviderWrite body
+// (refs only — env NAME / file PATH, never a secret value). Shared by the save
+// and the connection-test paths (ADR-014 D2).
+function providerFormBody() {
   const name = $("pf-name").value.trim();
   const body = { type: $("pf-type").value };
   const bu = $("pf-baseurl").value.trim(); if (bu) body.base_url = bu;
@@ -299,11 +378,62 @@ $("provider-form").addEventListener("submit", async (e) => {
   const kind = $("pf-refkind").value, val = $("pf-refval").value.trim();
   if (kind === "env" && val) body.api_key_ref = { env: val };
   else if (kind === "file" && val) body.api_key_ref = { file: val };
+  return { name, body };
+}
+
+// Probe results are cached IN MEMORY (page-session only) keyed by provider name
+// (ADR-014 D5). The server probe is stateless; this client cache keeps the table
+// status across re-renders within the open page. It deliberately avoids any
+// browser-persistent store — the data-free console invariant (ADR-001, enforced
+// by adminui_test) forbids client-side persistence — so status resets on a full
+// page reload (re-test to refresh). Never holds a secret.
+const probeResults = {};
+function probeCacheGet(name) { return probeResults[name] || null; }
+function probeCacheSet(name, result) { probeResults[name] = result; }
+
+// probeBadge renders a provider's cached health into a table cell.
+function probeBadge(cell, result) {
+  cell.className = "probe-badge";
+  if (!result) { cell.classList.add("untested"); cell.textContent = "○ untested"; return; }
+  if (result.ok) {
+    cell.classList.add("ok");
+    cell.textContent = "● ok" + (result.latency_ms ? " (" + result.latency_ms + "ms)" : "");
+  } else {
+    cell.classList.add("fail");
+    cell.textContent = "● " + (result.detail || "failed");
+  }
+}
+
+// Provider register/edit: PUT replaces the named provider (upsert). The body
+// carries only the ref (env NAME / file PATH), never a secret value.
+$("provider-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const { name, body } = providerFormBody();
   const status = $("provider-form-status");
   try {
     await api("PUT", "/admin/providers/" + encodeURIComponent(name), body);
     status.className = "status"; status.textContent = "saved ✓ " + name;
     $("provider-form").reset();
+    applyProviderTypeFields();
+    await refreshProviders();
+  } catch (err) {
+    status.className = "status err"; status.textContent = String(err.message || err);
+  }
+});
+
+// TEST CONNECTION: probe the DRAFT in the form (server resolves the ref; the
+// client sends no secret). Caches the result by provider name so the table
+// status survives a refresh (ADR-014 D2/D5).
+$("pf-test").addEventListener("click", async () => {
+  const { name, body } = providerFormBody();
+  const status = $("provider-form-status");
+  status.className = "status"; status.textContent = "testing…";
+  try {
+    const res = await api("POST", "/admin/providers/test", body);
+    if (name) { probeCacheSet(name, res); }
+    status.className = res.ok ? "status" : "status err";
+    status.textContent = (res.ok ? "✓ reachable" : "✗ " + (res.detail || "unreachable"))
+      + (res.latency_ms ? " · " + res.latency_ms + "ms" : "");
     await refreshProviders();
   } catch (err) {
     status.className = "status err"; status.textContent = String(err.message || err);
@@ -341,6 +471,10 @@ $("model-form").addEventListener("submit", async (e) => {
 });
 
 $("mf-add-target").addEventListener("click", () => addTargetRow());
+
+// Morph the provider form to the selected type (ADR-014 D1).
+$("pf-type").addEventListener("change", applyProviderTypeFields);
+applyProviderTypeFields();
 
 // Git export: render the secret-free committable config fragment.
 $("export-btn").addEventListener("click", async () => {
