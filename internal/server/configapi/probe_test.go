@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"iter"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,11 @@ import (
 
 	"github.com/inferplane/inferplane/pkg/schema"
 	"github.com/inferplane/inferplane/providers"
+	// Register the real providers so the probe path actually builds them and
+	// exercises HealthCheck + the guarded client — without these the handler
+	// short-circuits at "unknown provider type" and the tests pass vacuously.
+	_ "github.com/inferplane/inferplane/providers/anthropic"
+	_ "github.com/inferplane/inferplane/providers/openaicompat"
 )
 
 // noHealthProvider is a provider that does NOT implement HealthChecker, to
@@ -115,6 +121,50 @@ func TestProbe_AllowlistViolationBlocked(t *testing.T) {
 	}
 	if res.OK {
 		t.Fatalf("allowlist violation must be not-OK, got %+v", res)
+	}
+}
+
+func TestProbe_DoesNotFollowRedirect_NoSecretLeak(t *testing.T) {
+	t.Setenv("PROBE_REDIR_KEY", "redir-secret-key")
+	// The redirect TARGET: if the probe followed the 302, this would be hit and
+	// the anthropic x-api-key (which Go does NOT strip on cross-host redirects)
+	// would leak here. It must never be reached.
+	leakHit := false
+	leak := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leakHit = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer leak.Close()
+	redir := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, leak.URL+"/v1/models", http.StatusFound)
+	}))
+	defer redir.Close()
+
+	body := `{"type":"anthropic","base_url":"` + redir.URL + `","api_key_ref":{"env":"PROBE_REDIR_KEY"}}`
+	code, res := doProbe(t, ProbeHandler(true, nil), body)
+	if code != http.StatusOK {
+		t.Fatalf("want 200, got %d", code)
+	}
+	if leakHit {
+		t.Fatal("probe followed the redirect — the api key could have leaked to the redirect target")
+	}
+	if res.OK {
+		t.Fatalf("a 302 is not a healthy upstream, got %+v", res)
+	}
+}
+
+func TestGuardedDial_BlocksMetadataAndEnforcesAllowlist(t *testing.T) {
+	base := &net.Dialer{Timeout: time.Second}
+
+	// Metadata endpoint (IP literal → resolves to itself, no network) is rejected
+	// BEFORE any dial, distinguishing a guard block from a mere unreachable host.
+	if _, err := guardedDial(nil, base)(context.Background(), "tcp", "169.254.169.254:80"); err != errProbeBlocked {
+		t.Fatalf("metadata endpoint must be blocked, got %v", err)
+	}
+
+	// Allowlist set + host not in it → rejected before resolution.
+	if _, err := guardedDial(map[string]bool{"ok.example": true}, base)(context.Background(), "tcp", "evil.example:80"); err != errProbeNotAllowed {
+		t.Fatalf("non-allowlisted host must be rejected, got %v", err)
 	}
 }
 

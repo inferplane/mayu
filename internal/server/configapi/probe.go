@@ -112,29 +112,49 @@ func guardedClient(allow map[string]bool) *http.Client {
 	base := &net.Dialer{Timeout: probeTimeout}
 	return &http.Client{
 		Timeout: probeTimeout,
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				host, port, err := net.SplitHostPort(addr)
-				if err != nil {
-					return nil, err
+		// Never follow redirects: a probe has no reason to, and following one
+		// would forward a custom auth header (anthropic's x-api-key — which Go
+		// does NOT strip on cross-host redirects, unlike Authorization) to a
+		// redirect target the operator did not register. Treat the 3xx as the
+		// response instead (ADR-014 D2, secret-exfil hardening).
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		Transport:     &http.Transport{DialContext: guardedDial(allow, base)},
+	}
+}
+
+// errProbeBlocked / errProbeNotAllowed are the SSRF-guard dial rejections,
+// exported as sentinels so the guard can be unit-tested precisely (distinguishing
+// a guard rejection from an ordinary unreachable host, which the result layer
+// cannot).
+var (
+	errProbeBlocked    = fmt.Errorf("probe target blocked")
+	errProbeNotAllowed = fmt.Errorf("probe target host not allowed")
+)
+
+// guardedDial is the SSRF-guarded DialContext: it rejects hosts outside allow
+// (when non-empty), resolves the host, rejects the cloud metadata IP, and pins
+// the connection to the validated IP (no re-resolution → TOCTOU-safe).
+func guardedDial(allow map[string]bool, base *net.Dialer) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		if len(allow) > 0 && !allow[host] {
+			return nil, errProbeNotAllowed
+		}
+		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		for _, ip := range ips {
+			for _, b := range blockedProbeIPs {
+				if b != nil && ip.IP.Equal(b) {
+					return nil, errProbeBlocked
 				}
-				if len(allow) > 0 && !allow[host] {
-					return nil, fmt.Errorf("probe target host not allowed")
-				}
-				ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-				if err != nil {
-					return nil, err
-				}
-				for _, ip := range ips {
-					for _, b := range blockedProbeIPs {
-						if b != nil && ip.IP.Equal(b) {
-							return nil, fmt.Errorf("probe target blocked")
-						}
-					}
-				}
-				// Pin to the validated IP — no re-resolution (TOCTOU-safe).
-				return base.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
-			},
-		},
+			}
+		}
+		// Pin to the validated IP — no re-resolution (TOCTOU-safe).
+		return base.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
 	}
 }
