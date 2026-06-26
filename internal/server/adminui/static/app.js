@@ -8,7 +8,9 @@ let lastIssuedKey = ""; // shown-once plaintext, page-lifetime only
 
 const $ = (id) => document.getElementById(id);
 
-async function api(method, path, body) {
+const DISABLED = Symbol("capability-disabled");
+
+async function api(method, path, body, optional) {
   const resp = await fetch(path, {
     method,
     headers: {
@@ -18,6 +20,9 @@ async function api(method, path, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   if (resp.status === 401) throw new Error("unauthorized — check the admin token");
+  // Opt-in only: an optional/capability endpoint that is absent → disabled,
+  // not an error (§9.1). Required calls (optional falsy) still throw below.
+  if (optional && (resp.status === 404 || resp.status === 405 || resp.status === 501)) return DISABLED;
   if (!resp.ok && resp.status !== 204) {
     // Surface the server's own {"error":...} message when present (the write
     // endpoints return sanitized, secret-free messages).
@@ -53,6 +58,33 @@ function showView(name) {
 
 document.querySelectorAll("[data-view]").forEach((b) =>
   b.addEventListener("click", () => showView(b.dataset.view)));
+
+/* ---------- capabilities (bootstrap, §4.4 / degradation §9.1) ---------- */
+
+let caps = null;
+
+async function loadCapabilities() {
+  const out = await api("GET", "/admin/capabilities", null, true); // optional=true
+  caps = (out && out !== DISABLED) ? out : {}; // absent endpoint → all-off (safe default)
+  applyCapabilities();
+}
+
+// Each affordance card declares the capability it needs via data-cap; when the
+// capability is present we hide the "enable X" card. Nav buttons are NOT
+// disabled — sections stay navigable and show the affordance (§9.1).
+function applyCapabilities() {
+  document.querySelectorAll(".affordance[data-cap]").forEach((el) => {
+    el.hidden = capOn(el.dataset.cap);
+  });
+}
+
+// capOn maps a capability key to a strict boolean. analytics_index is an enum
+// ("A"|"B"|"off"); everything else is a bool.
+function capOn(key) {
+  if (!caps) return false;
+  if (key === "analytics_index") return !!(caps.analytics_index && caps.analytics_index !== "off");
+  return !!caps[key];
+}
 
 /* ---------- health ---------- */
 
@@ -755,6 +787,7 @@ $("token-form").addEventListener("submit", async (e) => {
     $("origin-chip").textContent = window.location.origin;
     renderUsage(lastIssuedKey || null);
     await loadWhoami(); // self-service identity + team scoping (ADR-010)
+    await loadCapabilities(); // capability-driven section affordances (spec §9.1)
     showView("overview");
     pollHealth();
     setInterval(pollHealth, 15000);

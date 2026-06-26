@@ -195,3 +195,15 @@ func TestAdminUI_eightSectionIA(t *testing.T) {
 		t.Error("app.js VIEWS still has quickstart key; replace it with settings")
 	}
 }
+
+func TestAdminUI_capabilitiesWired(t *testing.T) {
+	_, js := get(t, "/app.js")
+	for _, want := range []string{"/admin/capabilities", "loadCapabilities", "applyCapabilities", "DISABLED"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing %q — capability wiring incomplete (spec §4.4/§9.1)", want)
+		}
+	}
+	if !strings.Contains(js, "await loadCapabilities()") {
+		t.Error("app.js does not await loadCapabilities() (must run on unlock, before showView)")
+	}
+}
