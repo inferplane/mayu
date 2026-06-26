@@ -1,9 +1,12 @@
 # Admin Console UX Redesign — LiteLLM-parity within the data-free / toolchain-free envelope
 
 **Date:** 2026-06-26
-**Status:** Draft — revised after multi-AI consensus review round 1 (codex gpt-5.5 ·
-agy · kiro-cli glm-5; kiro-kimi throttled). All CRITICAL/MAJOR findings resolved inline
-(see §16 review log). Pending user approval.
+**Status:** Draft — hardened through **two** multi-AI consensus review rounds. Round 1
+(codex gpt-5.5 · agy · kiro-cli glm-5): 2 CRITICAL + 11 MAJOR + 4 MINOR, all resolved
+(§16). Round 2 (codex gpt-5.5 · agy · kiro-cli kimi-k2.5), after user decisions A1/A2:
+panel verified all round-1 fixes SOUND; 16 new findings on the Mode B aggregator +
+body-store surface, all resolved (§17). No CRITICAL/MAJOR remains at the design-spec
+layer. **Pending final user approval → writing-plans.**
 **Author:** brainstorming session (host: Claude Code)
 **Source needs:** [`Customer_needs.md`](../../../Customer_needs.md) (Slack pains, web research, KG)
 **Related:** ADR-001 (data-free admin-key console), ADR-002 (console grows but stays
@@ -120,12 +123,12 @@ These are non-negotiable; every decision below is checked against them.
 │ Audit log  (AUTHORITATIVE · tamper-evident hash chain · WAL)     │  internal/audit/
 │   one record per request: ts, team, key_id, model, provider,     │  (unchanged; source of truth)
 │   status, tokens(in/out/cache), cost_µUSD, latency_ms, trace_id, │
-│   fallback_used, cache_hit  [+ bodies ONLY if log_bodies on, §6] │
+│   fallback_used, cache_hit, body_ref (omitempty) — NEVER bytes   │
 └───────────────────────────────┬──────────────────────────────────┘
                                  │  derive (forward-only tail; rebuildable from chain)
                                  ▼
 ┌────────────────────────────────────────────────────────────────┐
-│ Analytics index  (DERIVED · SQLite · OPT-IN · rebuildable)       │  internal/analytics/ (NEW, opt-in)
+│ Analytics index (DERIVED · default-on w/ audit · disable-able)   │  internal/analytics/ (NEW)
 │   rollup tables for fast time-series + a queryable request index │  like providerstore: absent ⇒ degrade
 └───────────────────────────────┬──────────────────────────────────┘
                                  │  query (read-only, token-gated, bounded windows + pagination)
@@ -256,6 +259,80 @@ The index is derived; correctness of derivation is specified, not assumed:
   risk drift from the audit chain. Deriving from audit keeps **one** authoritative
   record and makes the index disposable. This is the data-modeling decision that lets
   us match LiteLLM analytics while *strengthening* (not copying) its data posture.
+
+### 4.6 Mode B ingestion-safety contract (CRITICAL, round-2 review — A1 surface)
+
+Decision A1 puts the shared-store aggregator in the first analytics milestone, so its
+concurrency safety is specified here (ADR-015 implements it). The contract:
+
+- **Hard isolation invariant (overrides everything below):** the shared analytics store
+  is **derived and disposable**. Its outage, saturation, lag, or corruption **must NEVER
+  affect the data plane** — routing, governance PreCheck/Settle, and **audit writes
+  continue unaffected**. The aggregator reads audit; it is never in the request path.
+  This preserves the single-binary / no-external-SaaS posture: a deployment that doesn't
+  run Mode B loses *cluster analytics*, never *gateway function*.
+- **Fenced single writer (anti split-brain):** exactly one aggregator writes the store,
+  guarded by a **lease with a fencing epoch** — concretely a **DB advisory lock / lease
+  row with a monotonically increasing epoch** (Postgres advisory lock or a `lease(holder,
+  epoch, expires_at)` row; K8s Lease is an acceptable alternative). Every index write
+  carries the holder's epoch and is rejected if a newer epoch exists. Two replicas that
+  both believe they are leader cannot both commit — the stale epoch is fenced out.
+- **Atomic ingest unit:** **`event upsert (PK = request ULID) + rollup mutation +
+  checkpoint advance` happen in ONE DB transaction.** Rollups are derived only from the
+  deduped immutable event table (never incremented blindly), so a re-applied batch is a
+  no-op. This closes mid-batch-crash double-count / gap (round-2 codex + kimi).
+- **Ordering by ULID, not wall clock:** time-series buckets key off the **ULID timestamp
+  component**, and cross-replica clock skew is tolerated up to a documented bound; late-
+  arriving segments are merged by `(segment, offset, ULID)`, not by ingest order, so a
+  slow-clock replica's earlier event lands in the correct bucket.
+- **Bounded lag + backpressure:** the aggregator exposes a lag metric (`/admin/analytics/
+  health`, §4.4); when lag exceeds a threshold the console shows "analytics catching up",
+  **but replicas are never blocked** (backpressure shapes the *index*, never the data
+  plane). Replica-side audit WAL growth is bounded by the existing segment rotation.
+- **Mode A→B transition (1→N):** when a shared store is configured, the local SQLite
+  index is **drained then retired** (or simply ignored — it is rebuildable); the
+  aggregator owns the shared store from epoch 1. Queries read exactly one store at a time
+  (capabilities reports which), so no double-counting across the two during transition.
+- **Recovery from corruption/staleness:** `/admin/analytics/health` reports it; recovery
+  is **operator-triggered rebuild by default** (auto-rebuild only behind a flag, and
+  rate-limited so it can't overwhelm the audit tail). The data plane is unaffected
+  throughout.
+- **Prerequisite flagged (round-2 kimi):** Mode B tails an **aggregated audit** across
+  per-replica segments. ADR-012/013 today define per-process chains + S3 anchoring but do
+  **not** define a turnkey cross-replica *collection* contract. ADR-015 must **either**
+  specify that collection contract (segment discovery, finalization markers, shared
+  prefix) **or** declare Mode B's input to be an operator-provided aggregated audit
+  source. This is a known design task, not an assumed-existing mechanism.
+
+### 4.7 Body-store contract (MAJOR, round-2 review — A2 surface)
+
+Expanding §4.2 with the operational details round-2 flagged:
+
+- **Encryption keys are refs only (§7):** the body store's at-rest key is referenced via
+  `env:` / `file:` / KMS-style ref — **never inline** (same mandate as provider secrets).
+  Per-record **AEAD** (nonce + auth tag); **fail-closed** reads (unreadable body → "body
+  unavailable", never plaintext fallback). Key **rotation / re-encryption** policy is
+  defined in ADR-017 (envelope encryption so rotation rewraps data keys, not every body).
+- **`body_ref` is opaque & non-derivable:** an opaque token (no path, no team, no
+  customer identifier encoded). Bodies are a side-channel; the ref leaks nothing.
+- **Dangling ref after TTL purge / erasure is EXPECTED and acceptable** (the chain is a
+  governance record, not a content archive — you cannot and must not mutate the WORM
+  chain to null a ref). A body-fetch for a purged/erased ref returns a **tombstone
+  response** (`410 Gone`-style "body purged or erased", with the reason) — **never a
+  500**, and the Logs drawer renders it as "body no longer retained". An optional
+  content-free **`body_deleted`** audit event records erasure accountability.
+- **Copy-only capture — does NOT touch `RawBody` / the cache invariant (§4.4):** body
+  capture is a **side-channel copy taken after auth + governance**, masked into the body
+  store. It **must not mutate the ingress `RawBody`** (which is forwarded verbatim when
+  protocol matches, §4.4). A **byte-for-byte passthrough regression test with
+  `log_bodies` enabled** is required (§13).
+- **Audit event taxonomy (anti-recursion, anti-confusion):** `request_*` events feed the
+  request Logs view; **`body_accessed` / `body_deleted` are a separate access-audit event
+  type** — metadata-only **by schema** (they can never carry a `body_ref`, enforced by
+  code path not just config, so a body view can never itself be body-logged → no
+  recursion), surfaced only in a full-admin access-audit view, **never** rendered as a
+  request row and **never** body-fetchable. `body_accessed` cardinality is bounded
+  (deduped per viewer+record within a short window) so heavy viewing can't flood the chain.
 
 ---
 
@@ -463,7 +540,7 @@ each lands (§9).
 
 | Dep | What | Enables | New ADR |
 |-----|------|---------|---------|
-| **D1** | Analytics index (`internal/analytics/`, opt-in, derived from audit; Mode A local SQLite / Mode B shared Postgres-portable §4.1) + query API (`internal/server/analyticsapi/`: `GET /admin/analytics/*`, `GET /admin/logs/*`, `GET /admin/analytics/export.csv`, `GET /admin/analytics/health`) + **`GET /admin/capabilities`** (§4.4) | Usage, Logs (metadata), rich Overview, reliable degradation | ADR-015 |
+| **D1** | Analytics index (`internal/analytics/`, default-on when audit enabled / disable-able, derived from audit; Mode A local SQLite / Mode B shared Postgres-portable §4.1) + query API (`internal/server/analyticsapi/`: `GET /admin/analytics/*`, `GET /admin/logs/*`, `GET /admin/analytics/export.csv`, `GET /admin/analytics/health`) + **`GET /admin/capabilities`** (§4.4) | Usage, Logs (metadata), rich Overview, reliable degradation | ADR-015 |
 | **D2** | Per-key governance fields in keystore + `/admin/keys` (budget, TPM, RPM, expiry, metadata, owner) | full Keys view (#4,#5) | ADR-016 |
 | **D3** | Teams & Users as first-class keystore records (budgets, membership, roles) | Teams & Users (#2,#4) | ADR-016 (or split) |
 | **D4** | **Separate deletable body store** (§4.2 — mutable, TTL/size-capped, encrypted, NOT the audit chain) + `audit.log_bodies` opt-in + best-effort PII mask on write + full-admin access-audited body-fetch path + `body_accessed` record | Logs bodies (#3) | ADR-017 |
@@ -597,6 +674,10 @@ Degradation is a defined per-view contract, not a hope:
   paginated. Body fetch is lazy (drawer-only).
 - **Data plane untouched**: no change to request path, schema, cache invariant, or
   `count_tokens` (C5).
+- **(round-2) Shared analytics store is never in the request path** — its outage/lag/
+  corruption never affects routing, governance, or audit writes (hard invariant, §4.6).
+- **(round-2) Body-store encryption keys are refs only** (`env`/`file`/KMS), never inline
+  (§7); per-record AEAD; fail-closed reads; envelope rotation (§4.7).
 
 ### Testing
 - Extend `adminui_test` to assert the data-free invariant across all 8 views (no
@@ -607,6 +688,20 @@ Degradation is a defined per-view contract, not a hope:
 - Degradation tests (index absent / providerstore absent / file-config) render
   affordances, not errors.
 - Cardinality regression test (`/metrics` label set unchanged).
+- **(round-2) Mixed-version audit fixtures**: old records without `body_ref` and new
+  records with `body_ref,omitempty`, plus `body_accessed`/`body_deleted` event types, all
+  `verify` identically (the exact-line-bytes / append-only audit invariant).
+- **(round-2) `RawBody` passthrough byte-for-byte test with `log_bodies` enabled** — body
+  capture must not mutate the verbatim-forwarded ingress body (§4.4/§4.7).
+- **(round-2) Mode B concurrency tests**: two aggregators contending → fencing rejects the
+  stale epoch (no double-write); re-applied batch is idempotent (rollups unchanged);
+  mid-batch crash → restart converges to correct aggregates; data plane unaffected when
+  the shared store is down/saturated.
+- **(round-2) Body-store tombstone test**: fetching a purged/erased `body_ref` returns the
+  tombstone (410-style), never a 500; `body_accessed`/`body_deleted` never carry a body
+  and are never body-fetchable.
+- **(round-2) Index-corruption recovery test**: `/admin/analytics/health` flags it; rebuild
+  is operator-triggered (or rate-limited auto) and never overwhelms the audit tail.
 
 ---
 
@@ -697,3 +792,39 @@ correctness + body-logging-in-immutable-chain.
 
 Round-2 re-review is recommended **after** the user picks A1/A2, since those change the
 HA-store and body-logging surface the panel would re-examine.
+
+## 17. Multi-AI consensus review log (round 2)
+
+Panel: **codex (gpt-5.5)**, **agy (default)**, **kiro-cli (kimi-k2.5)** — kiro-cli (glm-5)
+failed to load context this round. Run **after** A1/A2 were decided. Both codex and
+kimi-k2.5 independently **verified all 17 round-1 findings as SOUNDLY RESOLVED** at the
+spec-body level (not merely asserted). agy: "structural foundation (derived index,
+separate body store) is sound." The remaining issues are concentrated on the **new Mode B
+aggregator surface (from decision A1)** and **body-store operational details (A2)** — all
+three name *Mode B ingestion safety* as the top fix.
+
+| # | Severity (consensus) | Round-2 finding | Resolution in this revision |
+|---|----------------------|-----------------|----------------------------|
+| R2-1 | CRITICAL (codex) | §4 diagram still showed bodies in the audit chain — contradicts C9/§4.2 | diagram fixed: `body_ref (omitempty) — NEVER bytes` |
+| R2-2 | CRITICAL (codex+kimi+agy) | Mode B single-writer asserted, not safe vs split-brain/double-write | §4.6 fenced writer (lease+epoch), DB-unique ULID, epoch-checked writes |
+| R2-3 | CRITICAL (codex+kimi) | Ingest crash mid-batch → gaps/double-count | §4.6 atomic `event upsert + rollup + checkpoint` in one txn; rollups from deduped table |
+| R2-4 | MAJOR (codex+kimi) | Cross-replica clock skew corrupts time buckets | §4.6 order by ULID timestamp, not wall clock; documented skew tolerance |
+| R2-5 | CRITICAL (codex+kimi) | Shared store = new SPOF / data-plane coupling | §4.6 hard isolation invariant: store outage never affects routing/governance/audit |
+| R2-6 | MAJOR (codex+kimi) | Mode B lag/backpressure unbounded | §4.6 lag metric + console "catching up"; replicas never blocked |
+| R2-7 | MAJOR (kimi) | Mode A→B transition double-write (1→N) | §4.6 drain/retire local index; queries read one store; capabilities reports which |
+| R2-8 | MAJOR (codex) | Body-store encryption underspecified for a secret-ref system | §4.7 keys as `env`/`file`/KMS refs only, AEAD, fail-closed, envelope rotation |
+| R2-9 | MAJOR (codex+kimi) | `body_ref` dangling after TTL/erasure | §4.7 dangling is expected/acceptable; tombstone (410-style) not 500; optional `body_deleted` |
+| R2-10 | MAJOR (codex+kimi) | body-access recursion / event typing | §4.7 `body_accessed`/`body_deleted` metadata-only by schema (code-path), access-audit view only, never body-fetchable, cardinality-bounded |
+| R2-11 | MAJOR (codex) | Body capture could mutate `RawBody`/cache invariant | §4.7 copy-only after auth/governance; §13 byte-for-byte passthrough test |
+| R2-12 | MAJOR (codex) | Missing mixed-version audit fixtures for new fields/events | §13 mixed-version fixtures for `body_ref,omitempty` + new event types |
+| R2-13 | MAJOR (kimi) | No specified recovery from index corruption | §4.6 operator-triggered (or rate-limited auto) rebuild |
+| R2-14 | MAJOR (kimi) | HA audit-aggregation contract assumed but undefined in ADR-012/013 | §4.6 prerequisite flagged: ADR-015 defines the collection contract or takes an operator-provided source |
+| R2-15 | MINOR (codex) | "opt-in" vs default-on wording still inconsistent | §4 box + D1 now "default-on when audit enabled, disable-able" |
+| R2-16 | MINOR (kimi) | Mode-B-failure affordance copy unspecified | §9.1 capability-driven affordance ("analytics catching up" / "cluster analytics need a shared store") |
+
+**Chair assessment after round 2:** round-1 issues are closed; round-2 issues are all
+resolved at spec level above. The residual work the panel wants (exact leader-election
+primitive, the HA audit-collection contract) is correctly **deferred to ADR-015** with the
+*contract* (fencing, atomicity, isolation invariant) now fixed in the spec — which is the
+right altitude for a design spec feeding an implementation plan. No CRITICAL/MAJOR remains
+unaddressed at the design-spec layer.
