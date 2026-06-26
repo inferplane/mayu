@@ -494,7 +494,10 @@ as their dependency lands.
   change** → low risk, immediate UX win. (Capabilities is the one piece Phase 0 cannot
   skip — without it degradation is guesswork.)
 - **Phase 1 — analytics foundation (D1, D5a).** Usage + Logs (metadata) + rich Overview
-  + budget gauges.
+  + budget gauges. **Per decision A1, this milestone includes Mode B** (shared
+  Postgres-portable analytics store + single-writer aggregator, §4.1) so cluster-wide HA
+  analytics are correct from the start; Mode A local SQLite remains the single-replica
+  default.
 - **Phase 2 — key/team governance (D2, D3).** Full Virtual keys + Teams & Users.
 - **Phase 3 — compliance & alerts (D4, D5b).** Body logging (opt-in) + budget alerts.
 - **Phase 4 — security parity (D6, D7).** Guardrails config + region policy.
@@ -647,13 +650,23 @@ Degradation is a defined per-view contract, not a hope:
    policy (pinned, no network, no storage APIs, permissive license, `adminui_test`-scanned);
    else hand-rolled SVG. Decided at implementation under those acceptance criteria.
 
-### Still genuinely open (for the user)
-- **A1.** For HA: is Mode B (shared analytics store) in-scope for the first analytics
-  milestone, or do we ship Mode A (single-replica) first and treat cluster analytics as a
-  fast-follow? (Affects whether Postgres becomes a soft dependency early.)
-- **A2.** Is offering body logging at all acceptable for the target (NCT/regulated)
-  customers, or should the product **omit** body logging entirely and rely on
-  metadata-only audit as a compliance selling point (ADR-003 content-free advantage)?
+### User decisions (resolved 2026-06-26)
+- **A1 — DECIDED: Mode B is in scope for the first analytics milestone.** The shared,
+  Postgres-portable analytics store + single-writer aggregator (§4.1 Mode B) ships with
+  the first analytics milestone so **cluster-wide HA analytics are correct from day one**
+  (not a fast-follow). Mode A (local SQLite) remains the zero-config default for
+  single-replica / dev deployments; Mode B activates when a shared store is configured.
+  Consequence: a shared store (Postgres, or the shared SQLite-over-network discipline the
+  `providerstore` DDL already supports) becomes a **declared dependency of the analytics
+  milestone**, and ADR-015 must specify the single-writer aggregator (leader election or
+  dedicated ingest worker) and the audit-aggregation source it tails.
+- **A2 — DECIDED: body logging is offered, opt-in, separate store.** The product ships
+  prompt/response body logging per §4.2/§6.3 — **default OFF**, separate deletable/TTL
+  store (never the chain), full-admin + access-audited. The content-free metadata audit
+  (ADR-003) remains the default and the compliance selling point; body logging is the
+  documented opt-in trade-off that satisfies need #3 for teams that accept it. ADR-017
+  must ship the erasure/retention story so regulated (NCT) customers can stay body-OFF
+  and still pass audit requirements on metadata alone.
 
 ## 16. Multi-AI consensus review log (round 1)
 
