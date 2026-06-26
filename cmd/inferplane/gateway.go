@@ -257,7 +257,17 @@ func newGateway(cfgPath string) (*gateway, error) {
 		writer = g
 	}
 	g.dataSrv = &http.Server{Handler: server.DataMux(r, store, aud, gov, m, masking)}
-	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, m, writer, liveExport(holder), cfg.Probe.AllowedHosts...)}
+	// Capability map the console reads on bootstrap (spec §4.4). Phase 0a:
+	// analytics index not built yet; provider_store + guardrails reflect what
+	// this assembly already knows. Later phases flip the rest on as they land.
+	capabilities := func() configapi.Capabilities {
+		return configapi.Capabilities{
+			AnalyticsIndex: "off",
+			ProviderStore:  writer != nil,
+			Guardrails:     masking != nil,
+		}
+	}
+	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, m, writer, liveExport(holder), capabilities, cfg.Probe.AllowedHosts...)}
 	return g, nil
 }
 
