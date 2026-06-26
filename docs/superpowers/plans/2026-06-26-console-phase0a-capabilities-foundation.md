@@ -4,7 +4,7 @@
 
 **Goal:** Add a token-gated `GET /admin/capabilities` endpoint and wire the console to fetch it on unlock, so the 8-section IA renders each section's enabled/disabled state from a single bootstrap call — never by probing endpoints and catching 404/5xx.
 
-**Architecture:** A new `configapi.Capabilities` projection (mirroring the existing secret-free `configapi.View`/`Writable` capability-hint pattern) is served behind `AdminAuth` at `/admin/capabilities`. The assembly (`cmd/inferplane`) computes it from what it already knows (provider store present? PII filter active?). The console fetches it once after unlock and gates each nav section: implemented sections work; not-yet-backed sections (Usage/Logs/Teams) render a disabled-with-reason affordance. No SPA framework, no build step — vanilla JS + `go:embed` (ADR-002). No client-side persistence (ADR-001).
+**Architecture:** A new `configapi.Capabilities` projection (mirroring the existing secret-free `configapi.View`/`Writable` capability-hint pattern) is served behind `AdminAuth` at `/admin/capabilities`. The assembly (`cmd/inferplane`) computes it from what it already knows (provider store present? PII filter active?). The console fetches it once after unlock and gates each nav section: implemented sections work; not-yet-backed sections (Usage/Logs/Teams) stay navigable but render a disabled-with-reason affordance card. No SPA framework, no build step — vanilla JS + `go:embed` (ADR-002). No client-side persistence (ADR-001).
 
 **Tech Stack:** Go 1.25 (`net/http`, `encoding/json`), `modernc.org/sqlite` (unaffected here), vanilla HTML/CSS/JS embedded via `go:embed`. Tests: Go (`go test`), including the existing `internal/server/adminui/adminui_test.go` asset-invariant scans. There is **no JS test runner** (toolchain-free) — frontend correctness is asserted via Go asset scans + `gofmt`/`go vet`/build.
 
@@ -19,7 +19,7 @@ Copied verbatim from the design spec (`docs/superpowers/specs/2026-06-26-admin-c
 - **C5 `count_tokens` never non-200**: data path untouched.
 - **Capabilities is token-gated** (§4.4): mounted behind `AdminAuth` like `/admin/config`.
 - **Capability map (§4.4)**, Phase-0a subset — exact JSON keys: `analytics_index` (`"A"|"B"|"off"`), `logs_bodies` (bool), `teams_records` (bool), `key_governance_fields` (bool), `provider_store` (bool), `region_policy` (bool), `guardrails` (bool). Phase 0a: everything `off`/`false` except `provider_store` (true iff a provider store is configured) and `guardrails` (true iff a PII-mask filter is active).
-- **Degradation, not errors** (§9.1): a section whose capability is off renders a calm affordance ("Enable the analytics store to see usage history"), never an error or blank paint. `api.js` maps `404`/`405`/`501` on an optional endpoint to *disabled*.
+- **Degradation, not errors** (§9.1): a section whose capability is off stays navigable and renders a calm affordance ("Enable the analytics store to see usage history"), never an error or blank paint. The shared `api()` maps `404`/`405`/`501` to *disabled* **only for opt-in optional calls** — required endpoints still throw.
 - **8 sections (§5)**: Overview, Usage, Logs, Virtual keys, Teams & Users, Providers & Models, Governance, Settings.
 - Commit style: DCO sign-off (`git commit -s`); end body with `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
 
@@ -31,9 +31,11 @@ Copied verbatim from the design spec (`docs/superpowers/specs/2026-06-26-admin-c
 - `internal/server/configapi/capabilities_test.go` — **Create**. Unit tests for the handler (shape, GET-only, no secret).
 - `internal/server/server.go` — **Modify** `AdminMux(...)` (signature + one `mux.Handle`) to mount `/admin/capabilities` behind `AdminAuth`.
 - `cmd/inferplane/*` (the serve assembly that calls `AdminMux`) — **Modify** to pass a `func() configapi.Capabilities`.
-- `internal/server/adminui/static/index.html` — **Modify** nav (3 new buttons) + add 3 section shells (Usage, Logs, Teams & Users) with affordance placeholders; rename existing sections to the spec IA labels.
-- `internal/server/adminui/static/app.js` — **Modify**: fetch capabilities on unlock, store in a page-memory variable, render section affordances; extend the shared `api()` to map 404/405/501→disabled.
-- `internal/server/adminui/adminui_test.go` — **Modify**: assert the 8 nav sections exist, the capabilities fetch is wired, and the data-free invariant holds across assets.
+- `internal/server/adminui/static/index.html` — **Modify** nav (8 buttons) + add Usage/Logs/Teams section shells with affordance cards; rename `#view-quickstart` → `#view-settings`.
+- `internal/server/adminui/static/app.js` — **Modify**: update the `VIEWS` map (atomic with the HTML), add an `optional` flag to the shared `api()`, fetch capabilities on unlock, render affordances.
+- `internal/server/adminui/adminui_test.go` — **Modify**: assert the 8-section IA (nav + sections + `VIEWS` in sync) and the capabilities wiring. (The existing `TestAssetsAreDataFreeAndTokenSafe` already bans `localStorage`/`sessionStorage` — do not duplicate it.)
+
+**Task order is TDD fail-first:** Task 1-2 (Go endpoint + mount, each test-first), Task 3 (IA: failing asset test → HTML + `VIEWS`, atomic), Task 4 (capabilities wiring: failing asset test → JS).
 
 ---
 
@@ -174,16 +176,20 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 **Files:**
 - Modify: `internal/server/server.go` (function `AdminMux`, ~line 72)
 - Modify: the serve assembly under `cmd/inferplane/` that calls `AdminMux` (grep for `AdminMux(` to find the exact caller/line)
-- Test: `internal/server/server_test.go` (add a test; create the file only if no admin-mux test file exists — otherwise append)
+- Test: `internal/server/server_test.go` (append; create only if no admin-mux test file exists)
 
 **Interfaces:**
 - Consumes: `configapi.CapabilitiesHandler`, `configapi.Capabilities` (Task 1).
-- Produces: `AdminMux(...)` gains a trailing parameter `capabilities func() configapi.Capabilities` placed **immediately before** the variadic `probeAllowedHosts ...string` (a variadic must stay last). When `capabilities` is nil, the route is omitted (same nil-guard discipline as `configExport`/`m`).
+- Produces: `AdminMux(...)` gains parameter `capabilities func() configapi.Capabilities` placed **immediately before** the variadic `probeAllowedHosts ...string` (a variadic must stay last). When `capabilities` is nil, the route is omitted (same nil-guard discipline as `configExport`/`m`).
 
 - [ ] **Step 1: Write the failing test**
 
 ```go
 // internal/server/server_test.go  (append; package server)
+// NOTE: ensure these imports exist in the file's import block:
+//   "net/http", "net/http/httptest", "strings", "testing",
+//   "github.com/inferplane/inferplane/internal/server/configapi",
+//   "github.com/inferplane/inferplane/internal/adminauth"
 func TestAdminMux_capabilitiesEndpoint(t *testing.T) {
 	caps := func() configapi.Capabilities {
 		return configapi.Capabilities{AnalyticsIndex: "off", ProviderStore: true}
@@ -203,7 +209,7 @@ func TestAdminMux_capabilitiesEndpoint(t *testing.T) {
 }
 ```
 
-> Note: match the exact `AdminMux` argument list at the call site. The arguments above follow the current order `(store, adminTokens, verifier, mapping, configView, auditFileSinks, aud, m, writer, configExport, <caps>, probeAllowedHosts...)`. If the real signature differs, copy the real one and add `caps` as the last non-variadic parameter. Ensure imports for `configapi`, `adminauth`, `httptest`, `strings`, `net/http` are present.
+> Match the EXACT `AdminMux` argument list at the real call site. The args above assume the current order `(store, adminTokens, verifier, mapping, configView, auditFileSinks, aud, m, writer, configExport, <caps>, probeAllowedHosts...)`. If the real signature differs, copy the real one and add `caps` as the last non-variadic parameter. The `nil` for `configView`/`writer`/etc. is fine — those routes simply aren't exercised by this test.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -218,7 +224,7 @@ In `internal/server/server.go`, change the `AdminMux` signature to add `capabili
 func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier, mapping adminauth.MappingConfig, configView func() configapi.View, auditFileSinks []string, aud *audit.Writer, m *metrics.Metrics, writer configapi.Writer, configExport func() configapi.ExportDoc, capabilities func() configapi.Capabilities, probeAllowedHosts ...string) http.Handler {
 ```
 
-Mount the route next to `/admin/config` (after the `mux.Handle("/admin/config", ...)` line):
+Mount the route right after the `mux.Handle("/admin/config", ...)` line. `denied` is the existing local in `AdminMux` (`denied := adminDenialEmitter(emit)`, declared above the `/admin/keys` mount) — reuse it:
 
 ```go
 	// Capability map (spec §4.4), behind the same AdminAuth — secret-free
@@ -246,7 +252,7 @@ Find it: `grep -rn "AdminMux(" cmd/ internal/ | grep -v _test`. At the serve cal
 	adminMux := server.AdminMux(store, adminTokens, verifier, mapping, configView, auditFileSinks, aud, m, providerWriter, configExport, caps, probeAllowedHosts...)
 ```
 
-> Substitute the assembly's real local names (`providerWriter`, `piiFilterActive`, etc.) — grep the call site to read them. If a "PII filter active" boolean is not readily available at the call site, set `Guardrails: false` for Phase 0a and leave a `// TODO(phase4): wire guardrail status` — *this is the one acceptable deferral and must be a real, named follow-up, not a vague placeholder.*
+> Substitute the assembly's real local names (`providerWriter`, `piiFilterActive`, etc.) — grep the call site to read them. If a "PII filter active" boolean is not readily available at the call site, set `Guardrails: false` for Phase 0a and leave a `// TODO(phase4): wire guardrail status` — this is the one acceptable deferral and must be a real, named follow-up, not a vague placeholder.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -266,16 +272,53 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 ---
 
-### Task 3: 8-section nav + section shells in `index.html`
+### Task 3: 8-section IA — failing asset test → `index.html` sections/nav + `VIEWS` map (ATOMIC)
+
+The HTML section ids and the JS `VIEWS` map MUST change in the **same commit**: `showView` (`app.js:35`) iterates `Object.keys(VIEWS)` and does `$("view-"+v).hidden = v !== name`. If the HTML renames `#view-quickstart`→`#view-settings` but `VIEWS` still has `quickstart`, the next `showView` call dereferences a null section and throws. This task touches `index.html` **and** `app.js` (the `VIEWS` const only) together.
 
 **Files:**
-- Modify: `internal/server/adminui/static/index.html` (nav block ~lines 35-41; section blocks)
+- Modify: `internal/server/adminui/static/index.html`
+- Modify: `internal/server/adminui/static/app.js` (the `VIEWS` const at line ~33 only)
+- Test: `internal/server/adminui/adminui_test.go`
 
 **Interfaces:**
-- Consumes: nothing at build time; the new `data-view` names are consumed by `app.js` (Task 4).
-- Produces: nav buttons with `data-view` values `overview`, `usage`, `logs`, `keys`, `teams`, `providers`, `governance`, `settings`; matching `<section id="view-<name>">` blocks. Each not-yet-backed section contains an element `<div class="affordance" data-cap="<capkey>">` the JS toggles.
+- Consumes: the existing `get(t, path) (*http.Response, string)` helper (`adminui_test.go:11`).
+- Produces: nav buttons + sections for `data-view`/`id` values `overview, usage, logs, keys, teams, providers, governance, settings`; affordance cards `<div class="card affordance" data-cap="...">` in the Usage/Logs/Teams sections; `VIEWS` map updated to those 8 keys (no `quickstart`).
 
-- [ ] **Step 1: Replace the nav block** (currently 5 buttons) with the 8-section nav, preserving the existing icon/`&ensp;` style:
+- [ ] **Step 1: Write the failing test** (append to `adminui_test.go`; `strings` is already imported there):
+
+```go
+func TestAdminUI_eightSectionIA(t *testing.T) {
+	_, html := get(t, "/index.html")
+	_, js := get(t, "/app.js")
+	views := []string{"overview", "usage", "logs", "keys", "teams", "providers", "governance", "settings"}
+	for _, v := range views {
+		if !strings.Contains(html, `data-view="`+v+`"`) {
+			t.Errorf("index.html missing nav button data-view=%q", v)
+		}
+		if !strings.Contains(html, `id="view-`+v+`"`) {
+			t.Errorf("index.html missing section id=view-%s (showView would null-deref)", v)
+		}
+		if !strings.Contains(js, v+":") { // VIEWS map key, e.g. `settings: "Settings"`
+			t.Errorf("app.js VIEWS map missing key %q (HTML/JS IA out of sync)", v)
+		}
+	}
+	// quickstart was renamed to settings — old id and VIEWS key must be gone.
+	if strings.Contains(html, `id="view-quickstart"`) {
+		t.Error("index.html still has id=view-quickstart; rename it to view-settings")
+	}
+	if strings.Contains(js, "quickstart:") {
+		t.Error("app.js VIEWS still has quickstart key; replace it with settings")
+	}
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `go test ./internal/server/adminui/ -run TestAdminUI_eightSectionIA -v`
+Expected: FAIL — missing `usage`/`logs`/`teams`/`settings` nav/section/VIEWS entries; `view-quickstart` still present.
+
+- [ ] **Step 3: Replace the nav block in `index.html`** (currently 5 buttons, ~lines 35-41) with 8, preserving the existing icon/`&ensp;` style:
 
 ```html
       <nav>
@@ -290,7 +333,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
       </nav>
 ```
 
-- [ ] **Step 2: Add the three new section shells** with affordance placeholders. Insert after the existing `#view-overview` section and before `#view-keys` (Usage, Logs), and after `#view-keys` (Teams). Each is hidden by default and carries a `data-cap` the JS reads:
+- [ ] **Step 4: Add the Usage/Logs/Teams section shells.** Insert Usage + Logs after `#view-overview` (before `#view-keys`); insert Teams after `#view-keys`:
 
 ```html
       <!-- ===== usage ===== -->
@@ -326,93 +369,9 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
       </section>
 ```
 
-- [ ] **Step 3: Rename Quickstart → Settings and relabel.** Change the section opening tag `<section id="view-quickstart" ...>` to `<section id="view-settings" ...>` (so it matches the `settings` key in `VIEWS`). **Keep every inner element id unchanged** (`usage-claude`, `usage-curl`, `usage-openai`, `usage-models`, etc.) so the existing `renderUsage()` snippet-filler keeps targeting them. No structural change to Overview/Keys/Governance beyond the nav label; `#view-providers` keeps its id (the nav label "Providers & Models" comes from the `VIEWS` map in Task 4, Step 3).
+- [ ] **Step 5: Rename Quickstart → Settings.** Change the section opening tag `<section id="view-quickstart" ...>` to `<section id="view-settings" ...>`. **Keep every inner element id unchanged** (`usage-claude`, `usage-curl`, `usage-openai`, `usage-models`, etc.) so the existing `renderUsage()` snippet-filler keeps targeting them. (Connection snippets are legitimately settings-adjacent; Phase 0b adds routing/caching/compliance toggles under it.)
 
-> Decision recorded: Quickstart becomes the initial Settings view (connection snippets are legitimately settings-adjacent). The follow-up plan (Phase 0b) adds routing/caching/compliance toggles under it. This is a rename, not a removal — no content lost, and `VIEWS`↔section ids stay 1:1 (so `showView` never dereferences a null section).
-
-- [ ] **Step 4: Verify the asset parses** (no JS test runner — this is a structural check):
-
-Run: `grep -c 'data-view=' internal/server/adminui/static/index.html`
-Expected: `8`.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add internal/server/adminui/static/index.html
-git commit -s -m "feat(adminui): 8-section nav + Usage/Logs/Teams shells with affordances (spec §5)
-
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
-```
-
----
-
-### Task 4: Fetch capabilities on unlock + capability-driven affordances + api.js status mapping
-
-**Files:**
-- Modify: `internal/server/adminui/static/app.js`
-
-**Interfaces:**
-- Consumes: `GET /admin/capabilities` (Tasks 1-2); the `data-cap` attributes (Task 3); the existing `api(method, path, body)` (`app.js:11`) and `showView(name)` (`app.js:35`).
-- Produces: a page-memory `let caps = null;`, an `async function loadCapabilities()`, an `function applyCapabilities()` that disables nav buttons / shows affordances per capability, and a `DISABLED` sentinel returned by `api()` for 404/405/501 on optional endpoints.
-
-- [ ] **Step 1: Extend the EXISTING `api()` to map disabled-optional statuses.** The real `api()` (`app.js:11-29`) inlines its headers and returns `resp.json()` (or `null` on 204). Do **not** rewrite it — insert two lines only: a `DISABLED` sentinel above it, and a 404/405/501 short-circuit **after the 401 check, before the non-OK throw**. The result must read exactly:
-
-```js
-const DISABLED = Symbol("capability-disabled");
-
-async function api(method, path, body) {
-  const resp = await fetch(path, {
-    method,
-    headers: {
-      "Authorization": "Bearer " + adminToken,
-      ...(body ? { "Content-Type": "application/json" } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (resp.status === 401) throw new Error("unauthorized — check the admin token");
-  // Optional-capability endpoints absent → treat as disabled, not an error (§9.1).
-  if (resp.status === 404 || resp.status === 405 || resp.status === 501) return DISABLED;
-  if (!resp.ok && resp.status !== 204) {
-    let msg = "API error " + resp.status;
-    try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch { /* keep generic */ }
-    throw new Error(msg);
-  }
-  return resp.status === 204 ? null : resp.json();
-}
-```
-
-> Caution: `DISABLED` now leaks into every `api()` caller's success path. Audit callers that pattern-match the result — none should treat the `DISABLED` symbol as data. In Phase 0a only `loadCapabilities()` (Step 2) consumes it; existing callers hit real endpoints that never return 404/405/501 here, so they are unaffected. Do not introduce `localStorage`/`sessionStorage` (C1).
-
-- [ ] **Step 2: Add capability load + apply.** Add near the other `refresh*`/`load*` functions:
-
-```js
-let caps = null;
-
-async function loadCapabilities() {
-  const out = await api("GET", "/admin/capabilities");
-  caps = (out && out !== DISABLED) ? out : {};   // absent endpoint → all-off (safe default)
-  applyCapabilities();
-}
-
-function applyCapabilities() {
-  // Each affordance card declares the capability it needs via data-cap.
-  document.querySelectorAll(".affordance[data-cap]").forEach((el) => {
-    const key = el.dataset.cap;
-    const on = capOn(key);
-    el.hidden = on;     // capability present → hide the "enable X" affordance
-  });
-}
-
-// capOn maps a capability key to a boolean. analytics_index is an enum
-// ("A"|"B"|"off"); everything else is a bool.
-function capOn(key) {
-  if (!caps) return false;
-  if (key === "analytics_index") return caps.analytics_index && caps.analytics_index !== "off";
-  return !!caps[key];
-}
-```
-
-- [ ] **Step 3: Update the `VIEWS` map (REQUIRED — `showView` is driven by it).** `showView` (`app.js:35`) iterates `Object.keys(VIEWS)` and does `$("view-"+v).hidden = v !== name`. A nav view that is **not** in `VIEWS`, or whose `#view-<key>` section does not exist, breaks rendering (`$()` returns `null` → throws). Replace the `VIEWS` const (`app.js:33`) with all 8, matching the Task 3 section ids exactly:
+- [ ] **Step 6: Update the `VIEWS` map in `app.js`** (the const at ~line 33) — ATOMIC with the HTML above:
 
 ```js
 const VIEWS = {
@@ -427,9 +386,115 @@ const VIEWS = {
 };
 ```
 
-> `quickstart` is removed from `VIEWS` because Task 3 renames `#view-quickstart` → `#view-settings`. The inner snippet element ids are unchanged, so the existing `renderUsage()` (which fills those snippets — unrelated to the new Usage *analytics* view) keeps working. Do not confuse `renderUsage()` (Quickstart/Settings snippet filler) with the `usage` view.
+> Do not confuse `renderUsage()` (the Quickstart/Settings snippet filler) with the new `usage` *analytics* view — they are unrelated; `renderUsage()` is unchanged.
 
-- [ ] **Step 4: Call `loadCapabilities()` on unlock.** In the `#token-form` submit success path (`app.js:736-757`), insert `await loadCapabilities();` immediately after `await loadWhoami();` and before `showView("overview");`:
+- [ ] **Step 7: Run the test to verify it passes**
+
+Run: `go test ./internal/server/adminui/ -run TestAdminUI_eightSectionIA -v`
+Expected: PASS.
+
+- [ ] **Step 8: Commit (both files + test together — atomic)**
+
+```bash
+git add internal/server/adminui/static/index.html internal/server/adminui/static/app.js internal/server/adminui/adminui_test.go
+git commit -s -m "feat(adminui): 8-section IA — nav + Usage/Logs/Teams shells + VIEWS map (spec §5)
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+```
+
+---
+
+### Task 4: Capability wiring — failing asset test → `optional` api(), bootstrap fetch, affordances
+
+**Files:**
+- Modify: `internal/server/adminui/static/app.js`
+- Test: `internal/server/adminui/adminui_test.go`
+
+**Interfaces:**
+- Consumes: `GET /admin/capabilities` (Tasks 1-2); the `data-cap` attributes (Task 3); the existing `api(method, path, body)` (`app.js:11`), `loadWhoami`/`showView` and the `#token-form` unlock handler (`app.js:736`).
+- Produces: `api(method, path, body, optional)` — a 4th param; when `optional` is true a `404/405/501` returns the `DISABLED` sentinel instead of throwing (required calls are unchanged). `let caps`, `async function loadCapabilities()`, `function applyCapabilities()` (hides/shows `.affordance[data-cap]` cards — it does **not** disable nav buttons; sections stay navigable per §9.1), `function capOn(key)` returning a strict boolean.
+
+- [ ] **Step 1: Write the failing test** (append to `adminui_test.go`):
+
+```go
+func TestAdminUI_capabilitiesWired(t *testing.T) {
+	_, js := get(t, "/app.js")
+	for _, want := range []string{"/admin/capabilities", "loadCapabilities", "applyCapabilities", "DISABLED"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing %q — capability wiring incomplete (spec §4.4/§9.1)", want)
+		}
+	}
+	// The unlock path must load capabilities before first paint.
+	if !strings.Contains(js, "await loadCapabilities()") {
+		t.Error("app.js does not await loadCapabilities() (must run on unlock, before showView)")
+	}
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `go test ./internal/server/adminui/ -run TestAdminUI_capabilitiesWired -v`
+Expected: FAIL — `loadCapabilities`/`DISABLED`/etc. not found.
+
+- [ ] **Step 3: Extend the EXISTING `api()` with an opt-in `optional` flag.** The real `api()` (`app.js:11-29`) inlines headers and returns `resp.json()` (or `null` on 204). Add a `DISABLED` sentinel above it and a 4th `optional` param; only return `DISABLED` when `optional` is true — required callers still throw. Result reads exactly:
+
+```js
+const DISABLED = Symbol("capability-disabled");
+
+async function api(method, path, body, optional) {
+  const resp = await fetch(path, {
+    method,
+    headers: {
+      "Authorization": "Bearer " + adminToken,
+      ...(body ? { "Content-Type": "application/json" } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (resp.status === 401) throw new Error("unauthorized — check the admin token");
+  // Opt-in only: an optional/capability endpoint that is absent → disabled,
+  // not an error (§9.1). Required calls (optional falsy) still throw below.
+  if (optional && (resp.status === 404 || resp.status === 405 || resp.status === 501)) return DISABLED;
+  if (!resp.ok && resp.status !== 204) {
+    let msg = "API error " + resp.status;
+    try { const j = await resp.json(); if (j && j.error) msg = j.error; } catch { /* keep generic */ }
+    throw new Error(msg);
+  }
+  return resp.status === 204 ? null : resp.json();
+}
+```
+
+> Existing callers pass 3 args, so `optional` is `undefined` (falsy) for them — their behavior is unchanged. Do not introduce `localStorage`/`sessionStorage` (C1).
+
+- [ ] **Step 4: Add capability load + apply** (place near the other `refresh*`/`load*` functions):
+
+```js
+let caps = null;
+
+async function loadCapabilities() {
+  const out = await api("GET", "/admin/capabilities", null, true); // optional=true
+  caps = (out && out !== DISABLED) ? out : {};   // absent endpoint → all-off (safe default)
+  applyCapabilities();
+}
+
+// Each affordance card declares the capability it needs via data-cap; when the
+// capability is present we hide the "enable X" card. Nav buttons are NOT
+// disabled — sections stay navigable and show the affordance (§9.1).
+function applyCapabilities() {
+  document.querySelectorAll(".affordance[data-cap]").forEach((el) => {
+    el.hidden = capOn(el.dataset.cap);
+  });
+}
+
+// capOn maps a capability key to a strict boolean. analytics_index is an enum
+// ("A"|"B"|"off"); everything else is a bool.
+function capOn(key) {
+  if (!caps) return false;
+  if (key === "analytics_index") return !!(caps.analytics_index && caps.analytics_index !== "off");
+  return !!caps[key];
+}
+```
+
+- [ ] **Step 5: Call `loadCapabilities()` on unlock.** In the `#token-form` submit success path (`app.js:736-757`), insert it immediately after `await loadWhoami();` and before `showView("overview");`:
 
 ```js
     await loadWhoami(); // self-service identity + team scoping (ADR-010)
@@ -437,85 +502,20 @@ const VIEWS = {
     showView("overview");
 ```
 
-> `refreshKeys()` earlier in the handler is the auth gate (throws → stays locked), so by the time `loadCapabilities()` runs the token is known-good.
+> `refreshKeys()` earlier in the handler is the auth gate (throws → stays locked), so the token is known-good by the time `loadCapabilities()` runs.
 
-- [ ] **Step 5: Verify no forbidden storage + structure** (Go-side asset scan is Task 5; quick local check here):
+- [ ] **Step 6: Run the test + quick scans**
 
-Run: `grep -nE "localStorage|sessionStorage" internal/server/adminui/static/app.js || echo "clean"`
+Run: `go test ./internal/server/adminui/ -run TestAdminUI_capabilitiesWired -v`
+Expected: PASS.
+Run: `grep -nE "localStorage|sessionStorage" internal/server/adminui/static/app.js || echo clean`
 Expected: `clean`.
-Run: `grep -c "loadCapabilities" internal/server/adminui/static/app.js`
-Expected: `>=2` (definition + call).
-Run: `grep -c 'usage:\|logs:\|teams:\|settings:' internal/server/adminui/static/app.js`
-Expected: `>=1` (the VIEWS map updated).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add internal/server/adminui/static/app.js
+git add internal/server/adminui/static/app.js internal/server/adminui/adminui_test.go
 git commit -s -m "feat(adminui): bootstrap /admin/capabilities, capability-driven affordances (spec §9.1)
-
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
-```
-
----
-
-### Task 5: Extend `adminui_test.go` — data-free invariant + IA + capabilities wiring
-
-**Files:**
-- Modify: `internal/server/adminui/adminui_test.go`
-
-**Interfaces:**
-- Consumes: the existing `get(t, path) (*http.Response, string)` helper (`adminui_test.go:11`) that spins an `httptest.NewServer(Handler())` and GETs the asset, returning the body string.
-- Produces: tests asserting (a) the 8 nav sections exist, (b) the capabilities fetch is wired in `app.js`, (c) every `VIEWS` key has a matching section (no null-deref in `showView`). The existing `TestAssetsAreDataFreeAndTokenSafe` already enforces no `localStorage`/`sessionStorage` — do **not** duplicate it; instead extend its asset list if needed.
-
-- [ ] **Step 1: Write the failing tests** (append to `adminui_test.go`; reuse the existing `get` helper, not a new one):
-
-```go
-func TestAdminUI_eightNavSections(t *testing.T) {
-	_, html := get(t, "/index.html")
-	for _, view := range []string{"overview", "usage", "logs", "keys", "teams", "providers", "governance", "settings"} {
-		if !strings.Contains(html, `data-view="`+view+`"`) {
-			t.Errorf("index.html missing nav button data-view=%q", view)
-		}
-		// Every nav view must have a matching section, or showView() null-derefs.
-		if !strings.Contains(html, `id="view-`+view+`"`) {
-			t.Errorf("index.html missing section id=view-%s for nav view %q", view, view)
-		}
-	}
-	// quickstart was renamed to settings — its old id must be gone.
-	if strings.Contains(html, `id="view-quickstart"`) {
-		t.Error("index.html still has id=view-quickstart; it must be renamed to view-settings")
-	}
-}
-
-func TestAdminUI_capabilitiesWired(t *testing.T) {
-	_, js := get(t, "/app.js")
-	if !strings.Contains(js, "/admin/capabilities") {
-		t.Error("app.js does not fetch /admin/capabilities — capability negotiation missing (spec §4.4)")
-	}
-	if !strings.Contains(js, "loadCapabilities") {
-		t.Error("app.js missing loadCapabilities()")
-	}
-}
-```
-
-> Confirm `strings` is already imported in `adminui_test.go` (it is used by the existing CSP/data-free tests). If not, add it.
-
-- [ ] **Step 2: Run to verify the new tests pass** (they assert the state produced by Tasks 3-4, so they should pass once those are done; if any fail, fix the asset, not the test):
-
-Run: `go test ./internal/server/adminui/ -run 'TestAdminUI_(eightNavSections|capabilitiesWired)' -v`
-Expected: PASS (2 tests).
-
-- [ ] **Step 3: Run the full adminui + server suites**
-
-Run: `go test ./internal/server/... -race`
-Expected: PASS (no regressions in existing `adminui_test`/`server_test`).
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add internal/server/adminui/adminui_test.go
-git commit -s -m "test(adminui): assert data-free, 8-section IA, capabilities wiring
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 ```
@@ -526,13 +526,13 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] `gofmt -l .` → no output (all formatted).
 - [ ] `go vet ./...` → clean.
-- [ ] `go test ./... -race` → PASS.
+- [ ] `go test ./... -race` → PASS (including the existing `TestAssetsAreDataFreeAndTokenSafe`, untouched).
 - [ ] `CGO_ENABLED=0 go build -trimpath -o bin/inferplane ./cmd/inferplane` → builds (single static binary, ADR-002 intact).
 - [ ] `bash tests/run-all.sh` → harness tests pass.
 - [ ] Manual smoke (optional): `go run ./cmd/inferplane serve --config examples/config.json`, open `/admin/ui/`, unlock with the admin token, confirm 8 nav sections render and Usage/Logs/Teams show their affordance cards.
 
 ## Scope boundary (explicit)
 
-**In scope (Phase 0a):** capabilities endpoint + wiring; 8-section nav + Usage/Logs/Teams affordance shells; capability-driven first paint; data-free/IA tests.
+**In scope (Phase 0a):** capabilities endpoint + wiring; 8-section nav + Usage/Logs/Teams affordance shells; Quickstart→Settings rename; capability-driven first paint; IA + capabilities asset tests.
 
-**Out of scope — next plan (Phase 0b):** the conventional dashboard visual reskin (`style.css`), splitting `app.js` into per-view ES modules + `charts.js`/`ui.js`, hand-rolled SVG sparklines, folding Quickstart into Settings, the LRU client-cache cap. **Out of scope — later phases:** the analytics index + query API (Phase 1, makes Usage/Logs functional), per-key governance fields (Phase 2), body logging (Phase 3), guardrails/region enforcement (Phase 4).
+**Out of scope — next plan (Phase 0b):** the conventional dashboard visual reskin (`style.css`), splitting `app.js` into per-view ES modules + `charts.js`/`ui.js`, hand-rolled SVG sparklines, real Settings toggles, the LRU client-cache cap. **Out of scope — later phases:** the analytics index + query API (Phase 1, makes Usage/Logs functional), per-key governance fields (Phase 2), body logging (Phase 3), guardrails/region enforcement (Phase 4).
