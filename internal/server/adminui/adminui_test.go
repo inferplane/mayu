@@ -172,3 +172,26 @@ func TestSelfServiceWhoamiUI(t *testing.T) {
 		t.Fatal("app.js must not use innerHTML (CSP / XSS)")
 	}
 }
+
+func TestAdminUI_eightSectionIA(t *testing.T) {
+	_, html := get(t, "/index.html")
+	_, js := get(t, "/app.js")
+	views := []string{"overview", "usage", "logs", "keys", "teams", "providers", "governance", "settings"}
+	for _, v := range views {
+		if !strings.Contains(html, `data-view="`+v+`"`) {
+			t.Errorf("index.html missing nav button data-view=%q", v)
+		}
+		if !strings.Contains(html, `id="view-`+v+`"`) {
+			t.Errorf("index.html missing section id=view-%s (showView would null-deref)", v)
+		}
+		if !strings.Contains(js, v+":") { // VIEWS map key, e.g. `settings: "Settings"`
+			t.Errorf("app.js VIEWS map missing key %q (HTML/JS IA out of sync)", v)
+		}
+	}
+	if strings.Contains(html, `id="view-quickstart"`) {
+		t.Error("index.html still has id=view-quickstart; rename it to view-settings")
+	}
+	if strings.Contains(js, "quickstart:") {
+		t.Error("app.js VIEWS still has quickstart key; replace it with settings")
+	}
+}

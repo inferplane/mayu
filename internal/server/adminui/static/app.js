@@ -30,7 +30,16 @@ async function api(method, path, body) {
 
 /* ---------- views ---------- */
 
-const VIEWS = { overview: "Overview", keys: "Virtual keys", providers: "Providers", governance: "Governance", quickstart: "Quickstart" };
+const VIEWS = {
+  overview: "Overview",
+  usage: "Usage",
+  logs: "Logs",
+  keys: "Virtual keys",
+  teams: "Teams & Users",
+  providers: "Providers & Models",
+  governance: "Governance",
+  settings: "Settings",
+};
 
 function showView(name) {
   for (const v of Object.keys(VIEWS)) $("view-" + v).hidden = v !== name;
@@ -581,7 +590,7 @@ $("copy").addEventListener("click", async () => {
   await navigator.clipboard.writeText($("plaintext").textContent);
 });
 
-/* ---------- quickstart ---------- */
+/* ---------- settings: connection quickstart snippets ---------- */
 
 // renderUsage fills the snippets with this gateway's own origin and, once
 // issued, the real virtual key — the page answers "how do I use this?" itself.

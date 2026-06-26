@@ -34,10 +34,13 @@
       <div class="wordmark sm"><span class="glyph">▰▰</span> inferplane</div>
       <nav>
         <button class="nav active" data-view="overview">⌂&ensp;Overview</button>
+        <button class="nav" data-view="usage">▤&ensp;Usage</button>
+        <button class="nav" data-view="logs">≡&ensp;Logs</button>
         <button class="nav" data-view="keys">⚿&ensp;Virtual keys</button>
-        <button class="nav" data-view="providers">⇄&ensp;Providers</button>
+        <button class="nav" data-view="teams">⚇&ensp;Teams &amp; Users</button>
+        <button class="nav" data-view="providers">⇄&ensp;Providers &amp; Models</button>
         <button class="nav" data-view="governance">◷&ensp;Governance</button>
-        <button class="nav" data-view="quickstart">▸&ensp;Quickstart</button>
+        <button class="nav" data-view="settings">⚙&ensp;Settings</button>
       </nav>
       <div class="side-foot">
         <div class="led-row"><span id="conn-led" class="led on"></span>session active</div>
@@ -98,6 +101,26 @@
         </div>
       </section>
 
+      <!-- ===== usage ===== -->
+      <section id="view-usage" class="view" hidden>
+        <div class="card affordance" data-cap="analytics_index">
+          <div class="microlabel">usage &amp; spend analytics</div>
+          <p class="hint">Enable the analytics store to see spend over time and per
+            team/key/model breakdowns. <span class="ko">분석 스토어를 켜면 기간별
+            스펜드와 팀·키·모델별 사용량을 볼 수 있습니다.</span></p>
+        </div>
+      </section>
+
+      <!-- ===== logs ===== -->
+      <section id="view-logs" class="view" hidden>
+        <div class="card affordance" data-cap="analytics_index">
+          <div class="microlabel">request log viewer</div>
+          <p class="hint">Enable the analytics store to inspect individual requests
+            (metadata). Prompt/response bodies require the opt-in body store.
+            <span class="ko">분석 스토어를 켜면 개별 요청(메타데이터)을 볼 수 있습니다.</span></p>
+        </div>
+      </section>
+
       <!-- ===== keys ===== -->
       <section id="view-keys" class="view" hidden>
         <div class="card" id="issue-card">
@@ -124,6 +147,16 @@
             <thead><tr><th>key id</th><th>team</th><th>allowed models</th><th></th></tr></thead>
             <tbody></tbody>
           </table>
+        </div>
+      </section>
+
+      <!-- ===== teams & users ===== -->
+      <section id="view-teams" class="view" hidden>
+        <div class="card affordance" data-cap="teams_records">
+          <div class="microlabel">teams &amp; users</div>
+          <p class="hint">Team and user records are not enabled. Today teams are
+            derived from issued keys. <span class="ko">팀·유저 레코드가 비활성화돼
+            있습니다. 현재 팀은 발급된 키에서 파생됩니다.</span></p>
         </div>
       </section>
 
@@ -275,8 +308,8 @@
         </div>
       </section>
 
-      <!-- ===== quickstart ===== -->
-      <section id="view-quickstart" class="view" hidden>
+      <!-- ===== settings (initial: connection quickstart; Phase 0b adds toggles) ===== -->
+      <section id="view-settings" class="view" hidden>
         <p class="hint">Point a coding agent at this gateway with a virtual key.
           Issue a key in <b>Virtual keys</b> and these snippets fill in with live values.
           <span class="ko">키를 발급하면 아래 예시에 실제 값이 채워집니다.</span></p>
