@@ -82,8 +82,9 @@ function applyCapabilities() {
 // ("A"|"B"|"off"); everything else is a bool.
 function capOn(key) {
   if (!caps) return false;
-  if (key === "analytics_index") return !!(caps.analytics_index && caps.analytics_index !== "off");
-  return !!caps[key];
+  const v = caps[key];
+  if (v === "off") return false; // any enum-valued capability explicitly off (e.g. analytics_index)
+  return !!v;                    // bool true, or a non-empty/non-"off" enum ("A"/"B")
 }
 
 /* ---------- health ---------- */
