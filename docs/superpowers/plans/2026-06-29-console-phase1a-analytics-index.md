@@ -823,3 +823,18 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 **In scope (Phase 1a):** Mode A local index as an audit Sink; idempotent ingest + boot replay; full-admin summary + timeseries query API; capability flip to "A"; Usage view tables.
 
 **Out of scope:** Mode B shared store + single-writer aggregator/fencing (Phase 1b, §4.6); Logs viewer + request-row API + body store (Phase 3); team-scoped analytics authz (needs team records, D3); charts/sparklines (Phase 0b — Usage uses tables for now); CSV export endpoint (§6.2, follow-up); drift/health endpoint `/admin/analytics/health` (Phase 1b with Mode B).
+
+---
+
+## Plan-gate resolutions (round 1 — codex gpt-5.5 + agy; kiro-glm no-context)
+
+All adopted; baked into the implementation and verified by tests:
+
+1. **[CRITICAL] Drop `SetMaxOpenConns(1)`** (Task 1 `OpenSQLite`). The providerstore cap is wrong for a read-concurrent index: an HTTP query holding the single conn during `rows.Next()` would block `Ingest()` on the single audit-writer goroutine and stall the audit fan-out / data plane. WAL mode (already in the DSN) supports concurrent readers + one writer; leave the pool unbounded (the audit Sink is the only writer; HTTP handlers are readers). Keep `busy_timeout` for safety.
+2. **[CRITICAL] Bound the Summary window in the API** (Task 3 `SummaryHandler`). When `since` is empty default to `time.Now().UTC().AddDate(0,0,-30)`; validate `since`/`until` as `YYYY-MM-DD` (400 on malformed); reject windows > 366 days (400). The "last 30 days" UI label then matches reality.
+3. **[MAJOR] Enablement rule clarified** (Task 4 + Global Constraints): an explicit `analytics.path` **always** enables the index (live ingestion via the Sink needs no file sink). A file audit sink is required only to (a) derive the default path and (b) replay history at boot. So: enable iff `analytics.path` set OR a file sink exists; index off only when neither.
+4. **[MAJOR] Capture `cache_creation`** (Task 1): add a `cache_creation INTEGER` column, ingest `r.Usage.CacheCreationInputTokens`, add `Totals.CacheCreationTokens int64` (`json:"cache_creation_tokens"`), and a Usage-totals row (Task 5). Preserves the cache-visibility story.
+5. **[MAJOR] `Replay` count** documented as "billable lines seen" (not "ingested") — duplicates are counted as processed; the value is only for a boot log line.
+6. **[MINOR] Check both row errors** in `Summary` (`teamRows.Err()` after the team loop, `modelRows.Err()` before return).
+7. **[MINOR] Add an authenticated non-admin → 403 test** for `/admin/analytics/summary` (full-admin gate regression guard).
+8. **[MINOR] Make Task 4 fail-first**: extract a pure helper `resolveAnalytics(raw *config.Config) (path string, enabled bool)` and unit-test it (disabled flag → off; explicit path → on; no path + file sink → derived path on; no path + no file sink → off) before wiring the assembly.
