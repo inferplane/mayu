@@ -72,7 +72,7 @@ you'll use (and the regions the cross-region profile spans).
 - **Secret** `AWS_ROLE_TO_ASSUME` = the role ARN from step 2.
 - **Variables** (optional overrides; the workflows have safe defaults):
   - `AWS_REGION` (default `us-west-2`)
-  - `CLAUDE_BEDROCK_MODEL` (default `us.anthropic.claude-sonnet-4-6-v1:0`) — set to
+  - `CLAUDE_BEDROCK_MODEL` (default `us.anthropic.claude-sonnet-4-6`) — set to
     a model id whose access you enabled in step 3 / matches your region.
 
 ### 5. Merge these workflows to `main`
