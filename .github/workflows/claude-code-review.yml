@@ -1,0 +1,43 @@
+name: Claude Code Review
+
+# Automatically reviews every PR (on open and on new commits). Requires the
+# Claude GitHub App + ANTHROPIC_API_KEY repo secret (see the runbook). The review
+# is grounded in this repo's non-negotiable invariants from CLAUDE.md.
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # post the review as a PR comment
+      issues: read
+      id-token: write
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Automatic PR review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            Review the pull request #${{ github.event.pull_request.number }}.
+            Be a rigorous but constructive reviewer. Prioritize:
+            - Correctness and bugs
+            - Security and the project's NON-NEGOTIABLE invariants in CLAUDE.md:
+              data-free admin console (no client-side secret/data persistence),
+              secret-ref mandate (no inline secrets), integer microUSD (never float),
+              count_tokens must never return non-200, zero-core-diff provider isolation,
+              and /metrics carrying no secret or key_id.
+            - Test coverage and missing edge cases
+            Post your findings with `gh pr comment` (severity-tagged). Keep it focused —
+            review only what the diff changes; do not request unrelated refactors.
+          # Read-only review tools + the ability to post the review comment.
+          claude_args: |
+            --allowed-tools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh search:*),Bash(gh issue view:*)"
