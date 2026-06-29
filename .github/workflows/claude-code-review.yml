@@ -1,8 +1,11 @@
 name: Claude Code Review
 
-# Automatically reviews every PR (on open and on new commits). Requires the
-# Claude GitHub App + ANTHROPIC_API_KEY repo secret (see the runbook). The review
-# is grounded in this repo's non-negotiable invariants from CLAUDE.md.
+# Automatically reviews every PR (open + new commits) using Claude on Amazon
+# Bedrock via GitHub OIDC (no API key). Fork PRs do NOT receive an OIDC token,
+# so they are safely skipped (no secret/credential exposure on a public repo).
+# Prereqs: AWS OIDC provider + IAM role (secret AWS_ROLE_TO_ASSUME) with
+# bedrock:InvokeModel, and Bedrock model access enabled. See
+# docs/runbooks/claude-code-action.md.
 on:
   pull_request:
     types: [opened, synchronize]
@@ -14,7 +17,7 @@ jobs:
       contents: read
       pull-requests: write # post the review as a PR comment
       issues: read
-      id-token: write
+      id-token: write # GitHub OIDC → assume the AWS role
       actions: read
     steps:
       - name: Checkout repository
@@ -22,12 +25,19 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Automatic PR review
+      - name: Configure AWS credentials (OIDC → Bedrock)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION || 'us-west-2' }}
+
+      - name: Automatic PR review (Bedrock)
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          use_bedrock: "true"
+          github_token: ${{ github.token }}
           prompt: |
-            Review the pull request #${{ github.event.pull_request.number }}.
+            Review pull request #${{ github.event.pull_request.number }}.
             Be a rigorous but constructive reviewer. Prioritize:
             - Correctness and bugs
             - Security and the project's NON-NEGOTIABLE invariants in CLAUDE.md:
@@ -36,8 +46,8 @@ jobs:
               count_tokens must never return non-200, zero-core-diff provider isolation,
               and /metrics carrying no secret or key_id.
             - Test coverage and missing edge cases
-            Post your findings with `gh pr comment` (severity-tagged). Keep it focused —
-            review only what the diff changes; do not request unrelated refactors.
-          # Read-only review tools + the ability to post the review comment.
+            Post findings with `gh pr comment` (severity-tagged). Review only what the
+            diff changes; do not request unrelated refactors.
           claude_args: |
+            --model ${{ vars.CLAUDE_BEDROCK_MODEL || 'us.anthropic.claude-sonnet-4-6-v1:0' }}
             --allowed-tools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh search:*),Bash(gh issue view:*)"

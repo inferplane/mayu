@@ -1,47 +1,101 @@
-# Runbook: Claude Code GitHub Action
+# Runbook: Claude Code GitHub Action (Amazon Bedrock)
 
 Registers Claude as an automated reviewer (`@claude` responder + automatic PR
-review) via [anthropics/claude-code-action](https://github.com/anthropics/claude-code-action).
+review) via [anthropics/claude-code-action](https://github.com/anthropics/claude-code-action),
+running on **Amazon Bedrock** through **GitHub OIDC** — no Anthropic API key, no
+long-lived AWS keys.
 
 ## What this provides
 
-- **`.github/workflows/claude.yml`** — responds when someone writes `@claude` in
-  an issue, PR comment, PR review, or new issue.
-- **`.github/workflows/claude-code-review.yml`** — reviews every PR automatically
-  (on open + new commits), grounded in the CLAUDE.md invariants.
+- **`.github/workflows/claude.yml`** — replies to `@claude` mentions in issues,
+  PR comments, PR reviews, and new issues.
+- **`.github/workflows/claude-code-review.yml`** — reviews every PR (open + new
+  commits), grounded in the CLAUDE.md invariants.
 
-## Prerequisites (must be done by a repo admin — code alone is not enough)
+## Why GitHub-hosted runners (not self-hosted)
 
-1. **Install the Claude GitHub App** on the repository:
-   https://github.com/apps/claude → Configure → select `inferplane/mayu`.
-   (Or run `/install-github-app` inside Claude Code, which guides this.)
+This repository is **public**. Self-hosted runners on a public repo are a known
+RCE / credential-theft risk: a fork PR can run arbitrary code on your runner and
+steal its AWS instance-role credentials (incl. `bedrock:InvokeModel`). GitHub
+itself warns against this. Hosted runners + OIDC use **short-lived, scoped**
+credentials and no standing infra; fork PRs do not receive an OIDC token, so they
+are safely skipped. Only consider self-hosted if the repo becomes private OR you
+need VPC-private Bedrock (PrivateLink) — and even then gate fork PRs + use
+ephemeral runners.
 
-2. **Add the API credential as a repo secret** (Settings → Secrets and variables
-   → Actions → New repository secret):
-   - `ANTHROPIC_API_KEY` — an Anthropic API key, **or**
-   - `CLAUDE_CODE_OAUTH_TOKEN` for Pro/Max (`claude setup-token`), then swap the
-     workflow input `anthropic_api_key:` → `claude_code_oauth_token:`.
+## Prerequisites (repo admin — code alone won't activate it)
 
-   For an AWS-native deployment, use Bedrock via Workload Identity Federation
-   (`anthropic_federation_rule_id` / `anthropic_organization_id` /
-   `anthropic_service_account_id`, with `id-token: write`) instead of a static key.
+### 1. AWS: GitHub OIDC provider (once per AWS account)
+If not already present, add GitHub as an OIDC identity provider:
+- Provider URL: `https://token.actions.githubusercontent.com`
+- Audience: `sts.amazonaws.com`
 
-3. **Merge these workflows to the default branch (`main`)** — `pull_request` and
-   comment triggers run from the workflow definition on `main`, so the action only
-   takes effect once merged.
+### 2. AWS: IAM role the workflow assumes
+Create a role (its ARN goes in the `AWS_ROLE_TO_ASSUME` secret).
+
+**Trust policy** — scope it to THIS repo so only its workflows can assume it:
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Federated": "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com" },
+    "Action": "sts:AssumeRoleWithWebIdentity",
+    "Condition": {
+      "StringEquals": { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
+      "StringLike": { "token.actions.githubusercontent.com:sub": "repo:inferplane/mayu:*" }
+    }
+  }]
+}
+```
+
+**Permission policy** — Bedrock invoke only (least privilege):
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+    "Resource": "arn:aws:bedrock:*::foundation-model/anthropic.claude-*"
+  }]
+}
+```
+(Cross-region inference profiles like `us.anthropic.*` invoke the regional
+foundation models, so the `foundation-model/anthropic.claude-*` resource covers
+them. Tighten the region/model if desired.)
+
+### 3. AWS: enable Bedrock model access
+In the Bedrock console (in your `AWS_REGION`), enable access to the Claude model
+you'll use (and the regions the cross-region profile spans).
+
+### 4. GitHub: repo secret + (optional) variables
+- **Secret** `AWS_ROLE_TO_ASSUME` = the role ARN from step 2.
+- **Variables** (optional overrides; the workflows have safe defaults):
+  - `AWS_REGION` (default `us-west-2`)
+  - `CLAUDE_BEDROCK_MODEL` (default `us.anthropic.claude-sonnet-4-6-v1:0`) — set to
+    a model id whose access you enabled in step 3 / matches your region.
+
+### 5. Merge these workflows to `main`
+`pull_request` and comment triggers run from the workflow definition on the
+default branch — they only take effect once merged.
 
 ## Verify
 
-- Open a test PR → the `Claude Code Review` workflow runs and posts a review comment.
-- Comment `@claude summarize this PR` → the `Claude Code` workflow responds.
-- If a run fails with an auth error, the secret is missing/incorrect (step 2).
-- If nothing triggers, the GitHub App is not installed (step 1) or the workflow
-  is not yet on `main` (step 3).
+- Open a test PR → `Claude Code Review` runs, assumes the role, calls Bedrock, and
+  posts a review comment.
+- Comment `@claude summarize this PR` → `Claude Code` responds.
+- Failure modes:
+  - `Could not assume role` → trust policy `sub`/`aud` or `AWS_ROLE_TO_ASSUME` wrong.
+  - `AccessDeniedException` from Bedrock → model access not enabled (step 3) or the
+    permission policy / region is too narrow.
+  - Fork PR shows no review → expected (no OIDC token for forks); safe by design.
 
 ## Notes
 
-- Workflows never touch the data plane; they run in GitHub-hosted CI only.
-- The review workflow is read-only except for posting the PR comment
-  (`--allowed-tools` is scoped to `gh pr view/diff/comment`, `gh search`, `gh issue view`).
-- Cost scales with PR volume; narrow the `claude-code-review.yml` trigger (e.g.
-  add `paths:` filters) if needed.
+- GitHub token: the workflows use the built-in `${{ github.token }}` with a scoped
+  `permissions:` block (pull-requests: write to post the comment). No Claude GitHub
+  App or custom app is required for the Bedrock path. Upgrade to a custom GitHub
+  App (`actions/create-github-app-token`) only if you want Claude's pushes to
+  re-trigger CI.
+- Cost scales with PR volume; add `paths:` filters to `claude-code-review.yml` to
+  narrow it. The `@claude` job is gated on an actual mention.

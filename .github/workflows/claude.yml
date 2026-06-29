@@ -1,8 +1,10 @@
 name: Claude Code
 
-# Responds when someone types "@claude" in an issue, PR comment, PR review, or
-# a new/assigned issue. Requires the Claude GitHub App installed on the repo and
-# an ANTHROPIC_API_KEY repo secret (see docs/runbooks/claude-code-action.md).
+# Responds when someone types "@claude" in an issue, PR comment, PR review, or a
+# new/assigned issue. Runs Claude on Amazon Bedrock via GitHub OIDC (no API key).
+# Prereqs: AWS OIDC provider + IAM role (secret AWS_ROLE_TO_ASSUME) with
+# bedrock:InvokeModel, and Bedrock model access enabled. See
+# docs/runbooks/claude-code-action.md.
 on:
   issue_comment:
     types: [created]
@@ -15,7 +17,7 @@ on:
 
 jobs:
   claude:
-    # Only run when @claude is actually mentioned — avoids spending on every event.
+    # Only run when @claude is actually mentioned — bounds Bedrock spend.
     if: |
       (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
       (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
@@ -24,17 +26,26 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: read
-      issues: read
-      id-token: write
-      actions: read # lets Claude read CI results on PRs
+      pull-requests: write # post the reply
+      issues: write
+      id-token: write # GitHub OIDC → assume the AWS role
+      actions: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: Run Claude Code
+      - name: Configure AWS credentials (OIDC → Bedrock)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ vars.AWS_REGION || 'us-west-2' }}
+
+      - name: Run Claude Code (Bedrock)
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          use_bedrock: "true"
+          github_token: ${{ github.token }}
+          claude_args: |
+            --model ${{ vars.CLAUDE_BEDROCK_MODEL || 'us.anthropic.claude-sonnet-4-6-v1:0' }}
