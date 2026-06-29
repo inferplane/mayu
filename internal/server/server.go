@@ -14,6 +14,7 @@ import (
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/internal/server/adminapi"
 	"github.com/inferplane/inferplane/internal/server/adminui"
+	"github.com/inferplane/inferplane/internal/server/analyticsapi"
 	"github.com/inferplane/inferplane/internal/server/anthropicapi"
 	"github.com/inferplane/inferplane/internal/server/auditapi"
 	"github.com/inferplane/inferplane/internal/server/configapi"
@@ -69,7 +70,7 @@ func negotiateModels(anthropicH, openaiH http.Handler) http.Handler {
 // receives admin-action audit records (key create/revoke + denials, §5.5
 // "admin API calls are audit events"); nil skips. When m is nil the /metrics
 // endpoint is omitted.
-func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier, mapping adminauth.MappingConfig, configView func() configapi.View, auditFileSinks []string, aud *audit.Writer, m *metrics.Metrics, writer configapi.Writer, configExport func() configapi.ExportDoc, capabilities func() configapi.Capabilities, probeAllowedHosts ...string) http.Handler {
+func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier, mapping adminauth.MappingConfig, configView func() configapi.View, auditFileSinks []string, aud *audit.Writer, m *metrics.Metrics, writer configapi.Writer, configExport func() configapi.ExportDoc, capabilities func() configapi.Capabilities, analyticsQ analyticsapi.Querier, probeAllowedHosts ...string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
@@ -99,6 +100,15 @@ func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier,
 	// enabled/disabled affordance (degradation contract §9.1). nil → omitted.
 	if capabilities != nil {
 		mux.Handle("/admin/capabilities", AdminAuth(adminTokens, verifier, mapping, denied, configapi.CapabilitiesHandler(capabilities)))
+	}
+	// Analytics read API (spec §4 / D1). FULL-ADMIN only in Phase 1a (team-scoped
+	// views await team records, D3) — same requireAdmin gate as the probe. nil →
+	// omitted (analytics index disabled).
+	if analyticsQ != nil {
+		mux.Handle("GET /admin/analytics/summary", AdminAuth(adminTokens, verifier, mapping, denied,
+			requireAdmin(analyticsapi.SummaryHandler(analyticsQ), emit)))
+		mux.Handle("GET /admin/analytics/timeseries", AdminAuth(adminTokens, verifier, mapping, denied,
+			requireAdmin(analyticsapi.TimeSeriesHandler(analyticsQ), emit)))
 	}
 	// UI-write provider/model registration (ADR-008), behind the same AdminAuth.
 	// writer is nil when no provider store is configured → every write returns
