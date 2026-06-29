@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/inferplane/inferplane/internal/adminauth"
+	"github.com/inferplane/inferplane/internal/analytics"
 	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/audit/s3anchor"
 	"github.com/inferplane/inferplane/internal/budget"
@@ -27,6 +28,7 @@ import (
 	"github.com/inferplane/inferplane/internal/providerstore"
 	"github.com/inferplane/inferplane/internal/router"
 	"github.com/inferplane/inferplane/internal/server"
+	"github.com/inferplane/inferplane/internal/server/analyticsapi"
 	"github.com/inferplane/inferplane/internal/server/configapi"
 	"github.com/inferplane/inferplane/internal/tracing"
 	"github.com/inferplane/inferplane/pkg/ulid"
@@ -36,24 +38,25 @@ import (
 // Binding in newGateway (rather than inside serve) makes ":0" configs testable:
 // the OS-chosen ports are discoverable via DataAddr/AdminAddr before traffic.
 type gateway struct {
-	cfgPath     string
-	cfg         *config.Config
-	store       keystore.Store
-	aud         *audit.Writer
-	holder      *live.Holder
-	router      *router.Router
-	pstore      providerstore.Store         // nil unless provider_store is configured (ADR-008)
-	otelDown    func(context.Context) error // OTel TracerProvider shutdown (nil unless otel configured, ADR-011)
-	instance    string                      // audit chain instance id (matches the audit Writer)
-	anchorer    audit.Anchorer              // nil unless audit.anchor is configured (ADR-012)
-	anchorEvery time.Duration               // anchor interval
-	anchorLast  atomic.Int64                // highest record count successfully anchored (shared: worker + finalAnchor)
-	metrics     *metrics.Metrics            // for the anchor-failure counter
-	reloadMu    sync.Mutex                  // serializes reloads AND UI writes (concurrent SIGHUPs/triggers)
-	dataLn      net.Listener
-	adminLn     net.Listener
-	dataSrv     *http.Server
-	adminSrv    *http.Server
+	cfgPath      string
+	cfg          *config.Config
+	store        keystore.Store
+	aud          *audit.Writer
+	holder       *live.Holder
+	router       *router.Router
+	pstore       providerstore.Store         // nil unless provider_store is configured (ADR-008)
+	analyticsIdx *analytics.Index            // nil unless the analytics index is enabled (spec §4 / D1)
+	otelDown     func(context.Context) error // OTel TracerProvider shutdown (nil unless otel configured, ADR-011)
+	instance     string                      // audit chain instance id (matches the audit Writer)
+	anchorer     audit.Anchorer              // nil unless audit.anchor is configured (ADR-012)
+	anchorEvery  time.Duration               // anchor interval
+	anchorLast   atomic.Int64                // highest record count successfully anchored (shared: worker + finalAnchor)
+	metrics      *metrics.Metrics            // for the anchor-failure counter
+	reloadMu     sync.Mutex                  // serializes reloads AND UI writes (concurrent SIGHUPs/triggers)
+	dataLn       net.Listener
+	adminLn      net.Listener
+	dataSrv      *http.Server
+	adminSrv     *http.Server
 }
 
 // newGateway loads config and assembles the full serve wiring — metrics,
@@ -84,6 +87,32 @@ func newGateway(cfgPath string) (*gateway, error) {
 	if err != nil {
 		store.Close()
 		return nil, fmt.Errorf("audit sinks: %w", err)
+	}
+	// Analytics index (Mode A, spec §4): a DERIVED read-model fed as a best-effort
+	// audit Sink, so it must join `sinks` BEFORE NewWriter fans out to them. At
+	// boot it replays existing file-sink history (idempotent by ULID). Owned by
+	// the gateway; closed on Stop. On a boot-error path the process exits and the
+	// OS reclaims the handle, so we don't unwind it there.
+	var analyticsIdx *analytics.Index
+	if apath, on := config.ResolveAnalytics(raw); on {
+		ix, aerr := analytics.OpenSQLite(apath)
+		if aerr != nil {
+			fmt.Fprintln(os.Stderr, "inferplane: analytics index disabled (open failed):", aerr)
+		} else {
+			analyticsIdx = ix
+			for _, sk := range raw.Audit.Sinks {
+				if sk.Type == "file" && sk.Path != "" {
+					if f, e := os.Open(sk.Path); e == nil {
+						if _, e := analyticsIdx.Replay(f); e != nil {
+							fmt.Fprintln(os.Stderr, "inferplane: analytics replay warning:", e)
+						}
+						f.Close()
+					}
+				}
+			}
+			sinks = append(sinks, analytics.NewSink(analyticsIdx))
+			fmt.Printf("inferplane: analytics index enabled → %s\n", apath)
+		}
 	}
 	inst := instanceID()
 	aud, err := audit.NewWriter(inst, raw.Audit.Buffer.Path, sinks)
@@ -235,20 +264,21 @@ func newGateway(cfgPath string) (*gateway, error) {
 	}
 
 	g := &gateway{
-		cfgPath:     cfgPath,
-		cfg:         cfg,
-		store:       store,
-		aud:         aud,
-		holder:      holder,
-		router:      r,
-		pstore:      pstore,
-		otelDown:    otelDown,
-		instance:    inst,
-		anchorer:    anchorer,
-		anchorEvery: anchorEvery,
-		metrics:     m,
-		dataLn:      dataLn,
-		adminLn:     adminLn,
+		cfgPath:      cfgPath,
+		cfg:          cfg,
+		store:        store,
+		aud:          aud,
+		holder:       holder,
+		router:       r,
+		pstore:       pstore,
+		analyticsIdx: analyticsIdx,
+		otelDown:     otelDown,
+		instance:     inst,
+		anchorer:     anchorer,
+		anchorEvery:  anchorEvery,
+		metrics:      m,
+		dataLn:       dataLn,
+		adminLn:      adminLn,
 	}
 	// The gateway implements configapi.Writer (build-once-swap-once). Pass it as
 	// the write callback ONLY when a store is configured; nil → writes 405.
@@ -261,13 +291,21 @@ func newGateway(cfgPath string) (*gateway, error) {
 	// analytics index not built yet; provider_store + guardrails reflect what
 	// this assembly already knows. Later phases flip the rest on as they land.
 	capabilities := func() configapi.Capabilities {
+		ai := "off"
+		if analyticsIdx != nil {
+			ai = "A" // Mode A (local single-replica); Mode B is a later phase
+		}
 		return configapi.Capabilities{
-			AnalyticsIndex: "off",
+			AnalyticsIndex: ai,
 			ProviderStore:  writer != nil,
 			Guardrails:     masking != nil,
 		}
 	}
-	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, m, writer, liveExport(holder), capabilities, cfg.Probe.AllowedHosts...)}
+	var analyticsQ analyticsapi.Querier
+	if analyticsIdx != nil {
+		analyticsQ = analyticsIdx
+	}
+	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, m, writer, liveExport(holder), capabilities, analyticsQ, cfg.Probe.AllowedHosts...)}
 	return g, nil
 }
 
@@ -558,6 +596,11 @@ func (g *gateway) serve(ctx context.Context) error {
 		defer g.finalAnchor()
 	}
 	defer g.store.Close()
+	if g.analyticsIdx != nil {
+		// Registered before aud.Close so it runs AFTER the writer drains (LIFO) —
+		// the analytics Sink receives the last in-flight records before we close.
+		defer g.analyticsIdx.Close()
+	}
 	defer g.aud.Close()
 	if g.pstore != nil {
 		defer g.pstore.Close()
