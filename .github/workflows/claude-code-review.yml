@@ -12,6 +12,9 @@ on:
 
 jobs:
   claude-review:
+    # Fork PRs receive no OIDC token, so the AWS step would error (red check) —
+    # skip them explicitly instead of failing noisily (safe on a public repo).
+    if: github.event.pull_request.head.repo.fork == false
     runs-on: ubuntu-latest
     permissions:
       contents: read
