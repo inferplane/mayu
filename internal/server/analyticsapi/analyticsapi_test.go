@@ -62,3 +62,12 @@ func TestTimeSeriesHandler_GET(t *testing.T) {
 		t.Fatalf("got %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestSummaryHandler_rejectsReversedRange(t *testing.T) {
+	rec := httptest.NewRecorder()
+	SummaryHandler(&fakeQ{}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet,
+		"/admin/analytics/summary?since=2026-06-29&until=2026-06-01", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("reversed range: got %d, want 400", rec.Code)
+	}
+}

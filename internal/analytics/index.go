@@ -10,6 +10,7 @@ import (
 	"bufio"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 
 	"github.com/inferplane/inferplane/internal/audit"
@@ -75,9 +76,13 @@ func dayOf(ts string) string {
 	return ""
 }
 
-// Ingest upserts one billable record; non-billable records are ignored. PK=ULID
-// with INSERT OR IGNORE makes re-ingestion of the same record a no-op.
-func (ix *Index) Ingest(r audit.Record) error {
+// execer is satisfied by both *sql.DB and *sql.Tx, so Ingest can run either on
+// the live DB (one autocommit per record) or batched inside a Replay tx.
+type execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func ingest(e execer, r audit.Record) error {
 	if !billable(r) {
 		return nil
 	}
@@ -90,7 +95,7 @@ func (ix *Index) Ingest(r audit.Record) error {
 	if r.Outcome != nil {
 		status = r.Outcome.Status
 	}
-	_, err := ix.db.Exec(
+	_, err := e.Exec(
 		`INSERT OR IGNORE INTO events(id,day,team,model,provider,status,input_tokens,output_tokens,cache_read,cache_creation,cost_micros)
 		 VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
 		r.ID, dayOf(r.TS), r.Principal.Team, modelOf(r), r.Request.Provider, status,
@@ -98,32 +103,42 @@ func (ix *Index) Ingest(r audit.Record) error {
 	return err
 }
 
-// Replay scans a JSONL audit stream and Ingests every billable line. Malformed
-// lines are skipped (best-effort, like report.go). Idempotent via Ingest. The
-// returned count is billable lines SEEN (duplicates already in the index are
-// counted as seen, not newly inserted) — it is only for a boot log line.
+// Ingest upserts one billable record; non-billable records are ignored. PK=ULID
+// with INSERT OR IGNORE makes re-ingestion of the same record a no-op.
+func (ix *Index) Ingest(r audit.Record) error { return ingest(ix.db, r) }
+
+// Replay scans a JSONL audit stream and ingests every billable, newline-
+// terminated line inside ONE transaction (so a large boot replay does not pay
+// an fsync per row). It reads only complete lines (ReadString), dropping an
+// unterminated final remainder exactly as cmd/inferplane/report.go does — so a
+// crash-truncated last record is never half-ingested. Malformed lines are
+// skipped. Idempotent. The returned count is billable lines SEEN (duplicates
+// already present count as seen) — only for a boot log line.
 func (ix *Index) Replay(r io.Reader) (int, error) {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
-	n := 0
-	for sc.Scan() {
-		line := sc.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var rec audit.Record
-		if json.Unmarshal(line, &rec) != nil {
-			continue
-		}
-		if !billable(rec) {
-			continue
-		}
-		if err := ix.Ingest(rec); err != nil {
-			return n, err
-		}
-		n++
+	tx, err := ix.db.Begin()
+	if err != nil {
+		return 0, err
 	}
-	return n, sc.Err()
+	defer tx.Rollback() // no-op after a successful Commit
+
+	br := bufio.NewReader(r)
+	n := 0
+	for {
+		line, readErr := br.ReadString('\n')
+		if len(line) > 0 && line[len(line)-1] == '\n' { // complete line only
+			var rec audit.Record
+			if json.Unmarshal([]byte(line), &rec) == nil && billable(rec) {
+				if e := ingest(tx, rec); e != nil {
+					return n, e
+				}
+				n++
+			}
+		}
+		if readErr != nil { // io.EOF (drops any unterminated trailing remainder)
+			break
+		}
+	}
+	return n, tx.Commit()
 }
 
 // SummaryQuery bounds the aggregate by inclusive UTC day (YYYY-MM-DD); empty =
@@ -231,9 +246,13 @@ func (ix *Index) TimeSeries(q TimeSeriesQuery) ([]DayPoint, error) {
 	if days > 366 {
 		days = 366
 	}
+	// Bound the SCAN by day (uses the events_day index), not just the result
+	// LIMIT — otherwise SQLite would group the entire history before limiting.
+	// date('now', ...) is UTC and returns 'YYYY-MM-DD', matching the day column.
 	rows, err := ix.db.Query(`SELECT day, COUNT(*), COALESCE(SUM(cost_micros),0),
 		COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0)
-		FROM events GROUP BY day ORDER BY day DESC LIMIT ?`, days)
+		FROM events WHERE day >= date('now', ?) GROUP BY day ORDER BY day DESC LIMIT ?`,
+		fmt.Sprintf("-%d days", days), days)
 	if err != nil {
 		return nil, err
 	}

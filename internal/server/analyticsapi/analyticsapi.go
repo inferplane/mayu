@@ -33,11 +33,13 @@ func writeJSON(w http.ResponseWriter, v any) {
 // maxWindowDays. Returns ok=false (caller writes 400) on a violation.
 func boundedSummaryQuery(q url.Values) (analytics.SummaryQuery, bool) {
 	now := time.Now().UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC) // midnight UTC
+
 	since, until := q.Get("since"), q.Get("until")
 
 	var sinceT time.Time
 	if since == "" {
-		sinceT = now.AddDate(0, 0, -30)
+		sinceT = today.AddDate(0, 0, -30)
 		since = sinceT.Format(dayLayout)
 	} else {
 		t, err := time.Parse(dayLayout, since)
@@ -46,13 +48,16 @@ func boundedSummaryQuery(q url.Values) (analytics.SummaryQuery, bool) {
 		}
 		sinceT = t
 	}
-	untilT := now
+	untilT := today // default upper bound = midnight today (no time-of-day remainder)
 	if until != "" {
 		t, err := time.Parse(dayLayout, until)
 		if err != nil {
 			return analytics.SummaryQuery{}, false
 		}
 		untilT = t
+	}
+	if untilT.Before(sinceT) { // reversed range
+		return analytics.SummaryQuery{}, false
 	}
 	if untilT.Sub(sinceT) > maxWindowDays*24*time.Hour {
 		return analytics.SummaryQuery{}, false

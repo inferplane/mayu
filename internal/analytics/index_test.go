@@ -99,3 +99,21 @@ func TestTimeSeries_clampsAndReturnsNonNil(t *testing.T) {
 		t.Fatal("timeseries returned nil slice; want empty non-nil")
 	}
 }
+
+func TestReplay_dropsUnterminatedTail(t *testing.T) {
+	ix, _ := OpenSQLite(":memory:")
+	defer ix.Close()
+	complete := `{"event":"request_completed","id":"c1","ts":"2026-06-29T00:00:00Z","principal":{"team":"t"},"request":{"model_resolved":"m"},"cost":{"amount_usd_micros":5}}` + "\n"
+	partial := `{"event":"request_completed","id":"c2","ts":"2026-06-29T00:00:00Z","cost":{"amount_usd_micros":9}` // no closing brace, no newline (crash-truncated)
+	n, err := ix.Replay(strings.NewReader(complete + partial))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("ingested %d, want 1 (the unterminated tail must be dropped)", n)
+	}
+	s, _ := ix.Summary(SummaryQuery{})
+	if s.Totals.CostMicros != 5 {
+		t.Fatalf("cost = %d, want 5", s.Totals.CostMicros)
+	}
+}
