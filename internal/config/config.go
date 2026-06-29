@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -254,6 +255,36 @@ type Config struct {
 	Plugins       []PluginConfig            `json:"plugins,omitempty"`
 	OTel          *OTelConfig               `json:"otel,omitempty"`
 	Probe         ProbeConfig               `json:"probe,omitempty"`
+	Analytics     AnalyticsConfig           `json:"analytics,omitempty"`
+}
+
+// AnalyticsConfig configures the derived analytics index (design spec §4 / D1).
+// The index is default-on when a file audit sink exists (a deployment that
+// already persists audit gets usage analytics out of the box); Disabled turns
+// it off, and Path overrides the derived location.
+type AnalyticsConfig struct {
+	Path     string `json:"path,omitempty"`
+	Disabled bool   `json:"disabled,omitempty"`
+}
+
+// ResolveAnalytics decides whether the analytics index is enabled and at which
+// path. Rules (review-corrected): Disabled wins → off. An explicit Path always
+// enables (live ingestion via the audit Sink needs no file sink). Otherwise the
+// path is derived from the first file audit sink's directory; with no file sink
+// and no explicit path the index is off (nothing to derive or replay).
+func ResolveAnalytics(c *Config) (path string, enabled bool) {
+	if c.Analytics.Disabled {
+		return "", false
+	}
+	if c.Analytics.Path != "" {
+		return c.Analytics.Path, true
+	}
+	for _, s := range c.Audit.Sinks {
+		if s.Type == "file" && s.Path != "" {
+			return filepath.Join(filepath.Dir(s.Path), "analytics.db"), true
+		}
+	}
+	return "", false
 }
 
 // ProbeConfig configures the admin connection-test probe (ADR-014 D2).

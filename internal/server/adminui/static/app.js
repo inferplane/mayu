@@ -8,7 +8,9 @@ let lastIssuedKey = ""; // shown-once plaintext, page-lifetime only
 
 const $ = (id) => document.getElementById(id);
 
-async function api(method, path, body) {
+const DISABLED = Symbol("capability-disabled");
+
+async function api(method, path, body, optional) {
   const resp = await fetch(path, {
     method,
     headers: {
@@ -18,6 +20,9 @@ async function api(method, path, body) {
     body: body ? JSON.stringify(body) : undefined,
   });
   if (resp.status === 401) throw new Error("unauthorized — check the admin token");
+  // Opt-in only: an optional/capability endpoint that is absent → disabled,
+  // not an error (§9.1). Required calls (optional falsy) still throw below.
+  if (optional && (resp.status === 404 || resp.status === 405 || resp.status === 501)) return DISABLED;
   if (!resp.ok && resp.status !== 204) {
     // Surface the server's own {"error":...} message when present (the write
     // endpoints return sanitized, secret-free messages).
@@ -30,7 +35,16 @@ async function api(method, path, body) {
 
 /* ---------- views ---------- */
 
-const VIEWS = { overview: "Overview", keys: "Virtual keys", providers: "Providers", governance: "Governance", quickstart: "Quickstart" };
+const VIEWS = {
+  overview: "Overview",
+  usage: "Usage",
+  logs: "Logs",
+  keys: "Virtual keys",
+  teams: "Teams & Users",
+  providers: "Providers & Models",
+  governance: "Governance",
+  settings: "Settings",
+};
 
 function showView(name) {
   for (const v of Object.keys(VIEWS)) $("view-" + v).hidden = v !== name;
@@ -38,12 +52,74 @@ function showView(name) {
     b.classList.toggle("active", b.dataset.view === name));
   $("view-title").textContent = VIEWS[name];
   if (name === "overview") refreshOverview();
+  if (name === "usage") refreshUsageView();
   if (name === "providers") refreshProviders();
   if (name === "governance") refreshGovernance();
 }
 
 document.querySelectorAll("[data-view]").forEach((b) =>
   b.addEventListener("click", () => showView(b.dataset.view)));
+
+/* ---------- capabilities (bootstrap, §4.4 / degradation §9.1) ---------- */
+
+let caps = null;
+
+async function loadCapabilities() {
+  const out = await api("GET", "/admin/capabilities", null, true); // optional=true
+  caps = (out && out !== DISABLED) ? out : {}; // absent endpoint → all-off (safe default)
+  applyCapabilities();
+}
+
+// Each affordance card declares the capability it needs via data-cap; when the
+// capability is present we hide the "enable X" card. Nav buttons are NOT
+// disabled — sections stay navigable and show the affordance (§9.1).
+function applyCapabilities() {
+  document.querySelectorAll(".affordance[data-cap]").forEach((el) => {
+    el.hidden = capOn(el.dataset.cap);
+  });
+}
+
+// capOn maps a capability key to a strict boolean. analytics_index is an enum
+// ("A"|"B"|"off"); everything else is a bool.
+function capOn(key) {
+  if (!caps) return false;
+  const v = caps[key];
+  if (v === "off") return false; // any enum-valued capability explicitly off (e.g. analytics_index)
+  return !!v;                    // bool true, or a non-empty/non-"off" enum ("A"/"B")
+}
+
+/* ---------- usage analytics (real data when the index is on) ---------- */
+
+const usd = (micros) => "$" + (Number(micros) / 1e6).toFixed(4);
+
+async function refreshUsageView() {
+  const content = $("usage-content");
+  if (!capOn("analytics_index")) { content.hidden = true; return; }
+  const s = await api("GET", "/admin/analytics/summary", null, true); // optional
+  if (!s || s === DISABLED) { content.hidden = true; return; }
+  content.hidden = false;
+
+  const totals = $("usage-totals").querySelector("tbody");
+  totals.replaceChildren();
+  const tline = (k, v) => { const tr = document.createElement("tr"); tr.append(td(k), td(v)); totals.append(tr); };
+  tline("requests", String(s.totals.requests));
+  tline("input tokens", String(s.totals.input_tokens));
+  tline("output tokens", String(s.totals.output_tokens));
+  tline("cache read", String(s.totals.cache_read_tokens));
+  tline("spend", usd(s.totals.cost_micros));
+
+  const fill = (id, rows, nameKey) => {
+    const tb = $(id).querySelector("tbody");
+    tb.replaceChildren();
+    (rows || []).forEach((r) => {
+      const tr = document.createElement("tr");
+      tr.append(td(r[nameKey] || "—"), td(String(r.requests)), td(usd(r.cost_micros)));
+      tb.append(tr);
+    });
+  };
+  fill("usage-by-team", s.by_team, "team");
+  fill("usage-by-model", s.by_model, "model");
+}
 
 /* ---------- health ---------- */
 
@@ -581,7 +657,7 @@ $("copy").addEventListener("click", async () => {
   await navigator.clipboard.writeText($("plaintext").textContent);
 });
 
-/* ---------- quickstart ---------- */
+/* ---------- settings: connection quickstart snippets ---------- */
 
 // renderUsage fills the snippets with this gateway's own origin and, once
 // issued, the real virtual key — the page answers "how do I use this?" itself.
@@ -746,6 +822,7 @@ $("token-form").addEventListener("submit", async (e) => {
     $("origin-chip").textContent = window.location.origin;
     renderUsage(lastIssuedKey || null);
     await loadWhoami(); // self-service identity + team scoping (ADR-010)
+    await loadCapabilities(); // capability-driven section affordances (spec §9.1)
     showView("overview");
     pollHealth();
     setInterval(pollHealth, 15000);
