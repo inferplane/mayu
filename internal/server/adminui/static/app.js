@@ -52,6 +52,7 @@ function showView(name) {
     b.classList.toggle("active", b.dataset.view === name));
   $("view-title").textContent = VIEWS[name];
   if (name === "overview") refreshOverview();
+  if (name === "usage") refreshUsageView();
   if (name === "providers") refreshProviders();
   if (name === "governance") refreshGovernance();
 }
@@ -85,6 +86,39 @@ function capOn(key) {
   const v = caps[key];
   if (v === "off") return false; // any enum-valued capability explicitly off (e.g. analytics_index)
   return !!v;                    // bool true, or a non-empty/non-"off" enum ("A"/"B")
+}
+
+/* ---------- usage analytics (real data when the index is on) ---------- */
+
+const usd = (micros) => "$" + (Number(micros) / 1e6).toFixed(4);
+
+async function refreshUsageView() {
+  const content = $("usage-content");
+  if (!capOn("analytics_index")) { content.hidden = true; return; }
+  const s = await api("GET", "/admin/analytics/summary", null, true); // optional
+  if (!s || s === DISABLED) { content.hidden = true; return; }
+  content.hidden = false;
+
+  const totals = $("usage-totals").querySelector("tbody");
+  totals.replaceChildren();
+  const tline = (k, v) => { const tr = document.createElement("tr"); tr.append(td(k), td(v)); totals.append(tr); };
+  tline("requests", String(s.totals.requests));
+  tline("input tokens", String(s.totals.input_tokens));
+  tline("output tokens", String(s.totals.output_tokens));
+  tline("cache read", String(s.totals.cache_read_tokens));
+  tline("spend", usd(s.totals.cost_micros));
+
+  const fill = (id, rows, nameKey) => {
+    const tb = $(id).querySelector("tbody");
+    tb.replaceChildren();
+    (rows || []).forEach((r) => {
+      const tr = document.createElement("tr");
+      tr.append(td(r[nameKey] || "—"), td(String(r.requests)), td(usd(r.cost_micros)));
+      tb.append(tr);
+    });
+  };
+  fill("usage-by-team", s.by_team, "team");
+  fill("usage-by-model", s.by_model, "model");
 }
 
 /* ---------- health ---------- */

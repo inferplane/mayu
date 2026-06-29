@@ -207,3 +207,17 @@ func TestAdminUI_capabilitiesWired(t *testing.T) {
 		t.Error("app.js does not await loadCapabilities() (must run on unlock, before showView)")
 	}
 }
+
+func TestAdminUI_usageFetchesAnalytics(t *testing.T) {
+	_, js := get(t, "/app.js")
+	if !strings.Contains(js, "/admin/analytics/summary") {
+		t.Error("app.js Usage view does not fetch /admin/analytics/summary")
+	}
+	if !strings.Contains(js, "refreshUsageView") {
+		t.Error("app.js missing refreshUsageView()")
+	}
+	_, html := get(t, "/index.html")
+	if !strings.Contains(html, `id="usage-content"`) {
+		t.Error("index.html missing #usage-content block")
+	}
+}

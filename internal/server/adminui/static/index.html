@@ -109,6 +109,22 @@
             team/key/model breakdowns. <span class="ko">분석 스토어를 켜면 기간별
             스펜드와 팀·키·모델별 사용량을 볼 수 있습니다.</span></p>
         </div>
+        <div id="usage-content" hidden>
+          <div class="card">
+            <div class="microlabel">totals · last 30 days</div>
+            <table class="data" id="usage-totals"><tbody></tbody></table>
+          </div>
+          <div class="twocol">
+            <div class="card">
+              <div class="microlabel">spend by team</div>
+              <table class="data" id="usage-by-team"><thead><tr><th>team</th><th class="num">req</th><th class="num">USD</th></tr></thead><tbody></tbody></table>
+            </div>
+            <div class="card">
+              <div class="microlabel">spend by model</div>
+              <table class="data" id="usage-by-model"><thead><tr><th>model</th><th class="num">req</th><th class="num">USD</th></tr></thead><tbody></tbody></table>
+            </div>
+          </div>
+        </div>
       </section>
 
       <!-- ===== logs ===== -->
