@@ -37,6 +37,11 @@ jobs:
         with:
           use_bedrock: "true"
           github_token: ${{ github.token }}
+          # claude-code-action blocks bot-authored triggers by default ("Workflow
+          # initiated by non-human actor"). Dependabot version-bump PRs only touch
+          # action/module pins — low risk — and should get the same review as any
+          # human PR, so it's explicitly allowed here.
+          allowed_bots: "dependabot[bot]"
           prompt: |
             Review pull request #${{ github.event.pull_request.number }}.
             Be a rigorous but constructive reviewer. Prioritize:
