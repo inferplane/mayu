@@ -1,0 +1,13 @@
+version: 2
+updates:
+  # Keep the SHA-pinned GitHub Actions in the Claude Code Action workflows
+  # (docs/runbooks/claude-code-action.md) from going stale. Dependabot opens a
+  # PR bumping the pin whenever actions/checkout, aws-actions/configure-aws-
+  # credentials, or anthropics/claude-code-action cut a new release — each PR
+  # gets the same Bedrock auto-review as any other change.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(ci)"

@@ -133,8 +133,11 @@ merge."** Two MEDIUMs were investigated:
   `--allowed-tools "Bash(gh pr view:*),Bash(gh pr diff:*),..."` parses as a single
   quoted value, not word-split on the commas/parens inside it. **Refuted** — the
   quoting is correct as written; no change needed.
-- **SHA pins with no re-pin automation** — accepted as a real gap; tracked as a
-  follow-up (add Dependabot `github-actions` ecosystem config), not a blocker.
+- **SHA pins with no re-pin automation** — resolved: `.github/dependabot.yml`
+  (`github-actions` ecosystem, weekly) opens a version-bump PR whenever
+  `actions/checkout`, `aws-actions/configure-aws-credentials`, or
+  `anthropics/claude-code-action` cut a release; each such PR gets the same
+  Bedrock auto-review as any other change before merge.
 
 LOW findings (restore the fork-guard OIDC-rationale comment; `actions: read` grants a
 scope `--allowed-tools` doesn't exercise) are cosmetic/no-op-scope and left for a
