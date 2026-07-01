@@ -99,3 +99,25 @@ default branch — they only take effect once merged.
   re-trigger CI.
 - Cost scales with PR volume; add `paths:` filters to `claude-code-review.yml` to
   narrow it. The `@claude` job is gated on an actual mention.
+
+## Hardening applied (follow-up to the auto-review of PR #3)
+
+The self-review flagged several items; resolved here:
+- **`@claude` abuse gate (HIGH):** `claude.yml` now requires
+  `author_association ∈ {OWNER, MEMBER, COLLABORATOR}` in addition to the `@claude`
+  mention — otherwise any GitHub user could trigger a Bedrock call on this public repo.
+- **SHA-pinned actions (MEDIUM):** `actions/checkout`,
+  `aws-actions/configure-aws-credentials`, and `anthropics/claude-code-action` are pinned
+  to commit SHAs (resolved from their `v4`/`v1` tags via the GitHub API), not mutable tags.
+  Re-pin on upgrade: `gh api repos/<owner>/<action>/commits/<tag> --jq .sha`.
+- **Single-line `claude_args` (MEDIUM):** avoids any ambiguity in how the action tokenizes
+  a multi-line block, so `--allowed-tools` is never silently dropped. (Verified: the CLI
+  accepts both `--allowed-tools` and `--allowedTools`.)
+- **Least privilege (LOW):** the review workflow dropped `actions: read`; `claude.yml`
+  `issues:` trigger is `[opened]` only (no re-trigger on assignment).
+- **Trust `sub` is `repo:inferplane/mayu:*` (LOW) — kept intentionally:** the PR-review
+  workflow runs on `pull_request` events whose OIDC `sub` is `repo:inferplane/mayu:pull_request`,
+  so tightening the trust to `…:ref:refs/heads/main` only would BREAK PR review. Keep `:*`
+  (or explicitly allow both `main` and `pull_request`).
+- Deferred/INFO: prompt-injection via diff content is mitigated by the read+comment-only
+  `--allowed-tools` scope (no code change needed).
