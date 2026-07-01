@@ -2,7 +2,7 @@ name: Claude Code Review
 
 # Automatically reviews every PR (open + new commits) using Claude on Amazon
 # Bedrock via GitHub OIDC (no API key). Fork PRs do NOT receive an OIDC token,
-# so they are safely skipped (no secret/credential exposure on a public repo).
+# so they are skipped by the `if:` guard (no failed red check on a public repo).
 # Prereqs: AWS OIDC provider + IAM role (secret AWS_ROLE_TO_ASSUME) with
 # bedrock:InvokeModel, and Bedrock model access enabled. See
 # docs/runbooks/claude-code-action.md.
@@ -12,30 +12,27 @@ on:
 
 jobs:
   claude-review:
-    # Fork PRs receive no OIDC token, so the AWS step would error (red check) —
-    # skip them explicitly instead of failing noisily (safe on a public repo).
+    # Skip fork PRs: they get no OIDC token, so the AWS step would error (red check).
     if: github.event.pull_request.head.repo.fork == false
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write # post the review as a PR comment
-      issues: read
       id-token: write # GitHub OIDC → assume the AWS role
-      actions: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 1
 
       - name: Configure AWS credentials (OIDC → Bedrock)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ vars.AWS_REGION || 'us-west-2' }}
 
       - name: Automatic PR review (Bedrock)
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1
         with:
           use_bedrock: "true"
           github_token: ${{ github.token }}
@@ -51,6 +48,5 @@ jobs:
             - Test coverage and missing edge cases
             Post findings with `gh pr comment` (severity-tagged). Review only what the
             diff changes; do not request unrelated refactors.
-          claude_args: |
-            --model ${{ vars.CLAUDE_BEDROCK_MODEL || 'us.anthropic.claude-sonnet-4-6' }}
-            --allowed-tools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh search:*),Bash(gh issue view:*)"
+          # Single-line claude_args: unambiguous tokenization; read + comment only.
+          claude_args: '--model ${{ vars.CLAUDE_BEDROCK_MODEL || ''us.anthropic.claude-sonnet-4-6'' }} --allowed-tools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh search:*),Bash(gh issue view:*)"'
