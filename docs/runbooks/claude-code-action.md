@@ -121,3 +121,21 @@ The self-review flagged several items; resolved here:
   (or explicitly allow both `main` and `pull_request`).
 - Deferred/INFO: prompt-injection via diff content is mitigated by the read+comment-only
   `--allowed-tools` scope (no code change needed).
+
+## PR #4 auto-review follow-up (verified in-repo, no workflow changes)
+
+Second review pass on the hardening PR found **no HIGH** and marked it **"Safe to
+merge."** Two MEDIUMs were investigated:
+
+- **`claude_args` quoting** — verified against the pinned action source
+  (`anthropics/claude-code-action@fad22eb3`): `src/modes/agent/parse-tools.ts` tokenizes
+  `claude_args` with the `shell-quote` npm package (real shell-quoting rules), so
+  `--allowed-tools "Bash(gh pr view:*),Bash(gh pr diff:*),..."` parses as a single
+  quoted value, not word-split on the commas/parens inside it. **Refuted** — the
+  quoting is correct as written; no change needed.
+- **SHA pins with no re-pin automation** — accepted as a real gap; tracked as a
+  follow-up (add Dependabot `github-actions` ecosystem config), not a blocker.
+
+LOW findings (restore the fork-guard OIDC-rationale comment; `actions: read` grants a
+scope `--allowed-tools` doesn't exercise) are cosmetic/no-op-scope and left for a
+future workflow-editing pass — not actioned here to avoid unnecessary CI-file churn.
