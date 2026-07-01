@@ -2,7 +2,8 @@ name: Claude Code Review
 
 # Automatically reviews every PR (open + new commits) using Claude on Amazon
 # Bedrock via GitHub OIDC (no API key). Fork PRs do NOT receive an OIDC token,
-# so they are skipped by the `if:` guard (no failed red check on a public repo).
+# so they are skipped by the `if:` guard (no secret/credential exposure on this
+# public repo, and no failed red check either).
 # Prereqs: AWS OIDC provider + IAM role (secret AWS_ROLE_TO_ASSUME) with
 # bedrock:InvokeModel, and Bedrock model access enabled. See
 # docs/runbooks/claude-code-action.md.

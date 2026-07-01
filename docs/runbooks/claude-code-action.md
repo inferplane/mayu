@@ -136,6 +136,8 @@ merge."** Two MEDIUMs were investigated:
 - **SHA pins with no re-pin automation** — accepted as a real gap; tracked as a
   follow-up (add Dependabot `github-actions` ecosystem config), not a blocker.
 
-LOW findings (restore the fork-guard OIDC-rationale comment; `actions: read` grants a
-scope `--allowed-tools` doesn't exercise) are cosmetic/no-op-scope and left for a
-future workflow-editing pass — not actioned here to avoid unnecessary CI-file churn.
+LOW findings resolved in a follow-up cleanup: `actions: read` removed from `claude.yml`
+(no allowed tool exercised it); the fork-guard comment in `claude-code-review.yml`
+restores the OIDC-token security rationale alongside the red-check rationale.
+
+Still open (tracked, not yet actioned): SHA re-pin automation via Dependabot.
