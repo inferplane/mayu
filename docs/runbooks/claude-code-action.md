@@ -139,6 +139,8 @@ merge."** Two MEDIUMs were investigated:
   `anthropics/claude-code-action` cut a release; each such PR gets the same
   Bedrock auto-review as any other change before merge.
 
-LOW findings (restore the fork-guard OIDC-rationale comment; `actions: read` grants a
-scope `--allowed-tools` doesn't exercise) are cosmetic/no-op-scope and left for a
-future workflow-editing pass — not actioned here to avoid unnecessary CI-file churn.
+LOW findings resolved in a follow-up cleanup: `actions: read` removed from `claude.yml`
+(no allowed tool exercised it); the fork-guard comment in `claude-code-review.yml`
+restores the OIDC-token security rationale alongside the red-check rationale.
+
+Still open (tracked, not yet actioned): SHA re-pin automation via Dependabot.

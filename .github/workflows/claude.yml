@@ -33,7 +33,6 @@ jobs:
       pull-requests: write # gh pr comment
       issues: write # gh issue comment
       id-token: write # GitHub OIDC → assume the AWS role
-      actions: read # let Claude read CI results when asked about a PR
     steps:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
