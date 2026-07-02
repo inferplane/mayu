@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver, registered as "sqlite"
@@ -50,19 +49,45 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 
 // migrateGovernanceColumns adds the §8 D2 governance columns to a `keys` table
 // that may already exist from before this feature (CREATE TABLE IF NOT EXISTS
-// is a no-op on an existing table, so new columns need ALTER TABLE). SQLite
-// has no idempotent ADD COLUMN, so a "duplicate column" error is expected and
-// ignored on every open after the first; any other error is real.
+// is a no-op on an existing table, so new columns need ALTER TABLE). It checks
+// `pragma table_info(keys)` first and only ALTERs missing columns — robust
+// across driver error-message wording (not a "duplicate column" substring
+// heuristic on an undocumented error string).
 func migrateGovernanceColumns(db *sql.DB) error {
-	for _, stmt := range []string{
-		`ALTER TABLE keys ADD COLUMN budget_usd_micros INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE keys ADD COLUMN tpm INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE keys ADD COLUMN rpm INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE keys ADD COLUMN expires_at TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE keys ADD COLUMN owner TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE keys ADD COLUMN metadata TEXT NOT NULL DEFAULT ''`,
-	} {
-		if _, err := db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+	existing := map[string]bool{}
+	rows, err := db.Query(`PRAGMA table_info(keys)`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		existing[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+
+	columns := []struct{ name, ddl string }{
+		{"budget_usd_micros", `ALTER TABLE keys ADD COLUMN budget_usd_micros INTEGER NOT NULL DEFAULT 0`},
+		{"tpm", `ALTER TABLE keys ADD COLUMN tpm INTEGER NOT NULL DEFAULT 0`},
+		{"rpm", `ALTER TABLE keys ADD COLUMN rpm INTEGER NOT NULL DEFAULT 0`},
+		{"expires_at", `ALTER TABLE keys ADD COLUMN expires_at TEXT NOT NULL DEFAULT ''`},
+		{"owner", `ALTER TABLE keys ADD COLUMN owner TEXT NOT NULL DEFAULT ''`},
+		{"metadata", `ALTER TABLE keys ADD COLUMN metadata TEXT NOT NULL DEFAULT ''`},
+	}
+	for _, c := range columns {
+		if existing[c.name] {
+			continue
+		}
+		if _, err := db.Exec(c.ddl); err != nil {
 			return err
 		}
 	}
@@ -100,7 +125,9 @@ const keyColumns = `key_id, team, allowed_models, budget_usd_micros, tpm, rpm, e
 
 // scanPrincipal reads one keyColumns-shaped row. Expiry is checked by the
 // caller (Resolve treats an expired key as not-found; List shows it as-is so
-// operators can see and revoke it).
+// operators can see and revoke it). A corrupt expires_at is a hard error here
+// (fail-closed) — expiry is an auth control, unlike metadata, which is
+// advisory and tolerates malformed data.
 func scanPrincipal(row interface{ Scan(...any) error }) (Principal, error) {
 	var p Principal
 	var models, expiresAt, metaJSON string
@@ -108,7 +135,11 @@ func scanPrincipal(row interface{ Scan(...any) error }) (Principal, error) {
 		return Principal{}, err
 	}
 	p.AllowedModels = splitModels(models)
-	p.ExpiresAt = decodeExpiry(expiresAt)
+	exp, err := decodeExpiry(expiresAt)
+	if err != nil {
+		return Principal{}, err
+	}
+	p.ExpiresAt = exp
 	p.Metadata = decodeMetadata(metaJSON)
 	return p, nil
 }
@@ -137,15 +168,15 @@ func encodeExpiry(t *time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
 }
 
-func decodeExpiry(s string) *time.Time {
+func decodeExpiry(s string) (*time.Time, error) {
 	if s == "" {
-		return nil
+		return nil, nil
 	}
 	t, err := time.Parse(time.RFC3339Nano, s)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("keystore: invalid expires_at %q: %w", s, err)
 	}
-	return &t
+	return &t, nil
 }
 
 func encodeMetadata(m map[string]string) (string, error) {

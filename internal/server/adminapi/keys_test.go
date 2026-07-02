@@ -288,3 +288,37 @@ func TestListKeys_omitsZeroGovernanceFields(t *testing.T) {
 		t.Fatalf("zero-value governance fields should be omitted: %s", rec.Body.String())
 	}
 }
+
+func TestCreateKeyWithGovernanceOptions_rejectsNegativeValues(t *testing.T) {
+	for _, body := range []string{
+		`{"team":"t","budget_usd_micros":-1}`,
+		`{"team":"t","tpm":-1}`,
+		`{"team":"t","rpm":-1}`,
+	} {
+		h := NewKeysHandler(newTestStore(t), nil)
+		req := httptest.NewRequest("POST", "/admin/keys", strings.NewReader(body))
+		req = req.WithContext(principal.WithAdmin(req.Context(), adminID))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != 400 {
+			t.Fatalf("negative value %s: got %d, want 400", body, rec.Code)
+		}
+	}
+}
+
+func TestCreateKeyWithGovernanceOptions_expirySubSecondPrecisionPreserved(t *testing.T) {
+	h := NewKeysHandler(newTestStore(t), nil)
+	body := `{"team":"t","expires_at":"2099-01-01T00:00:00.123456789Z"}`
+	req := httptest.NewRequest("POST", "/admin/keys", strings.NewReader(body))
+	req = req.WithContext(principal.WithAdmin(req.Context(), adminID))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	var out map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if out["expires_at"] != "2099-01-01T00:00:00.123456789Z" {
+		t.Fatalf("sub-second expiry precision lost: got %v", out["expires_at"])
+	}
+}

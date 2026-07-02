@@ -7,6 +7,7 @@ package adminapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -80,9 +81,13 @@ type keyOptionsBody struct {
 }
 
 func (b keyOptionsBody) toKeyOptions() (keystore.KeyOptions, error) {
+	if b.BudgetUSDMicros < 0 || b.TPM < 0 || b.RPM < 0 {
+		return keystore.KeyOptions{}, fmt.Errorf("budget/tpm/rpm must be non-negative")
+	}
 	opts := keystore.KeyOptions{BudgetUSDMicros: b.BudgetUSDMicros, TPM: b.TPM, RPM: b.RPM, Owner: b.Owner, Metadata: b.Metadata}
 	if b.ExpiresAt != "" {
-		t, err := time.Parse(time.RFC3339, b.ExpiresAt)
+		// RFC3339Nano parses both plain RFC3339 and sub-second timestamps.
+		t, err := time.Parse(time.RFC3339Nano, b.ExpiresAt)
 		if err != nil {
 			return opts, err
 		}
@@ -103,7 +108,10 @@ func keyView(p keystore.Principal) map[string]any {
 		v["rpm"] = p.RPM
 	}
 	if p.ExpiresAt != nil {
-		v["expires_at"] = p.ExpiresAt.Format(time.RFC3339)
+		// RFC3339Nano to match encodeExpiry's storage precision; Go's ".9"
+		// pattern strips trailing zeros, so a whole-second time still renders
+		// identically to plain RFC3339 (no behavior change for the common case).
+		v["expires_at"] = p.ExpiresAt.Format(time.RFC3339Nano)
 	}
 	if p.Owner != "" {
 		v["owner"] = p.Owner
@@ -131,7 +139,9 @@ func (h *KeysHandler) create(w http.ResponseWriter, r *http.Request, id principa
 	}
 	opts, err := body.toKeyOptions()
 	if err != nil {
-		http.Error(w, `{"error":"expires_at must be RFC3339"}`, http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid key options: " + err.Error()})
 		return
 	}
 	plaintext, p, err := h.store.CreateWithOptions(r.Context(), body.Team, body.AllowedModels, opts)

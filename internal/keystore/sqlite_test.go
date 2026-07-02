@@ -176,3 +176,21 @@ func TestMigration_addsColumnsToPreExistingSchema(t *testing.T) {
 		t.Fatalf("resolve after migration: %v %+v", err, got)
 	}
 }
+
+// TestResolve_corruptExpiryFailsClosed pins the security-relevant fix: a
+// corrupt/unparseable expires_at must NOT resolve as "never expires"
+// (fail-open on an auth control) — it must fail closed.
+func TestResolve_corruptExpiryFailsClosed(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	plaintext, p, err := s.CreateWithOptions(ctx, "t", []string{"*"}, KeyOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE keys SET expires_at = ? WHERE key_id = ?`, "not-a-timestamp", p.KeyID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Resolve(ctx, plaintext); err == nil {
+		t.Fatal("corrupt expires_at must fail closed, not resolve as never-expiring")
+	}
+}

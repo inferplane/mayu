@@ -660,7 +660,9 @@ $("create-form").addEventListener("submit", async (e) => {
   if (budget) body.budget_usd_micros = Math.round(Number(budget) * 1e6);
   if ($("kf-tpm").value) body.tpm = Number($("kf-tpm").value);
   if ($("kf-rpm").value) body.rpm = Number($("kf-rpm").value);
-  if ($("kf-expires").value) body.expires_at = $("kf-expires").value + "T00:00:00Z";
+  // End-of-day UTC, not midnight — a UTC-negative operator picking "today"
+  // would otherwise see the key expire hours before their own day ends.
+  if ($("kf-expires").value) body.expires_at = $("kf-expires").value + "T23:59:59Z";
   if ($("kf-owner").value) body.owner = $("kf-owner").value.trim();
   const out = await api("POST", "/admin/keys", body);
   ["kf-budget", "kf-tpm", "kf-rpm", "kf-expires", "kf-owner"].forEach((id) => { $(id).value = ""; });
