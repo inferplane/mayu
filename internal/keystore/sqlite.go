@@ -59,13 +59,13 @@ func migrateGovernanceColumns(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
+	defer rows.Close()
 	for rows.Next() {
 		var cid int
 		var name, colType string
 		var notNull, pk int
 		var dflt any
 		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
-			rows.Close()
 			return err
 		}
 		existing[name] = true
@@ -73,7 +73,6 @@ func migrateGovernanceColumns(db *sql.DB) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	rows.Close()
 
 	columns := []struct{ name, ddl string }{
 		{"budget_usd_micros", `ALTER TABLE keys ADD COLUMN budget_usd_micros INTEGER NOT NULL DEFAULT 0`},
