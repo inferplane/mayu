@@ -322,3 +322,14 @@ func TestCreateKeyWithGovernanceOptions_expirySubSecondPrecisionPreserved(t *tes
 		t.Fatalf("sub-second expiry precision lost: got %v", out["expires_at"])
 	}
 }
+
+func TestCreateKey_pastExpiryIs400(t *testing.T) {
+	h := NewKeysHandler(newTestStore(t), nil)
+	req := httptest.NewRequest("POST", "/admin/keys", strings.NewReader(`{"team":"t","expires_at":"2020-01-01T00:00:00Z"}`))
+	req = req.WithContext(principal.WithAdmin(req.Context(), adminID))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("past expires_at: got %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+}

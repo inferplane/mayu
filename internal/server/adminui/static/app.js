@@ -658,8 +658,10 @@ $("create-form").addEventListener("submit", async (e) => {
   const body = { team: team, allowed_models: models };
   const budget = $("kf-budget").value;
   if (budget) body.budget_usd_micros = Math.round(Number(budget) * 1e6);
-  if ($("kf-tpm").value) body.tpm = Number($("kf-tpm").value);
-  if ($("kf-rpm").value) body.rpm = Number($("kf-rpm").value);
+  // parseInt (not Number): TPM/RPM are integers server-side (int64) — a float
+  // like "1000.5" would otherwise fail JSON decode with a misleading error.
+  if ($("kf-tpm").value) body.tpm = parseInt($("kf-tpm").value, 10);
+  if ($("kf-rpm").value) body.rpm = parseInt($("kf-rpm").value, 10);
   // End-of-day UTC, not midnight — a UTC-negative operator picking "today"
   // would otherwise see the key expire hours before their own day ends.
   if ($("kf-expires").value) body.expires_at = $("kf-expires").value + "T23:59:59Z";

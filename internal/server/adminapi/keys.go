@@ -89,7 +89,10 @@ func (b keyOptionsBody) toKeyOptions() (keystore.KeyOptions, error) {
 		// RFC3339Nano parses both plain RFC3339 and sub-second timestamps.
 		t, err := time.Parse(time.RFC3339Nano, b.ExpiresAt)
 		if err != nil {
-			return opts, err
+			return keystore.KeyOptions{}, err
+		}
+		if t.Before(time.Now().UTC()) {
+			return keystore.KeyOptions{}, fmt.Errorf("expires_at is in the past")
 		}
 		opts.ExpiresAt = &t
 	}
@@ -128,7 +131,13 @@ func (h *KeysHandler) create(w http.ResponseWriter, r *http.Request, id principa
 		AllowedModels []string `json:"allowed_models"`
 		keyOptionsBody
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Team == "" {
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid request body: " + err.Error()})
+		return
+	}
+	if body.Team == "" {
 		http.Error(w, `{"error":"team required"}`, http.StatusBadRequest)
 		return
 	}
