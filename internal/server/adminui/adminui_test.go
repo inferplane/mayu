@@ -221,3 +221,15 @@ func TestAdminUI_usageFetchesAnalytics(t *testing.T) {
 		t.Error("index.html missing #usage-content block")
 	}
 }
+
+func TestAdminUI_overviewSparkline(t *testing.T) {
+	_, js := get(t, "/app.js")
+	for _, want := range []string{"renderSparkline", "stat-spend-spark", "/admin/analytics/timeseries"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing %q — Overview spend sparkline not wired", want)
+		}
+	}
+	if strings.Contains(js, "innerHTML") {
+		t.Error("app.js uses innerHTML — data-free/no-markup-from-data invariant violated")
+	}
+}
