@@ -564,13 +564,25 @@ $("export-btn").addEventListener("click", async () => {
 
 /* ---------- keys ---------- */
 
+// keyLimitsSummary renders the recorded (not-yet-enforced, §8 D2) governance
+// fields as one compact string — avoids five mostly-empty table columns.
+function keyLimitsSummary(k) {
+  const parts = [];
+  if (k.budget_usd_micros) parts.push("$" + (k.budget_usd_micros / 1e6).toFixed(2));
+  if (k.tpm) parts.push(k.tpm + " tpm");
+  if (k.rpm) parts.push(k.rpm + " rpm");
+  if (k.expires_at) parts.push("exp " + k.expires_at.slice(0, 10));
+  if (k.owner) parts.push(k.owner);
+  return parts.length ? parts.join(" · ") : "—";
+}
+
 async function refreshKeys() {
   const out = await api("GET", "/admin/keys");
   const tbody = $("keys").querySelector("tbody");
   tbody.textContent = "";
   for (const k of out.data || []) {
     const tr = document.createElement("tr");
-    for (const v of [k.key_id, k.team, (k.allowed_models || []).join(", ")]) {
+    for (const v of [k.key_id, k.team, (k.allowed_models || []).join(", "), keyLimitsSummary(k)]) {
       tr.appendChild(td(v)); // textContent only — never markup from data
     }
     const cell = document.createElement("td");
@@ -643,7 +655,15 @@ $("create-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const team = currentTeam();
   const models = $("models").value.split(",").map((s) => s.trim()).filter(Boolean);
-  const out = await api("POST", "/admin/keys", { team: team, allowed_models: models });
+  const body = { team: team, allowed_models: models };
+  const budget = $("kf-budget").value;
+  if (budget) body.budget_usd_micros = Math.round(Number(budget) * 1e6);
+  if ($("kf-tpm").value) body.tpm = Number($("kf-tpm").value);
+  if ($("kf-rpm").value) body.rpm = Number($("kf-rpm").value);
+  if ($("kf-expires").value) body.expires_at = $("kf-expires").value + "T00:00:00Z";
+  if ($("kf-owner").value) body.owner = $("kf-owner").value.trim();
+  const out = await api("POST", "/admin/keys", body);
+  ["kf-budget", "kf-tpm", "kf-rpm", "kf-expires", "kf-owner"].forEach((id) => { $(id).value = ""; });
   // Plaintext is rendered once, kept only in the DOM/page until reload.
   lastIssuedKey = out.plaintext;
   $("plaintext").textContent = out.plaintext;

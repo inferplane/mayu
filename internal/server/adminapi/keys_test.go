@@ -244,3 +244,47 @@ func TestRevokeFailsClosedOnLookupError(t *testing.T) {
 		t.Fatalf("key was revoked despite failed entitlement lookup: %v %v", ps, err)
 	}
 }
+
+func TestCreateKeyWithGovernanceOptions_roundTrip(t *testing.T) {
+	h := NewKeysHandler(newTestStore(t), nil)
+	body := `{"team":"platform-eng","allowed_models":["*"],"budget_usd_micros":5000000,"tpm":1000,"rpm":60,"owner":"alice","expires_at":"2099-01-01T00:00:00Z","metadata":{"purpose":"ci"}}`
+	req := httptest.NewRequest("POST", "/admin/keys", strings.NewReader(body))
+	req = req.WithContext(principal.WithAdmin(req.Context(), adminID))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	var out map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if out["budget_usd_micros"] != float64(5000000) || out["owner"] != "alice" {
+		t.Fatalf("governance fields not returned: %+v", out)
+	}
+	if out["expires_at"] != "2099-01-01T00:00:00Z" {
+		t.Fatalf("expires_at not returned: %+v", out)
+	}
+}
+
+func TestCreateKeyWithGovernanceOptions_badExpiryIs400(t *testing.T) {
+	h := NewKeysHandler(newTestStore(t), nil)
+	req := httptest.NewRequest("POST", "/admin/keys", strings.NewReader(`{"team":"t","expires_at":"not-a-date"}`))
+	req = req.WithContext(principal.WithAdmin(req.Context(), adminID))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("bad expires_at: got %d, want 400", rec.Code)
+	}
+}
+
+func TestListKeys_omitsZeroGovernanceFields(t *testing.T) {
+	store := newTestStore(t)
+	store.Create(context.Background(), "t", []string{"*"})
+	h := NewKeysHandler(store, nil)
+	req := httptest.NewRequest("GET", "/admin/keys", nil)
+	req = req.WithContext(principal.WithAdmin(req.Context(), adminID))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), "budget_usd_micros") || strings.Contains(rec.Body.String(), "owner") {
+		t.Fatalf("zero-value governance fields should be omitted: %s", rec.Body.String())
+	}
+}
