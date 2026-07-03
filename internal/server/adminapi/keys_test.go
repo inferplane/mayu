@@ -3,11 +3,13 @@ package adminapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/keystore"
@@ -331,5 +333,48 @@ func TestCreateKey_pastExpiryIs400(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != 400 {
 		t.Fatalf("past expires_at: got %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateKeyWithGovernanceOptions_rejectsOversizedMetadata(t *testing.T) {
+	h := NewKeysHandler(newTestStore(t), nil)
+	big := make(map[string]string, 200)
+	for i := 0; i < 200; i++ {
+		big[fmt.Sprintf("key-%d", i)] = strings.Repeat("v", 100) // 200 * ~106 bytes ≈ 21KB, well over any KB-scale cap
+	}
+	bodyBytes, _ := json.Marshal(map[string]any{"team": "t", "metadata": big})
+	req := httptest.NewRequest("POST", "/admin/keys", strings.NewReader(string(bodyBytes)))
+	req = req.WithContext(principal.WithAdmin(req.Context(), adminID))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("oversized metadata: got %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestListKeys_marksExpiredKeys(t *testing.T) {
+	store := newTestStore(t)
+	past := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	// The store layer (unlike the admin API, TestCreateKey_pastExpiryIs400)
+	// doesn't itself reject a past ExpiresAt — this simulates a key whose
+	// expiry lapsed after creation, or a directly-edited row.
+	_, _, err := store.CreateWithOptions(context.Background(), "t", []string{"*"}, keystore.KeyOptions{ExpiresAt: &past})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewKeysHandler(store, nil)
+	req := httptest.NewRequest("GET", "/admin/keys", nil)
+	req = req.WithContext(principal.WithAdmin(req.Context(), adminID))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Data []map[string]any `json:"data"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if len(out.Data) != 1 || out.Data[0]["expired"] != true {
+		t.Fatalf("expired key not marked: %+v", out.Data)
 	}
 }

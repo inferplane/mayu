@@ -8,7 +8,8 @@ import (
 	"fmt"
 	"time"
 
-	_ "modernc.org/sqlite" // pure-Go driver, registered as "sqlite"
+	sqlite "modernc.org/sqlite" // pure-Go driver, registered as "sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 // SQLiteStore is the M3 default Store. Schema uses only portable SQL types so
@@ -36,43 +37,90 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema); err != nil {
+	if err := ensureSchemaWithRetry(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("keystore: schema: %w", err)
-	}
-	if err := migrateGovernanceColumns(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("keystore: migrate: %w", err)
 	}
 	return &SQLiteStore{db: db}, nil
 }
 
-// migrateGovernanceColumns adds the §8 D2 governance columns to a `keys` table
-// that may already exist from before this feature (CREATE TABLE IF NOT EXISTS
-// is a no-op on an existing table, so new columns need ALTER TABLE). It checks
-// `pragma table_info(keys)` first and only ALTERs missing columns — robust
-// across driver error-message wording (not a "duplicate column" substring
-// heuristic on an undocumented error string).
-func migrateGovernanceColumns(db *sql.DB) error {
-	existing := map[string]bool{}
-	rows, err := db.Query(`PRAGMA table_info(keys)`)
+// ensureSchemaWithRetry retries ensureSchema on SQLITE_BUSY, identified by the
+// driver's typed error code (5, the stable SQLite C API result code — not a
+// string-matching heuristic on error text, which round-2 review correctly
+// flagged as fragile for the ALTER-TABLE path this replaced). busy_timeout
+// already makes SQLite itself wait+retry internally; this covers the residual
+// gap where BEGIN EXCLUSIVE can still observe an immediate SQLITE_BUSY under
+// several processes racing a cold-start migration at once.
+func ensureSchemaWithRetry(db *sql.DB) error {
+	const attempts = 5
+	var err error
+	for i := 0; i < attempts; i++ {
+		if err = ensureSchema(db); err == nil {
+			return nil
+		}
+		var sqliteErr *sqlite.Error
+		if !errors.As(err, &sqliteErr) || sqliteErr.Code() != sqlite3.SQLITE_BUSY {
+			return err // a real error, not lock contention — don't retry
+		}
+		time.Sleep(time.Duration(20*(i+1)) * time.Millisecond)
+	}
+	return err
+}
+
+// ensureSchema creates the `keys` table (if absent) and adds the §8 D2
+// governance columns (if the table predates them) — both inside ONE
+// BEGIN EXCLUSIVE / COMMIT on one pinned connection (db.Conn). SQLite's
+// EXCLUSIVE lock is a file-level lock, so this serializes the whole
+// create-or-check-then-write sequence across PROCESSES too — e.g. two
+// inferplane pods briefly overlapping during a rolling restart (or a scale-up
+// from 0) against a shared keystore file. Without this, two processes can
+// both see "table/column missing" before either writes, and the loser's
+// CREATE/ALTER fails outright (reproduced by
+// TestMigration_concurrentOpensDoNotRace at realistic 2-3-pod concurrency).
+// busy_timeout (set in the DSN) makes a blocked BEGIN EXCLUSIVE wait and
+// retry rather than error immediately.
+func ensureSchema(db *sql.DB) error {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, `BEGIN EXCLUSIVE`); err != nil {
+		return err
+	}
+	rollback := func() { conn.ExecContext(ctx, `ROLLBACK`) }
+
+	if _, err := conn.ExecContext(ctx, schema); err != nil {
+		rollback()
+		return err
+	}
+
+	existing := map[string]bool{}
+	rows, err := conn.QueryContext(ctx, `PRAGMA table_info(keys)`)
+	if err != nil {
+		rollback()
+		return err
+	}
 	for rows.Next() {
 		var cid int
 		var name, colType string
 		var notNull, pk int
 		var dflt any
 		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			rows.Close()
+			rollback()
 			return err
 		}
 		existing[name] = true
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
+		rollback()
 		return err
 	}
+	rows.Close()
 
 	columns := []struct{ name, ddl string }{
 		{"budget_usd_micros", `ALTER TABLE keys ADD COLUMN budget_usd_micros INTEGER NOT NULL DEFAULT 0`},
@@ -86,9 +134,14 @@ func migrateGovernanceColumns(db *sql.DB) error {
 		if existing[c.name] {
 			continue
 		}
-		if _, err := db.Exec(c.ddl); err != nil {
+		if _, err := conn.ExecContext(ctx, c.ddl); err != nil {
+			rollback()
 			return err
 		}
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		rollback()
+		return err
 	}
 	return nil
 }

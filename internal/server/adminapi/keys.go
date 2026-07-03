@@ -80,9 +80,19 @@ type keyOptionsBody struct {
 	Metadata        map[string]string `json:"metadata,omitempty"`
 }
 
+// maxMetadataBytes bounds the serialized size of KeyOptions.Metadata so an
+// admin-authenticated caller can't grow every /admin/keys response (List is
+// unpaginated) or the keystore row without limit.
+const maxMetadataBytes = 4096
+
 func (b keyOptionsBody) toKeyOptions() (keystore.KeyOptions, error) {
 	if b.BudgetUSDMicros < 0 || b.TPM < 0 || b.RPM < 0 {
 		return keystore.KeyOptions{}, fmt.Errorf("budget/tpm/rpm must be non-negative")
+	}
+	if len(b.Metadata) > 0 {
+		if size, err := json.Marshal(b.Metadata); err != nil || len(size) > maxMetadataBytes {
+			return keystore.KeyOptions{}, fmt.Errorf("metadata exceeds %d bytes serialized", maxMetadataBytes)
+		}
 	}
 	opts := keystore.KeyOptions{BudgetUSDMicros: b.BudgetUSDMicros, TPM: b.TPM, RPM: b.RPM, Owner: b.Owner, Metadata: b.Metadata}
 	if b.ExpiresAt != "" {
@@ -115,6 +125,12 @@ func keyView(p keystore.Principal) map[string]any {
 		// pattern strips trailing zeros, so a whole-second time still renders
 		// identically to plain RFC3339 (no behavior change for the common case).
 		v["expires_at"] = p.ExpiresAt.Format(time.RFC3339Nano)
+		// List (unlike Resolve) shows expired keys rather than hiding them, so
+		// operators can find and revoke them — mark them explicitly rather than
+		// requiring a client-side timestamp comparison against "now".
+		if p.ExpiresAt.Before(time.Now().UTC()) {
+			v["expired"] = true
+		}
 	}
 	if p.Owner != "" {
 		v["owner"] = p.Owner

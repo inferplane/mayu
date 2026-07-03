@@ -194,3 +194,43 @@ func TestResolve_corruptExpiryFailsClosed(t *testing.T) {
 		t.Fatal("corrupt expires_at must fail closed, not resolve as never-expiring")
 	}
 }
+
+// TestMigration_concurrentOpensDoNotRace simulates two separate processes
+// (two independent *sql.DB handles, as two inferplane pods mid rolling-
+// restart would have) opening the SAME pre-existing-schema keystore file at
+// the same time. Without an atomic (BEGIN EXCLUSIVE) migration, one side can
+// read the old column list, then lose a race to ALTER TABLE ADD COLUMN after
+// the other side already added it, and OpenSQLite would fail with "duplicate
+// column name".
+func TestMigration_concurrentOpensDoNotRace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shared.db")
+	old, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`CREATE TABLE keys (
+		key_id TEXT PRIMARY KEY, key_hash TEXT NOT NULL UNIQUE, team TEXT NOT NULL,
+		allowed_models TEXT NOT NULL, created_at TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0)`); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+
+	const n = 3 // realistic worst case: 2-3 pods briefly overlapping during a rolling restart
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			s, err := OpenSQLite(path)
+			if err != nil {
+				errs <- err
+				return
+			}
+			defer s.Close()
+			errs <- nil
+		}()
+	}
+	for i := 0; i < n; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent OpenSQLite failed (migration race): %v", err)
+		}
+	}
+}

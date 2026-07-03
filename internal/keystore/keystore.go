@@ -23,8 +23,8 @@ type KeyOptions struct {
 	TPM             int64             // 0 = unlimited
 	RPM             int64             // 0 = unlimited
 	ExpiresAt       *time.Time        // nil = never; enforced in Resolve
-	Owner           string            // opaque identifier, optional
-	Metadata        map[string]string // optional key/value tags
+	Owner           string            // opaque identifier, optional — never use as a metric label (unbounded cardinality; CLAUDE.md forbids raw-input metric labels)
+	Metadata        map[string]string // optional key/value tags — same caution: never use as a metric label
 }
 
 // Principal is the resolved identity behind a virtual key (M3: service-account
