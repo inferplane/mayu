@@ -222,6 +222,18 @@ func TestAdminUI_usageFetchesAnalytics(t *testing.T) {
 	}
 }
 
+func TestAdminUI_overviewSparkline(t *testing.T) {
+	_, js := get(t, "/app.js")
+	for _, want := range []string{"renderSparkline", "stat-spend-spark", "/admin/analytics/timeseries"} {
+		if !strings.Contains(js, want) {
+			t.Errorf("app.js missing %q — Overview spend sparkline not wired", want)
+		}
+	}
+	if strings.Contains(js, "innerHTML") {
+		t.Error("app.js uses innerHTML — data-free/no-markup-from-data invariant violated")
+	}
+}
+
 func TestAdminUI_keyGovernanceFieldsWired(t *testing.T) {
 	_, html := get(t, "/index.html")
 	for _, id := range []string{"kf-budget", "kf-tpm", "kf-rpm", "kf-expires", "kf-owner"} {

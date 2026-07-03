@@ -121,6 +121,27 @@ async function refreshUsageView() {
   fill("usage-by-model", s.by_model, "model");
 }
 
+/* ---------- sparkline (hand-rolled inline SVG; no vendored chart lib, §10) ---------- */
+
+// Builds SVG via DOM node APIs only — data never becomes markup.
+function renderSparkline(container, values) {
+  container.replaceChildren();
+  if (values.length <= 1) return; // one point has no line to draw
+  const w = 160, h = 36, pad = 2;
+  const max = Math.max(...values, 1); // avoid divide-by-zero on all-zero data
+  const step = values.length > 1 ? (w - pad * 2) / (values.length - 1) : 0;
+  const d = values
+    .map((v, i) => (i === 0 ? "M" : "L") + (pad + i * step) + "," + (h - pad - (v / max) * (h - pad * 2)))
+    .join(" ");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", d);
+  path.setAttribute("fill", "none");
+  svg.appendChild(path);
+  container.appendChild(svg);
+}
+
 /* ---------- health ---------- */
 
 async function pollHealth() {
@@ -160,6 +181,16 @@ function parseMetrics(text) {
 }
 
 async function refreshOverview() {
+  // spend trend (real data when the analytics index is on; else no sparkline)
+  if (capOn("analytics_index")) {
+    try {
+      const ts = await api("GET", "/admin/analytics/timeseries?days=30", null, true);
+      if (ts && ts !== DISABLED) {
+        renderSparkline($("stat-spend-spark"), ts.slice().reverse().map((p) => p.cost_micros));
+      }
+    } catch { /* sparkline is best-effort; don't abort the rest of the overview */ }
+  }
+
   // keys (authoritative, via admin API)
   try {
     const out = await api("GET", "/admin/keys");
