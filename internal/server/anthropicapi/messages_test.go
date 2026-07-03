@@ -319,6 +319,27 @@ func TestMessagesGovernorQuotaBlocks429(t *testing.T) {
 	}
 }
 
+func TestMessagesGovernorKeyBudgetBlocks402EvenForUngovernedTeam(t *testing.T) {
+	bud := budget.NewMemory()
+	// No TeamPolicy entry for "platform-eng" at all — the team is ungoverned;
+	// only the key's own budget (§8 D2) must still be enforced.
+	gov := governance.NewGovernor(nil, limiter.NewMemory(), bud, nil)
+	bud.Debit("budget:key:ik_over", 1_500_000, 30*24*time.Hour) // over the key's 1M cap
+
+	h := NewMessagesHandlerFull(testRouter(), nil, gov)
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}`))
+	ctx := principal.With(req.Context(), keystore.Principal{
+		KeyID: "ik_over", Team: "platform-eng", AllowedModels: []string{"*"},
+		KeyOptions: keystore.KeyOptions{BudgetUSDMicros: 1_000_000},
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != 402 {
+		t.Fatalf("key-budget-exhausted request must be 402, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestMessagesGovernorSettlesCostIntoAudit(t *testing.T) {
 	var buf bytes.Buffer
 	w, err := audit.NewWriter("inst-1", filepath.Join(t.TempDir(), "a.wal"), []audit.Sink{audit.NewWriterSink("buf", &buf, true)})

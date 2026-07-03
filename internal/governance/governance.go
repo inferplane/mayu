@@ -29,6 +29,19 @@ type TeamPolicy struct {
 	BudgetExceeded       string
 }
 
+// KeyPolicy is the resolved per-key governance limits (a virtual key's
+// optional budget/TPM/RPM fields, keystore.KeyOptions — this package stays a
+// leaf and does not import keystore). Zero in any field means unlimited for
+// that dimension. Key limits are layered ON TOP OF the team policy: both must
+// allow, and they apply even when the key's team carries no TeamPolicy entry
+// (an ungoverned team must not bypass an explicit key limit). There is no
+// on_exceeded knob here (KeyOptions has none) — a key limit always blocks.
+type KeyPolicy struct {
+	RatePerMin           int64
+	TokensPerMinute      int64
+	BudgetMicrosPerMonth int64
+}
+
 // Governor enforces rate/quota/budget and settles cost. Its stateful stores
 // (limiter rate buckets, budget µUSD counters) are owned here and PERSIST
 // across config hot-reloads. The pricing table is NOT stored — it is a
@@ -68,39 +81,49 @@ type GovDecision struct {
 
 // PreCheck enforces rate limit + quota + budget BEFORE the upstream call.
 // estimateTokens is the request's estimated input tokens. block policy → deny;
-// warn policy → allow (still settled afterward). An unknown team is ungoverned.
-func (g *Governor) PreCheck(team string, estimateTokens int64) GovDecision {
-	p, ok := g.teams[team]
-	if !ok {
-		return GovDecision{Allowed: true}
-	}
-	// rate limit (RPM): 1 request unit
-	if p.RatePerMin > 0 && !g.lim.AllowRate("rate:"+team, 1, p.RatePerMin, max64(p.RateBurst, 1)) {
-		return GovDecision{Status: 429, Reason: "rate limit exceeded"}
-	}
-	// token rate limit (TPM): charge the request estimate against a per-minute
-	// token bucket whose burst is one minute's worth of tokens.
-	if p.TokensPerMinute > 0 && !g.lim.AllowRate("tpm:"+team, estimateTokens, p.TokensPerMinute, p.TokensPerMinute) {
-		return GovDecision{Status: 429, Reason: "token rate limit exceeded"}
-	}
-	// quota (daily tokens)
-	if p.TokensPerDay > 0 {
-		if g.lim.CheckQuota("quota:"+team, estimateTokens, p.TokensPerDay, 24*time.Hour) == limiter.Block {
-			if p.QuotaExceeded != "warn" {
-				return GovDecision{Status: 429, Reason: "token quota exceeded"}
+// warn policy → allow (still settled afterward). An unknown team is ungoverned
+// (but a key limit, if any, still applies — see KeyPolicy). keyID scopes the
+// key-level counters; pass "" with a zero KeyPolicy when there is none.
+func (g *Governor) PreCheck(team, keyID string, kp KeyPolicy, estimateTokens int64) GovDecision {
+	if p, ok := g.teams[team]; ok {
+		// rate limit (RPM): 1 request unit
+		if p.RatePerMin > 0 && !g.lim.AllowRate("rate:"+team, 1, p.RatePerMin, max64(p.RateBurst, 1)) {
+			return GovDecision{Status: 429, Reason: "rate limit exceeded"}
+		}
+		// token rate limit (TPM): charge the request estimate against a per-minute
+		// token bucket whose burst is one minute's worth of tokens.
+		if p.TokensPerMinute > 0 && !g.lim.AllowRate("tpm:"+team, estimateTokens, p.TokensPerMinute, p.TokensPerMinute) {
+			return GovDecision{Status: 429, Reason: "token rate limit exceeded"}
+		}
+		// quota (daily tokens)
+		if p.TokensPerDay > 0 {
+			if g.lim.CheckQuota("quota:"+team, estimateTokens, p.TokensPerDay, 24*time.Hour) == limiter.Block {
+				if p.QuotaExceeded != "warn" {
+					return GovDecision{Status: 429, Reason: "token quota exceeded"}
+				}
+			}
+		}
+		// budget (monthly µUSD) — pre-check on accumulated spend only (estimate 0),
+		// because the per-request cost is unknown before the call. Real enforcement
+		// is the post-debit threshold; a single high-cost request can overshoot
+		// (accepted per §5.3).
+		if p.BudgetMicrosPerMonth > 0 {
+			if g.bud.Check("budget:"+team, 0, p.BudgetMicrosPerMonth, 30*24*time.Hour) == budget.Block {
+				if p.BudgetExceeded != "warn" {
+					return GovDecision{Status: 402, Reason: "budget exceeded"}
+				}
 			}
 		}
 	}
-	// budget (monthly µUSD) — pre-check on accumulated spend only (estimate 0),
-	// because the per-request cost is unknown before the call. Real enforcement
-	// is the post-debit threshold; a single high-cost request can overshoot
-	// (accepted per §5.3).
-	if p.BudgetMicrosPerMonth > 0 {
-		if g.bud.Check("budget:"+team, 0, p.BudgetMicrosPerMonth, 30*24*time.Hour) == budget.Block {
-			if p.BudgetExceeded != "warn" {
-				return GovDecision{Status: 402, Reason: "budget exceeded"}
-			}
-		}
+	// Per-key limits (§8 D2) — independent of team governance, always block.
+	if kp.RatePerMin > 0 && !g.lim.AllowRate("rate:key:"+keyID, 1, kp.RatePerMin, kp.RatePerMin) {
+		return GovDecision{Status: 429, Reason: "key rate limit exceeded"}
+	}
+	if kp.TokensPerMinute > 0 && !g.lim.AllowRate("tpm:key:"+keyID, estimateTokens, kp.TokensPerMinute, kp.TokensPerMinute) {
+		return GovDecision{Status: 429, Reason: "key token rate limit exceeded"}
+	}
+	if kp.BudgetMicrosPerMonth > 0 && g.bud.Check("budget:key:"+keyID, 0, kp.BudgetMicrosPerMonth, 30*24*time.Hour) == budget.Block {
+		return GovDecision{Status: 402, Reason: "key budget exceeded"}
 	}
 	return GovDecision{Allowed: true}
 }
@@ -108,8 +131,11 @@ func (g *Governor) PreCheck(team string, estimateTokens int64) GovDecision {
 // Settle records actual token usage against quota and computes+debits cost.
 // Returns the cost µUSD and whether pricing was missing (for the audit record).
 // An unknown team still computes cost (so the audit record carries it) but
-// debits nothing.
-func (g *Governor) Settle(team, provider, model string, u pricing.Usage, table *pricing.Table) (costMicros int64, pricingMissing bool) {
+// debits nothing. keyID/kp mirror PreCheck's per-key budget (RPM/TPM are
+// charge-on-check only, like the team dimension — nothing to debit here).
+// Key-level spend is deliberately NOT added to /metrics: metric labels are
+// config-bounded (CLAUDE.md) and must never carry a key_id.
+func (g *Governor) Settle(team, keyID string, kp KeyPolicy, provider, model string, u pricing.Usage, table *pricing.Table) (costMicros int64, pricingMissing bool) {
 	p := g.teams[team]
 	if p.TokensPerDay > 0 {
 		g.lim.DebitQuota("quota:"+team, u.Input+u.Output, 24*time.Hour)
@@ -124,6 +150,9 @@ func (g *Governor) Settle(team, provider, model string, u pricing.Usage, table *
 	}
 	if p.BudgetMicrosPerMonth > 0 {
 		g.bud.Debit("budget:"+team, costMicros, 30*24*time.Hour)
+	}
+	if kp.BudgetMicrosPerMonth > 0 {
+		g.bud.Debit("budget:key:"+keyID, costMicros, 30*24*time.Hour)
 	}
 	// Observability metrics (approximation; the µUSD budget store is the
 	// settlement source of truth). Recorded for every settled request, even an
