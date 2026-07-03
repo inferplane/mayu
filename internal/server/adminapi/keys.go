@@ -7,6 +7,7 @@ package adminapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -66,12 +67,100 @@ func (h *KeysHandler) adminEvent(event string, id principal.AdminIdentity, team,
 	})
 }
 
+// keyOptionsBody is the wire shape of the optional §8 D2 governance fields.
+// ExpiresAt is RFC3339 text (empty = never); enforcement of budget/TPM/RPM in
+// the request hot path is a separate follow-up — these fields are stored and
+// surfaced only, for now.
+type keyOptionsBody struct {
+	BudgetUSDMicros int64             `json:"budget_usd_micros,omitempty"`
+	TPM             int64             `json:"tpm,omitempty"`
+	RPM             int64             `json:"rpm,omitempty"`
+	ExpiresAt       string            `json:"expires_at,omitempty"`
+	Owner           string            `json:"owner,omitempty"`
+	Metadata        map[string]string `json:"metadata,omitempty"`
+}
+
+// maxMetadataBytes bounds the serialized size of KeyOptions.Metadata, and
+// maxOwnerBytes the length of Owner, so an admin-authenticated caller can't
+// grow every /admin/keys response (List is unpaginated) or the keystore row
+// without limit.
+const (
+	maxMetadataBytes = 4096
+	maxOwnerBytes    = 256
+)
+
+func (b keyOptionsBody) toKeyOptions() (keystore.KeyOptions, error) {
+	if b.BudgetUSDMicros < 0 || b.TPM < 0 || b.RPM < 0 {
+		return keystore.KeyOptions{}, fmt.Errorf("budget/tpm/rpm must be non-negative")
+	}
+	if len(b.Owner) > maxOwnerBytes {
+		return keystore.KeyOptions{}, fmt.Errorf("owner exceeds %d bytes", maxOwnerBytes)
+	}
+	if len(b.Metadata) > 0 {
+		if size, err := json.Marshal(b.Metadata); err != nil || len(size) > maxMetadataBytes {
+			return keystore.KeyOptions{}, fmt.Errorf("metadata exceeds %d bytes serialized", maxMetadataBytes)
+		}
+	}
+	opts := keystore.KeyOptions{BudgetUSDMicros: b.BudgetUSDMicros, TPM: b.TPM, RPM: b.RPM, Owner: b.Owner, Metadata: b.Metadata}
+	if b.ExpiresAt != "" {
+		// RFC3339Nano parses both plain RFC3339 and sub-second timestamps.
+		t, err := time.Parse(time.RFC3339Nano, b.ExpiresAt)
+		if err != nil {
+			return keystore.KeyOptions{}, err
+		}
+		if t.Before(time.Now().UTC()) {
+			return keystore.KeyOptions{}, fmt.Errorf("expires_at is in the past")
+		}
+		opts.ExpiresAt = &t
+	}
+	return opts, nil
+}
+
+func keyView(p keystore.Principal) map[string]any {
+	v := map[string]any{"key_id": p.KeyID, "team": p.Team, "allowed_models": p.AllowedModels}
+	if p.BudgetUSDMicros != 0 {
+		v["budget_usd_micros"] = p.BudgetUSDMicros
+	}
+	if p.TPM != 0 {
+		v["tpm"] = p.TPM
+	}
+	if p.RPM != 0 {
+		v["rpm"] = p.RPM
+	}
+	if p.ExpiresAt != nil {
+		// RFC3339Nano to match encodeExpiry's storage precision; Go's ".9"
+		// pattern strips trailing zeros, so a whole-second time still renders
+		// identically to plain RFC3339 (no behavior change for the common case).
+		v["expires_at"] = p.ExpiresAt.Format(time.RFC3339Nano)
+		// List (unlike Resolve) shows expired keys rather than hiding them, so
+		// operators can find and revoke them — mark them explicitly rather than
+		// requiring a client-side timestamp comparison against "now".
+		if p.ExpiresAt.Before(time.Now().UTC()) {
+			v["expired"] = true
+		}
+	}
+	if p.Owner != "" {
+		v["owner"] = p.Owner
+	}
+	if len(p.Metadata) > 0 {
+		v["metadata"] = p.Metadata
+	}
+	return v
+}
+
 func (h *KeysHandler) create(w http.ResponseWriter, r *http.Request, id principal.AdminIdentity) {
 	var body struct {
 		Team          string   `json:"team"`
 		AllowedModels []string `json:"allowed_models"`
+		keyOptionsBody
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Team == "" {
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid request body: " + err.Error()})
+		return
+	}
+	if body.Team == "" {
 		http.Error(w, `{"error":"team required"}`, http.StatusBadRequest)
 		return
 	}
@@ -80,14 +169,23 @@ func (h *KeysHandler) create(w http.ResponseWriter, r *http.Request, id principa
 		http.Error(w, `{"error":"not entitled to team"}`, http.StatusForbidden)
 		return
 	}
-	plaintext, p, err := h.store.Create(r.Context(), body.Team, body.AllowedModels)
+	opts, err := body.toKeyOptions()
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid key options: " + err.Error()})
+		return
+	}
+	plaintext, p, err := h.store.CreateWithOptions(r.Context(), body.Team, body.AllowedModels, opts)
 	if err != nil {
 		http.Error(w, `{"error":"create failed"}`, http.StatusInternalServerError)
 		return
 	}
 	h.adminEvent("admin_key_created", id, p.Team, p.KeyID)
+	out := keyView(p)
+	out["plaintext"] = plaintext
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"key_id": p.KeyID, "team": p.Team, "allowed_models": p.AllowedModels, "plaintext": plaintext})
+	json.NewEncoder(w).Encode(out)
 }
 
 func (h *KeysHandler) list(w http.ResponseWriter, r *http.Request) {
@@ -98,7 +196,7 @@ func (h *KeysHandler) list(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]map[string]any, 0, len(ps))
 	for _, p := range ps {
-		out = append(out, map[string]any{"key_id": p.KeyID, "team": p.Team, "allowed_models": p.AllowedModels})
+		out = append(out, keyView(p))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"data": out})

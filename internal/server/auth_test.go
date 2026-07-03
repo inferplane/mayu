@@ -18,6 +18,9 @@ type stubStore struct {
 func (s stubStore) Create(context.Context, string, []string) (string, keystore.Principal, error) {
 	return "", keystore.Principal{}, nil
 }
+func (s stubStore) CreateWithOptions(context.Context, string, []string, keystore.KeyOptions) (string, keystore.Principal, error) {
+	return "", keystore.Principal{}, nil
+}
 func (s stubStore) Resolve(_ context.Context, plaintext string) (keystore.Principal, error) {
 	if plaintext == s.key {
 		return s.p, nil

@@ -233,3 +233,19 @@ func TestAdminUI_overviewSparkline(t *testing.T) {
 		t.Error("app.js uses innerHTML — data-free/no-markup-from-data invariant violated")
 	}
 }
+
+func TestAdminUI_keyGovernanceFieldsWired(t *testing.T) {
+	_, html := get(t, "/index.html")
+	for _, id := range []string{"kf-budget", "kf-tpm", "kf-rpm", "kf-expires", "kf-owner"} {
+		if !strings.Contains(html, `id="`+id+`"`) {
+			t.Errorf("index.html missing key-options input #%s", id)
+		}
+	}
+	_, js := get(t, "/app.js")
+	if !strings.Contains(js, "keyLimitsSummary") {
+		t.Error("app.js missing keyLimitsSummary() — key governance fields not rendered")
+	}
+	if !strings.Contains(js, "budget_usd_micros") {
+		t.Error("app.js does not send budget_usd_micros on key create")
+	}
+}

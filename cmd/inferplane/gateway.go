@@ -300,9 +300,10 @@ func newGateway(cfgPath string) (*gateway, error) {
 			ai = "A" // Mode A (local single-replica); Mode B is a later phase
 		}
 		return configapi.Capabilities{
-			AnalyticsIndex: ai,
-			ProviderStore:  writer != nil,
-			Guardrails:     masking != nil,
+			AnalyticsIndex:      ai,
+			ProviderStore:       writer != nil,
+			Guardrails:          masking != nil,
+			KeyGovernanceFields: true, // keystore always has budget/TPM/RPM/expiry/owner (Phase 2)
 		}
 	}
 	var analyticsQ analyticsapi.Querier
