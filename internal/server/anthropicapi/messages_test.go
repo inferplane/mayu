@@ -319,6 +319,20 @@ func TestMessagesGovernorQuotaBlocks429(t *testing.T) {
 	}
 }
 
+// TestKeyPolicyOfMapsAllFields guards keyPolicyOf against a future field
+// added to KeyOptions or KeyPolicy without updating the mapping (this
+// function is duplicated in internal/server/openaiapi/chat.go — governance
+// stays a leaf and does not import keystore, so each ingress package maps
+// its own Principal → KeyPolicy; this test only proves THIS copy is correct).
+func TestKeyPolicyOfMapsAllFields(t *testing.T) {
+	p := keystore.Principal{KeyOptions: keystore.KeyOptions{RPM: 60, TPM: 1000, BudgetUSDMicros: 5_000_000}}
+	got := keyPolicyOf(p)
+	want := governance.KeyPolicy{RatePerMin: 60, TokensPerMinute: 1000, BudgetMicrosPerMonth: 5_000_000}
+	if got != want {
+		t.Fatalf("keyPolicyOf(%+v) = %+v, want %+v", p.KeyOptions, got, want)
+	}
+}
+
 func TestMessagesGovernorKeyBudgetBlocks402EvenForUngovernedTeam(t *testing.T) {
 	bud := budget.NewMemory()
 	// No TeamPolicy entry for "platform-eng" at all — the team is ungoverned;

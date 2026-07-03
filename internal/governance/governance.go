@@ -36,6 +36,11 @@ type TeamPolicy struct {
 // allow, and they apply even when the key's team carries no TeamPolicy entry
 // (an ungoverned team must not bypass an explicit key limit). There is no
 // on_exceeded knob here (KeyOptions has none) — a key limit always blocks.
+// There is also no per-key RateBurst knob (unlike TeamPolicy): RatePerMin's
+// own value is used as its bucket's burst too, same self-burst shape as
+// TokensPerMinute below — a key with rpm:60 can burst all 60 in the first
+// second, not one-at-a-time like a team's default burst=1. Intentional and
+// simplest given KeyOptions exposes no separate burst field.
 type KeyPolicy struct {
 	RatePerMin           int64
 	TokensPerMinute      int64
