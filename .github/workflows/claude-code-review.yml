@@ -33,6 +33,7 @@ jobs:
           aws-region: ${{ vars.AWS_REGION || 'us-west-2' }}
 
       - name: Automatic PR review (Bedrock)
+        id: claude-review
         uses: anthropics/claude-code-action@fad22eb3fa582b7357fc0ea48af6645851b884fd # v1
         with:
           use_bedrock: "true"
@@ -52,7 +53,35 @@ jobs:
               count_tokens must never return non-200, zero-core-diff provider isolation,
               and /metrics carrying no secret or key_id.
             - Test coverage and missing edge cases
-            Post findings with `gh pr comment` (severity-tagged). Review only what the
-            diff changes; do not request unrelated refactors.
+            Post findings with `gh pr comment` (severity-tagged: CRITICAL/HIGH/MEDIUM/LOW).
+            Review only what the diff changes; do not request unrelated refactors.
+            After posting the comment, you MUST also return your final answer as the
+            required structured JSON output: max_severity is the single highest
+            severity among all findings you reported ("NONE" if you found nothing to
+            flag), and verdict is "block" if max_severity is HIGH or CRITICAL, else
+            "approve". Be conservative: if genuinely unsure whether something is HIGH
+            vs MEDIUM, round UP — a false "block" costs a human look; a false "approve"
+            ships a real bug.
           # Single-line claude_args: unambiguous tokenization; read + comment only.
-          claude_args: '--model ${{ vars.CLAUDE_BEDROCK_MODEL || ''us.anthropic.claude-fable-5'' }} --allowed-tools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh search:*),Bash(gh issue view:*)"'
+          # --json-schema forces the structured max_severity/verdict output the next
+          # step gates on (see "Enforce no CRITICAL/HIGH findings" below) — this is
+          # what turns the review from advisory-only into an actual merge gate once
+          # this check is marked required in branch protection.
+          claude_args: '--model ${{ vars.CLAUDE_BEDROCK_MODEL || ''us.anthropic.claude-fable-5'' }} --allowed-tools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh search:*),Bash(gh issue view:*)" --json-schema "{\"type\":\"object\",\"required\":[\"max_severity\",\"verdict\"],\"properties\":{\"max_severity\":{\"type\":\"string\",\"enum\":[\"NONE\",\"LOW\",\"MEDIUM\",\"HIGH\",\"CRITICAL\"]},\"verdict\":{\"type\":\"string\",\"enum\":[\"approve\",\"block\"]},\"summary\":{\"type\":\"string\"}}}"'
+
+      - name: Enforce no CRITICAL/HIGH findings
+        if: always() && steps.claude-review.outcome == 'success'
+        env:
+          REVIEW_JSON: ${{ steps.claude-review.outputs.structured_output }}
+        run: |
+          if [ -z "$REVIEW_JSON" ]; then
+            echo "no structured_output from the review step; not gating on it"
+            exit 0
+          fi
+          SEVERITY=$(echo "$REVIEW_JSON" | jq -r '.max_severity // "NONE"')
+          VERDICT=$(echo "$REVIEW_JSON" | jq -r '.verdict // "approve"')
+          echo "max_severity=$SEVERITY verdict=$VERDICT"
+          if [ "$SEVERITY" = "HIGH" ] || [ "$SEVERITY" = "CRITICAL" ] || [ "$VERDICT" = "block" ]; then
+            echo "::error::Review found $SEVERITY severity finding(s) (verdict=$VERDICT) — failing this check so it can be a required status blocking merge."
+            exit 1
+          fi
