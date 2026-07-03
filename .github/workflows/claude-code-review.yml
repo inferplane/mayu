@@ -70,13 +70,17 @@ jobs:
           claude_args: '--model ${{ vars.CLAUDE_BEDROCK_MODEL || ''us.anthropic.claude-fable-5'' }} --allowed-tools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh search:*),Bash(gh issue view:*)" --json-schema "{\"type\":\"object\",\"required\":[\"max_severity\",\"verdict\"],\"properties\":{\"max_severity\":{\"type\":\"string\",\"enum\":[\"NONE\",\"LOW\",\"MEDIUM\",\"HIGH\",\"CRITICAL\"]},\"verdict\":{\"type\":\"string\",\"enum\":[\"approve\",\"block\"]},\"summary\":{\"type\":\"string\"}}}"'
 
       - name: Enforce no CRITICAL/HIGH findings
-        if: always() && steps.claude-review.outcome == 'success'
+        if: always()
         env:
           REVIEW_JSON: ${{ steps.claude-review.outputs.structured_output }}
+          REVIEW_OUTCOME: ${{ steps.claude-review.outcome }}
         run: |
-          if [ -z "$REVIEW_JSON" ]; then
-            echo "no structured_output from the review step; not gating on it"
-            exit 0
+          # Fail closed: if the review step itself didn't succeed, or produced
+          # no structured verdict, that is NOT a clean bill of health — do not
+          # let a broken/missing review silently pass this gate.
+          if [ "$REVIEW_OUTCOME" != "success" ] || [ -z "$REVIEW_JSON" ]; then
+            echo "::error::Review step outcome='$REVIEW_OUTCOME' produced no usable structured_output — failing closed (not a pass-by-default)."
+            exit 1
           fi
           SEVERITY=$(echo "$REVIEW_JSON" | jq -r '.max_severity // "NONE"')
           VERDICT=$(echo "$REVIEW_JSON" | jq -r '.verdict // "approve"')

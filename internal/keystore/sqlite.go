@@ -17,14 +17,26 @@ import (
 type SQLiteStore struct{ db *sql.DB }
 
 // schema — TEXT/INTEGER only, no SQLite-specific types, for Postgres portability.
+// Includes the §8 D2 governance columns directly (not just via the ALTER TABLE
+// entries in migrateGovernanceColumns's column list) so a FRESH database gets
+// the canonical shape in one DDL instead of always taking the migration path,
+// and so the two can't silently diverge if a future column is added to one
+// but not the other. migrateGovernanceColumns still runs (idempotent no-op on
+// a fresh DB) to upgrade pre-existing databases that predate this feature.
 const schema = `
 CREATE TABLE IF NOT EXISTS keys (
-    key_id        TEXT PRIMARY KEY,
-    key_hash      TEXT NOT NULL UNIQUE,
-    team          TEXT NOT NULL,
-    allowed_models TEXT NOT NULL,
-    created_at    TEXT NOT NULL,
-    revoked       INTEGER NOT NULL DEFAULT 0
+    key_id             TEXT PRIMARY KEY,
+    key_hash           TEXT NOT NULL UNIQUE,
+    team               TEXT NOT NULL,
+    allowed_models     TEXT NOT NULL,
+    created_at         TEXT NOT NULL,
+    revoked            INTEGER NOT NULL DEFAULT 0,
+    budget_usd_micros  INTEGER NOT NULL DEFAULT 0,
+    tpm                INTEGER NOT NULL DEFAULT 0,
+    rpm                INTEGER NOT NULL DEFAULT 0,
+    expires_at         TEXT NOT NULL DEFAULT '',
+    owner              TEXT NOT NULL DEFAULT '',
+    metadata           TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_keys_hash ON keys(key_hash) WHERE revoked = 0;
 `

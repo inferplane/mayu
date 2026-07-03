@@ -80,14 +80,21 @@ type keyOptionsBody struct {
 	Metadata        map[string]string `json:"metadata,omitempty"`
 }
 
-// maxMetadataBytes bounds the serialized size of KeyOptions.Metadata so an
-// admin-authenticated caller can't grow every /admin/keys response (List is
-// unpaginated) or the keystore row without limit.
-const maxMetadataBytes = 4096
+// maxMetadataBytes bounds the serialized size of KeyOptions.Metadata, and
+// maxOwnerBytes the length of Owner, so an admin-authenticated caller can't
+// grow every /admin/keys response (List is unpaginated) or the keystore row
+// without limit.
+const (
+	maxMetadataBytes = 4096
+	maxOwnerBytes    = 256
+)
 
 func (b keyOptionsBody) toKeyOptions() (keystore.KeyOptions, error) {
 	if b.BudgetUSDMicros < 0 || b.TPM < 0 || b.RPM < 0 {
 		return keystore.KeyOptions{}, fmt.Errorf("budget/tpm/rpm must be non-negative")
+	}
+	if len(b.Owner) > maxOwnerBytes {
+		return keystore.KeyOptions{}, fmt.Errorf("owner exceeds %d bytes", maxOwnerBytes)
 	}
 	if len(b.Metadata) > 0 {
 		if size, err := json.Marshal(b.Metadata); err != nil || len(size) > maxMetadataBytes {
