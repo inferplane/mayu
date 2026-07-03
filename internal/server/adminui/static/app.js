@@ -126,7 +126,7 @@ async function refreshUsageView() {
 // Builds SVG via DOM node APIs only — data never becomes markup.
 function renderSparkline(container, values) {
   container.replaceChildren();
-  if (!values.length) return;
+  if (values.length <= 1) return; // one point has no line to draw
   const w = 160, h = 36, pad = 2;
   const max = Math.max(...values, 1); // avoid divide-by-zero on all-zero data
   const step = values.length > 1 ? (w - pad * 2) / (values.length - 1) : 0;
@@ -183,10 +183,12 @@ function parseMetrics(text) {
 async function refreshOverview() {
   // spend trend (real data when the analytics index is on; else no sparkline)
   if (capOn("analytics_index")) {
-    const ts = await api("GET", "/admin/analytics/timeseries?days=30", null, true);
-    if (ts && ts !== DISABLED) {
-      renderSparkline($("stat-spend-spark"), ts.slice().reverse().map((p) => p.cost_micros));
-    }
+    try {
+      const ts = await api("GET", "/admin/analytics/timeseries?days=30", null, true);
+      if (ts && ts !== DISABLED) {
+        renderSparkline($("stat-spend-spark"), ts.slice().reverse().map((p) => p.cost_micros));
+      }
+    } catch { /* sparkline is best-effort; don't abort the rest of the overview */ }
   }
 
   // keys (authoritative, via admin API)
