@@ -3,11 +3,13 @@ package adminapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/keystore"
@@ -242,5 +244,137 @@ func TestRevokeFailsClosedOnLookupError(t *testing.T) {
 	ps, err := store.List(context.Background())
 	if err != nil || len(ps) != 1 {
 		t.Fatalf("key was revoked despite failed entitlement lookup: %v %v", ps, err)
+	}
+}
+
+func TestCreateKeyWithGovernanceOptions_roundTrip(t *testing.T) {
+	h := NewKeysHandler(newTestStore(t), nil)
+	body := `{"team":"platform-eng","allowed_models":["*"],"budget_usd_micros":5000000,"tpm":1000,"rpm":60,"owner":"alice","expires_at":"2099-01-01T00:00:00Z","metadata":{"purpose":"ci"}}`
+	req := httptest.NewRequest("POST", "/admin/keys", strings.NewReader(body))
+	req = req.WithContext(principal.WithAdmin(req.Context(), adminID))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	var out map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if out["budget_usd_micros"] != float64(5000000) || out["owner"] != "alice" {
+		t.Fatalf("governance fields not returned: %+v", out)
+	}
+	if out["expires_at"] != "2099-01-01T00:00:00Z" {
+		t.Fatalf("expires_at not returned: %+v", out)
+	}
+}
+
+func TestCreateKeyWithGovernanceOptions_badExpiryIs400(t *testing.T) {
+	h := NewKeysHandler(newTestStore(t), nil)
+	req := httptest.NewRequest("POST", "/admin/keys", strings.NewReader(`{"team":"t","expires_at":"not-a-date"}`))
+	req = req.WithContext(principal.WithAdmin(req.Context(), adminID))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("bad expires_at: got %d, want 400", rec.Code)
+	}
+}
+
+func TestListKeys_omitsZeroGovernanceFields(t *testing.T) {
+	store := newTestStore(t)
+	store.Create(context.Background(), "t", []string{"*"})
+	h := NewKeysHandler(store, nil)
+	req := httptest.NewRequest("GET", "/admin/keys", nil)
+	req = req.WithContext(principal.WithAdmin(req.Context(), adminID))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), "budget_usd_micros") || strings.Contains(rec.Body.String(), "owner") {
+		t.Fatalf("zero-value governance fields should be omitted: %s", rec.Body.String())
+	}
+}
+
+func TestCreateKeyWithGovernanceOptions_rejectsNegativeValues(t *testing.T) {
+	for _, body := range []string{
+		`{"team":"t","budget_usd_micros":-1}`,
+		`{"team":"t","tpm":-1}`,
+		`{"team":"t","rpm":-1}`,
+	} {
+		h := NewKeysHandler(newTestStore(t), nil)
+		req := httptest.NewRequest("POST", "/admin/keys", strings.NewReader(body))
+		req = req.WithContext(principal.WithAdmin(req.Context(), adminID))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != 400 {
+			t.Fatalf("negative value %s: got %d, want 400", body, rec.Code)
+		}
+	}
+}
+
+func TestCreateKeyWithGovernanceOptions_expirySubSecondPrecisionPreserved(t *testing.T) {
+	h := NewKeysHandler(newTestStore(t), nil)
+	body := `{"team":"t","expires_at":"2099-01-01T00:00:00.123456789Z"}`
+	req := httptest.NewRequest("POST", "/admin/keys", strings.NewReader(body))
+	req = req.WithContext(principal.WithAdmin(req.Context(), adminID))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+	}
+	var out map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if out["expires_at"] != "2099-01-01T00:00:00.123456789Z" {
+		t.Fatalf("sub-second expiry precision lost: got %v", out["expires_at"])
+	}
+}
+
+func TestCreateKey_pastExpiryIs400(t *testing.T) {
+	h := NewKeysHandler(newTestStore(t), nil)
+	req := httptest.NewRequest("POST", "/admin/keys", strings.NewReader(`{"team":"t","expires_at":"2020-01-01T00:00:00Z"}`))
+	req = req.WithContext(principal.WithAdmin(req.Context(), adminID))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("past expires_at: got %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCreateKeyWithGovernanceOptions_rejectsOversizedMetadata(t *testing.T) {
+	h := NewKeysHandler(newTestStore(t), nil)
+	big := make(map[string]string, 200)
+	for i := 0; i < 200; i++ {
+		big[fmt.Sprintf("key-%d", i)] = strings.Repeat("v", 100) // 200 * ~106 bytes ≈ 21KB, well over any KB-scale cap
+	}
+	bodyBytes, _ := json.Marshal(map[string]any{"team": "t", "metadata": big})
+	req := httptest.NewRequest("POST", "/admin/keys", strings.NewReader(string(bodyBytes)))
+	req = req.WithContext(principal.WithAdmin(req.Context(), adminID))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("oversized metadata: got %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestListKeys_marksExpiredKeys(t *testing.T) {
+	store := newTestStore(t)
+	past := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	// The store layer (unlike the admin API, TestCreateKey_pastExpiryIs400)
+	// doesn't itself reject a past ExpiresAt — this simulates a key whose
+	// expiry lapsed after creation, or a directly-edited row.
+	_, _, err := store.CreateWithOptions(context.Background(), "t", []string{"*"}, keystore.KeyOptions{ExpiresAt: &past})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewKeysHandler(store, nil)
+	req := httptest.NewRequest("GET", "/admin/keys", nil)
+	req = req.WithContext(principal.WithAdmin(req.Context(), adminID))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Data []map[string]any `json:"data"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	if len(out.Data) != 1 || out.Data[0]["expired"] != true {
+		t.Fatalf("expired key not marked: %+v", out.Data)
 	}
 }

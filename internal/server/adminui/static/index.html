@@ -146,8 +146,17 @@
             <input id="team" type="text" placeholder="team (e.g. demo)" required>
             <select id="team-select" hidden></select>
             <input id="models" type="text" placeholder="allowed models — comma-separated, * for all" required>
+            <input id="kf-budget" type="number" step="0.01" min="0" placeholder="budget USD (optional)">
+            <input id="kf-tpm" type="number" min="0" step="1" placeholder="TPM (optional)">
+            <input id="kf-rpm" type="number" min="0" step="1" placeholder="RPM (optional)">
+            <input id="kf-expires" type="date" placeholder="expires (optional)">
+            <input id="kf-owner" type="text" placeholder="owner (optional)">
             <button type="submit">ISSUE KEY</button>
           </form>
+          <p id="create-form-status" class="status"></p>
+          <p class="hint">Budget/TPM/RPM are recorded on the key but not yet enforced in the
+            request path — visibility today, live limits in a later phase.
+            <span class="ko">예산/TPM/RPM은 키에 기록되지만 아직 실제 요청 경로에서 강제되지 않습니다 — 현재는 가시성만 제공합니다.</span></p>
           <div id="plaintext-box" hidden>
             <div class="microlabel warn-label">⚠ shown once — copy now, not recoverable</div>
             <div class="row">
@@ -160,7 +169,7 @@
         <div class="card">
           <div class="microlabel">issued keys</div>
           <table class="data" id="keys">
-            <thead><tr><th>key id</th><th>team</th><th>allowed models</th><th></th></tr></thead>
+            <thead><tr><th>key id</th><th>team</th><th>allowed models</th><th>limits</th><th></th></tr></thead>
             <tbody></tbody>
           </table>
         </div>

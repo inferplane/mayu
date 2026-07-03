@@ -564,13 +564,25 @@ $("export-btn").addEventListener("click", async () => {
 
 /* ---------- keys ---------- */
 
+// keyLimitsSummary renders the recorded (not-yet-enforced, §8 D2) governance
+// fields as one compact string — avoids five mostly-empty table columns.
+function keyLimitsSummary(k) {
+  const parts = [];
+  if (k.budget_usd_micros) parts.push("$" + (k.budget_usd_micros / 1e6).toFixed(2));
+  if (k.tpm) parts.push(k.tpm + " tpm");
+  if (k.rpm) parts.push(k.rpm + " rpm");
+  if (k.expires_at) parts.push("exp " + k.expires_at.slice(0, 10));
+  if (k.owner) parts.push(k.owner);
+  return parts.length ? parts.join(" · ") : "—";
+}
+
 async function refreshKeys() {
   const out = await api("GET", "/admin/keys");
   const tbody = $("keys").querySelector("tbody");
   tbody.textContent = "";
   for (const k of out.data || []) {
     const tr = document.createElement("tr");
-    for (const v of [k.key_id, k.team, (k.allowed_models || []).join(", ")]) {
+    for (const v of [k.key_id, k.team, (k.allowed_models || []).join(", "), keyLimitsSummary(k)]) {
       tr.appendChild(td(v)); // textContent only — never markup from data
     }
     const cell = document.createElement("td");
@@ -641,16 +653,46 @@ function currentTeam() {
 
 $("create-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const team = currentTeam();
-  const models = $("models").value.split(",").map((s) => s.trim()).filter(Boolean);
-  const out = await api("POST", "/admin/keys", { team: team, allowed_models: models });
-  // Plaintext is rendered once, kept only in the DOM/page until reload.
-  lastIssuedKey = out.plaintext;
-  $("plaintext").textContent = out.plaintext;
-  $("plaintext-box").hidden = false;
-  renderUsage(out.plaintext);
-  loadModels(out.plaintext);
-  await refreshKeys();
+  const status = $("create-form-status");
+  status.textContent = "";
+  status.className = "status";
+  try {
+    const team = currentTeam();
+    const models = $("models").value.split(",").map((s) => s.trim()).filter(Boolean);
+    const body = { team: team, allowed_models: models };
+    const budget = $("kf-budget").value;
+    if (budget) {
+      // JS Number is a 53-bit-mantissa float; above ~$9B (Number.MAX_SAFE_INTEGER
+      // / 1e6) budget*1e6 silently loses precision before it ever reaches the
+      // server's integer-microUSD path. No real key needs a nine-figure budget.
+      if (Number(budget) > 1e9) throw new Error("budget must be under $1,000,000,000");
+      body.budget_usd_micros = Math.round(Number(budget) * 1e6);
+    }
+    // parseInt (not Number): TPM/RPM are integers server-side (int64) — a float
+    // like "1000.5" would otherwise fail JSON decode with a misleading error.
+    if ($("kf-tpm").value) body.tpm = parseInt($("kf-tpm").value, 10);
+    if ($("kf-rpm").value) body.rpm = parseInt($("kf-rpm").value, 10);
+    // End-of-day UTC, not midnight — a UTC-negative operator picking "today"
+    // would otherwise see the key expire hours before their own day ends.
+    if ($("kf-expires").value) body.expires_at = $("kf-expires").value + "T23:59:59Z";
+    if ($("kf-owner").value) {
+      const owner = $("kf-owner").value.trim();
+      if (owner.length > 256) throw new Error("owner must be 256 characters or fewer");
+      body.owner = owner;
+    }
+    const out = await api("POST", "/admin/keys", body);
+    ["kf-budget", "kf-tpm", "kf-rpm", "kf-expires", "kf-owner"].forEach((id) => { $(id).value = ""; });
+    // Plaintext is rendered once, kept only in the DOM/page until reload.
+    lastIssuedKey = out.plaintext;
+    $("plaintext").textContent = out.plaintext;
+    $("plaintext-box").hidden = false;
+    renderUsage(out.plaintext);
+    loadModels(out.plaintext);
+    await refreshKeys();
+  } catch (err) {
+    status.className = "status err";
+    status.textContent = String(err.message || err);
+  }
 });
 
 $("copy").addEventListener("click", async () => {

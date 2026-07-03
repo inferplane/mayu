@@ -14,12 +14,26 @@ import (
 	"time"
 )
 
+// KeyOptions are the optional per-key governance fields (spec §8 D2). Zero
+// value of each field means "unlimited"/"never" — a key created via the plain
+// Create() has none of these set. Enforcement (budget/TPM/RPM in the request
+// hot path) is a separate follow-up; today these are stored and surfaced only.
+type KeyOptions struct {
+	BudgetUSDMicros int64             // 0 = unlimited; integer microUSD, never float
+	TPM             int64             // 0 = unlimited
+	RPM             int64             // 0 = unlimited
+	ExpiresAt       *time.Time        // nil = never; enforced in Resolve
+	Owner           string            // opaque identifier, optional — never use as a metric label (unbounded cardinality; CLAUDE.md forbids raw-input metric labels)
+	Metadata        map[string]string // optional key/value tags — same caution: never use as a metric label
+}
+
 // Principal is the resolved identity behind a virtual key (M3: service-account
 // + team; user/OIDC is M5). It rides in the request context after KeyAuth.
 type Principal struct {
 	KeyID         string // "ik_" + 12-char prefix of the key id; logged, never the secret
 	Team          string
 	AllowedModels []string // "*" allows all; else explicit allow-list (§5.1 policy)
+	KeyOptions
 }
 
 // Allows reports whether this principal may use the given model.
@@ -34,6 +48,8 @@ func (p Principal) Allows(model string) bool {
 
 type Store interface {
 	Create(ctx context.Context, team string, allowedModels []string) (plaintext string, p Principal, err error)
+	// CreateWithOptions is Create plus the optional governance fields (§8 D2).
+	CreateWithOptions(ctx context.Context, team string, allowedModels []string, opts KeyOptions) (plaintext string, p Principal, err error)
 	Resolve(ctx context.Context, plaintext string) (Principal, error)
 	Revoke(ctx context.Context, keyID string) error
 	List(ctx context.Context) ([]Principal, error)
