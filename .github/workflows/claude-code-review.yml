@@ -55,4 +55,4 @@ jobs:
             Post findings with `gh pr comment` (severity-tagged). Review only what the
             diff changes; do not request unrelated refactors.
           # Single-line claude_args: unambiguous tokenization; read + comment only.
-          claude_args: '--model ${{ vars.CLAUDE_BEDROCK_MODEL || ''us.anthropic.claude-sonnet-4-6'' }} --allowed-tools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh search:*),Bash(gh issue view:*)"'
+          claude_args: '--model ${{ vars.CLAUDE_BEDROCK_MODEL || ''us.anthropic.claude-fable-5'' }} --allowed-tools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh search:*),Bash(gh issue view:*)"'
