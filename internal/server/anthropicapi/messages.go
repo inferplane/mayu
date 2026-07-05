@@ -153,7 +153,7 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// Governance pre-check (rate/quota/budget) BEFORE the upstream call. A block
 	// is recorded as a started record carrying the deny status.
 	if h.gov != nil {
-		dec := h.gov.PreCheck(p.Team, estimateTokens(raw))
+		dec := h.gov.PreCheck(p.Team, p.KeyID, keyPolicyOf(p), estimateTokens(raw))
 		if !dec.Allowed {
 			h.audit(p, parsed.Model, chain[0].Upstream, &audit.OutcomeRef{Status: dec.Status}, false, traceID)
 			h.metrics.ObserveRequest(ingressName, parsed.Model, chain[0].ProviderName, p.Team, dec.Status, time.Since(start).Seconds(), 0)
@@ -252,7 +252,7 @@ func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request
 	var cost *audit.CostRef
 	if resp.Parsed != nil {
 		usage = usageRef(resp.Parsed.Usage)
-		cost = h.settle(p.Team, providerName, model, upstream, resp.Parsed.Usage, table)
+		cost = h.settle(p, providerName, model, upstream, resp.Parsed.Usage, table)
 		h.observeTokens(model, providerName, p.Team, resp.Parsed.Usage)
 	}
 	h.auditCompleted(p, model, upstream, resp.StatusCode, usage, cost, tracing.TraceID(req.Context()))
@@ -328,7 +328,7 @@ func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, 
 			lastUsage = ev.Chunk.Usage
 		}
 	}
-	cost := h.settle(p.Team, providerName, model, upstream, lastUsage, table)
+	cost := h.settle(p, providerName, model, upstream, lastUsage, table)
 	h.observeTokens(model, providerName, p.Team, lastUsage)
 	h.auditCompleted(p, model, upstream, 200, usage, cost, tracing.TraceID(req.Context()))
 	recordSpanResponse(req, prov.Name(), upstream, usage, true) // committed stream success
@@ -343,7 +343,7 @@ func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, 
 // M5 mapping notes: schema does not yet split cache_creation by TTL, so the
 // whole cache_creation_input_tokens total maps to CacheWrite5m as a
 // conservative default (the cheaper 5m tier); cache_read maps to CacheRead.
-func (h *MessagesHandler) settle(team, providerName, model, upstream string, u *schema.Usage, table *pricing.Table) *audit.CostRef {
+func (h *MessagesHandler) settle(p keystore.Principal, providerName, model, upstream string, u *schema.Usage, table *pricing.Table) *audit.CostRef {
 	if h.gov == nil || u == nil {
 		return nil
 	}
@@ -353,12 +353,19 @@ func (h *MessagesHandler) settle(team, providerName, model, upstream string, u *
 		CacheRead:    deref(u.CacheReadInputTokens),
 		CacheWrite5m: deref(u.CacheCreationInputTokens),
 	}
-	cost, missing := h.gov.Settle(team, providerName, upstream, pu, table)
+	cost, missing := h.gov.Settle(p.Team, p.KeyID, keyPolicyOf(p), providerName, upstream, pu, table)
 	return &audit.CostRef{
 		AmountUSDMicros: cost,
 		PricingMissing:  missing,
 		PricingVersion:  governance.PricingVersionOf(table),
 	}
+}
+
+// keyPolicyOf maps a Principal's optional per-key budget/TPM/RPM (§8 D2) to
+// the governance package's KeyPolicy; governance stays a leaf and does not
+// import keystore.
+func keyPolicyOf(p keystore.Principal) governance.KeyPolicy {
+	return governance.KeyPolicy{RatePerMin: p.RPM, TokensPerMinute: p.TPM, BudgetMicrosPerMonth: p.BudgetUSDMicros}
 }
 
 // observeTokens records the per-type token usage counters for one settled

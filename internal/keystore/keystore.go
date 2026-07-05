@@ -16,8 +16,8 @@ import (
 
 // KeyOptions are the optional per-key governance fields (spec §8 D2). Zero
 // value of each field means "unlimited"/"never" — a key created via the plain
-// Create() has none of these set. Enforcement (budget/TPM/RPM in the request
-// hot path) is a separate follow-up; today these are stored and surfaced only.
+// Create() has none of these set. Budget/TPM/RPM are enforced in the request
+// hot path (internal/governance.Governor, layered on top of team policy).
 type KeyOptions struct {
 	BudgetUSDMicros int64             // 0 = unlimited; integer microUSD, never float
 	TPM             int64             // 0 = unlimited

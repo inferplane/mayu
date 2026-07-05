@@ -7,9 +7,13 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/inferplane/inferplane/internal/budget"
 	"github.com/inferplane/inferplane/internal/config"
+	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
+	"github.com/inferplane/inferplane/internal/limiter"
 	"github.com/inferplane/inferplane/internal/live"
 	"github.com/inferplane/inferplane/internal/metrics"
 	"github.com/inferplane/inferplane/internal/openai"
@@ -47,6 +51,42 @@ func TestChatNonStreamingConvertsMockCanonicalToOpenAI(t *testing.T) {
 	}
 	if !strings.Contains(body, `"finish_reason"`) {
 		t.Fatalf("missing finish_reason: %s", body)
+	}
+}
+
+// TestKeyPolicyOfMapsAllFields guards keyPolicyOf against a future field
+// added to KeyOptions or KeyPolicy without updating the mapping (this
+// function is duplicated in internal/server/anthropicapi/messages.go —
+// governance stays a leaf and does not import keystore, so each ingress
+// package maps its own Principal → KeyPolicy; this test only proves THIS
+// copy is correct).
+func TestKeyPolicyOfMapsAllFields(t *testing.T) {
+	p := keystore.Principal{KeyOptions: keystore.KeyOptions{RPM: 60, TPM: 1000, BudgetUSDMicros: 5_000_000}}
+	got := keyPolicyOf(p)
+	want := governance.KeyPolicy{RatePerMin: 60, TokensPerMinute: 1000, BudgetMicrosPerMonth: 5_000_000}
+	if got != want {
+		t.Fatalf("keyPolicyOf(%+v) = %+v, want %+v", p.KeyOptions, got, want)
+	}
+}
+
+func TestChatGovernorKeyBudgetBlocks402EvenForUngovernedTeam(t *testing.T) {
+	bud := budget.NewMemory()
+	// No TeamPolicy entry for "platform-eng" at all — the team is ungoverned;
+	// only the key's own budget (§8 D2) must still be enforced.
+	gov := governance.NewGovernor(nil, limiter.NewMemory(), bud, nil)
+	bud.Debit("budget:key:ik_over", 1_500_000, 30*24*time.Hour) // over the key's 1M cap
+
+	h := NewChatHandlerFull(testRouter(), nil, gov)
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-x","messages":[{"role":"user","content":"hi"}]}`))
+	ctx := principal.With(req.Context(), keystore.Principal{
+		KeyID: "ik_over", Team: "platform-eng", AllowedModels: []string{"*"},
+		KeyOptions: keystore.KeyOptions{BudgetUSDMicros: 1_000_000},
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != 402 {
+		t.Fatalf("key-budget-exhausted request must be 402, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
