@@ -43,6 +43,24 @@ func toConverseRequest(raw []byte) (ConverseRequest, error) {
 	}
 	cr.System = systemText(body.System)
 	for _, m := range body.Messages {
+		if m.Role != "user" && m.Role != "assistant" {
+			// Bedrock's ConversationRole only has user/assistant. Real Claude
+			// Code traffic interleaves other roles (observed: "system", for
+			// hook/session-start output) as ordinary messages — Anthropic's
+			// API tolerates this, but Bedrock rejects it outright and, since
+			// it's usually the LAST message, "role must be user/assistant"
+			// surfaces as the more confusing "last turn must be a user
+			// message". Fold the text into the system prompt instead of
+			// dropping it or passing an invalid role through.
+			if t := flattenText(m.Content); t != "" {
+				if cr.System != "" {
+					cr.System += "\n\n" + t
+				} else {
+					cr.System = t
+				}
+			}
+			continue
+		}
 		blocks := messageBlocks(m)
 		if len(blocks) == 0 {
 			continue // Bedrock rejects a message with zero content blocks
@@ -76,6 +94,19 @@ func systemText(raw json.RawMessage) string {
 	return strings.Join(parts, "\n")
 }
 
+// flattenText concatenates a message's text blocks, ignoring tool_use/
+// tool_result/thinking/image — used only for folding a non-user/assistant
+// role's content into the system prompt (see toConverseRequest).
+func flattenText(blocks []schema.ContentBlock) string {
+	var parts []string
+	for _, b := range blocks {
+		if b.Type == "text" && b.Text != nil {
+			parts = append(parts, *b.Text)
+		}
+	}
+	return strings.Join(parts, "")
+}
+
 // messageBlocks keeps only the block types Bedrock Converse can represent
 // (text, tool_use, tool_result); thinking/image/document blocks are dropped
 // (out of scope — see the design doc). The SDK-specific mapping, including
@@ -90,6 +121,17 @@ func messageBlocks(m schema.Message) []schema.ContentBlock {
 	}
 	return out
 }
+
+// bedrockToolNameMax is Bedrock's ToolSpecification.Name limit (a
+// ValidationException, not a soft truncation). Anthropic allows tool names up
+// to 128 chars — long MCP-qualified names (e.g.
+// "mcp__plugin_foo_bar__some_long_action") are common there and routinely
+// exceed 64. Truncating would still break correctly: the client maps a
+// tool_use response back to its local tool registry by exact name, so a
+// truncated name it doesn't recognize can never be executed. Dropping the
+// tool is the same trade-off already made for schema-less tools below — the
+// model loses that one capability instead of the whole request failing.
+const bedrockToolNameMax = 64
 
 // parseTools decodes Anthropic's "tools" array into Bedrock-shaped tool specs.
 // A tool with no input_schema is skipped: Bedrock requires one, and
@@ -108,7 +150,7 @@ func parseTools(raw json.RawMessage) []ConverseTool {
 	}
 	var out []ConverseTool
 	for _, t := range tools {
-		if len(t.InputSchema) == 0 {
+		if len(t.InputSchema) == 0 || len(t.Name) > bedrockToolNameMax {
 			continue
 		}
 		out = append(out, ConverseTool{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema})

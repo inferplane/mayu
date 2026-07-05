@@ -73,6 +73,26 @@ func TestToConverseRequestParsesTools(t *testing.T) {
 	}
 }
 
+func TestToConverseRequestSkipsOversizedToolNames(t *testing.T) {
+	// Bedrock's ToolSpecification.Name is capped at 64 chars; Anthropic allows
+	// up to 128, and long MCP-qualified names routinely exceed 64 in practice.
+	longName := "mcp__plugin_aws-serverless_aws-serverless-mcp__secure_esm_dynamodb_policy"
+	if len(longName) <= bedrockToolNameMax {
+		t.Fatalf("fixture name is not actually oversized: %d chars", len(longName))
+	}
+	raw := []byte(`{"messages":[{"role":"user","content":"hi"}],"tools":[
+		{"name":"bash","input_schema":{"type":"object"}},
+		{"name":"` + longName + `","input_schema":{"type":"object"}}
+	]}`)
+	cr, err := toConverseRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cr.Tools) != 1 || cr.Tools[0].Name != "bash" {
+		t.Fatalf("expected only the short-named tool to survive, got %+v", cr.Tools)
+	}
+}
+
 func TestToConverseRequestToolBlocks(t *testing.T) {
 	raw := []byte(`{"messages":[
 		{"role":"user","content":[{"type":"text","text":"list files"}]},
@@ -95,6 +115,28 @@ func TestToConverseRequestToolBlocks(t *testing.T) {
 	toolResult := cr.Messages[2].Content[0]
 	if toolResult.Type != "tool_result" || toolResult.ToolUseID != "t1" {
 		t.Fatalf("tool_result block: %+v", toolResult)
+	}
+}
+
+func TestToConverseRequestFoldsNonUserAssistantRoleIntoSystem(t *testing.T) {
+	// Real Claude Code traffic interleaves a trailing role:"system" message
+	// (hook/session-start output) in the messages array. Anthropic's API
+	// tolerates this; Bedrock's ConversationRole only has user/assistant and
+	// rejects it — and because it's the LAST message, the failure surfaces as
+	// "last turn must be a user message" rather than an obvious role error.
+	raw := []byte(`{"system":"be helpful","messages":[
+		{"role":"user","content":"hello"},
+		{"role":"system","content":"SessionStart hook: some info"}
+	]}`)
+	cr, err := toConverseRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cr.Messages) != 1 || cr.Messages[0].Role != "user" {
+		t.Fatalf("expected the system-role message to be folded away, not passed through: %+v", cr.Messages)
+	}
+	if !strings.Contains(cr.System, "be helpful") || !strings.Contains(cr.System, "SessionStart hook: some info") {
+		t.Fatalf("system role content not folded into system prompt: %q", cr.System)
 	}
 }
 
