@@ -67,6 +67,28 @@ func TestLoadBedrockProviderFields(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsInvalidAuthHeader(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	os.WriteFile(f, []byte(`{"providers":{"p":{"type":"anthropic","auth_header":"Bearer"}}}`), 0o600)
+	if _, err := Load(f); err == nil {
+		t.Fatal("expected rejection of invalid auth_header")
+	}
+}
+
+func TestLoadAcceptsBearerAuthHeader(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "ok.json")
+	os.WriteFile(f, []byte(`{"providers":{"p":{"type":"anthropic","auth_header":"bearer"}}}`), 0o600)
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Providers["p"].AuthHeader != "bearer" {
+		t.Fatalf("auth_header not preserved: %+v", cfg.Providers["p"])
+	}
+}
+
 func TestLoadTeamsAndPricing(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "c.json")
