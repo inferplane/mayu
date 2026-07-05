@@ -6,6 +6,7 @@ package bedrock
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"iter"
 
@@ -14,6 +15,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/document"
 	brtypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
+
+	"github.com/inferplane/inferplane/pkg/schema"
 )
 
 // invoker is the narrow interface the provider logic depends on for the raw
@@ -36,22 +39,61 @@ type converser interface {
 type ConverseRequest struct {
 	System      string
 	Messages    []ConverseMessage
+	Tools       []ConverseTool
+	ToolChoice  ConverseToolChoice
 	Inference   map[string]any
 	ModelFields map[string]any
 }
+
+// ConverseMessage carries the canonical Anthropic content-block vocabulary
+// (text | tool_use | tool_result) straight through from converse.go; the SDK
+// mapping (including tool_result flattening) happens in buildMessages below.
 type ConverseMessage struct {
-	Role string
-	Text string
+	Role    string
+	Content []schema.ContentBlock
 }
+
+// ConverseTool mirrors one entry of Anthropic's "tools" array.
+type ConverseTool struct {
+	Name        string
+	Description string
+	InputSchema json.RawMessage
+}
+
+// ConverseToolChoice mirrors Anthropic's tool_choice. Type is one of
+// ""|"auto"|"any"|"tool"|"none"; Name is set only for "tool". The zero value
+// omits ToolChoice from the Bedrock call entirely (SDK default is auto, and
+// some models reject an explicit choice — see buildToolConfig).
+type ConverseToolChoice struct {
+	Type string
+	Name string
+}
+
 type ConverseResponse struct {
-	Text         string
+	Content      []schema.ContentBlock
 	StopReason   string
 	InputTokens  int64
 	OutputTokens int64
 }
+
+// Discriminators for ConverseStreamEvent.Kind.
+const (
+	eventTextDelta      = "text_delta"
+	eventToolUseStart   = "tool_use_start"
+	eventToolInputDelta = "tool_input_delta"
+	eventBlockStop      = "block_stop"
+	eventMessageStop    = "message_stop"
+	eventUsage          = "usage"
+)
+
+// ConverseStreamEvent is a discriminated union over the Bedrock stream events
+// the provider cares about; Kind selects which of the other fields are set.
 type ConverseStreamEvent struct {
+	Kind         string
 	TextDelta    string
-	Done         bool
+	ToolUseID    string
+	ToolName     string
+	ToolDelta    string
 	StopReason   string
 	InputTokens  int64
 	OutputTokens int64
@@ -124,6 +166,7 @@ func (c *awsClient) Converse(ctx context.Context, modelID string, req ConverseRe
 		ModelId:                      aws.String(modelID),
 		System:                       buildSystem(req.System),
 		Messages:                     buildMessages(req.Messages),
+		ToolConfig:                   buildToolConfig(req.Tools, req.ToolChoice),
 		InferenceConfig:              buildInference(req.Inference),
 		AdditionalModelRequestFields: buildModelFields(req.ModelFields),
 	})
@@ -132,11 +175,7 @@ func (c *awsClient) Converse(ctx context.Context, modelID string, req ConverseRe
 	}
 	resp := ConverseResponse{StopReason: string(out.StopReason)}
 	if msg, ok := out.Output.(*brtypes.ConverseOutputMemberMessage); ok {
-		for _, block := range msg.Value.Content {
-			if text, ok := block.(*brtypes.ContentBlockMemberText); ok {
-				resp.Text += text.Value
-			}
-		}
+		resp.Content = contentBlocksFromSDK(msg.Value.Content)
 	}
 	if out.Usage != nil {
 		resp.InputTokens = int64(aws.ToInt32(out.Usage.InputTokens))
@@ -150,6 +189,7 @@ func (c *awsClient) ConverseStream(ctx context.Context, modelID string, req Conv
 		ModelId:                      aws.String(modelID),
 		System:                       buildSystem(req.System),
 		Messages:                     buildMessages(req.Messages),
+		ToolConfig:                   buildToolConfig(req.Tools, req.ToolChoice),
 		InferenceConfig:              buildInference(req.Inference),
 		AdditionalModelRequestFields: buildModelFields(req.ModelFields),
 	})
@@ -161,19 +201,36 @@ func (c *awsClient) ConverseStream(ctx context.Context, modelID string, req Conv
 		defer stream.Close()
 		for event := range stream.Events() {
 			switch e := event.(type) {
-			case *brtypes.ConverseStreamOutputMemberContentBlockDelta:
-				if text, ok := e.Value.Delta.(*brtypes.ContentBlockDeltaMemberText); ok {
-					if !yield(ConverseStreamEvent{TextDelta: text.Value}, nil) {
+			case *brtypes.ConverseStreamOutputMemberContentBlockStart:
+				if tu, ok := e.Value.Start.(*brtypes.ContentBlockStartMemberToolUse); ok {
+					ev := ConverseStreamEvent{Kind: eventToolUseStart, ToolUseID: aws.ToString(tu.Value.ToolUseId), ToolName: aws.ToString(tu.Value.Name)}
+					if !yield(ev, nil) {
 						return
 					}
 				}
+			case *brtypes.ConverseStreamOutputMemberContentBlockDelta:
+				switch d := e.Value.Delta.(type) {
+				case *brtypes.ContentBlockDeltaMemberText:
+					if !yield(ConverseStreamEvent{Kind: eventTextDelta, TextDelta: d.Value}, nil) {
+						return
+					}
+				case *brtypes.ContentBlockDeltaMemberToolUse:
+					if !yield(ConverseStreamEvent{Kind: eventToolInputDelta, ToolDelta: aws.ToString(d.Value.Input)}, nil) {
+						return
+					}
+				}
+			case *brtypes.ConverseStreamOutputMemberContentBlockStop:
+				if !yield(ConverseStreamEvent{Kind: eventBlockStop}, nil) {
+					return
+				}
 			case *brtypes.ConverseStreamOutputMemberMessageStop:
-				if !yield(ConverseStreamEvent{Done: true, StopReason: string(e.Value.StopReason)}, nil) {
+				if !yield(ConverseStreamEvent{Kind: eventMessageStop, StopReason: string(e.Value.StopReason)}, nil) {
 					return
 				}
 			case *brtypes.ConverseStreamOutputMemberMetadata:
 				if u := e.Value.Usage; u != nil {
 					ev := ConverseStreamEvent{
+						Kind:         eventUsage,
 						InputTokens:  int64(aws.ToInt32(u.InputTokens)),
 						OutputTokens: int64(aws.ToInt32(u.OutputTokens)),
 					}
@@ -198,18 +255,129 @@ func buildSystem(system string) []brtypes.SystemContentBlock {
 	}
 }
 
+// buildMessages maps the canonical content-block vocabulary to Bedrock SDK
+// content blocks. tool_result content is flattened to a single text block
+// (Bedrock's ToolResultContentBlock supports text/image/json/document, but
+// Claude Code's tool_result payloads are text/JSON strings in practice — richer
+// content is out of scope, see providers/bedrock/CLAUDE.md-equivalent notes in
+// the design doc). Empty blocks and messages left with no content are dropped:
+// Bedrock rejects an empty text block or a message with zero content blocks
+// with a ValidationException.
 func buildMessages(msgs []ConverseMessage) []brtypes.Message {
 	if len(msgs) == 0 {
 		return nil
 	}
 	out := make([]brtypes.Message, 0, len(msgs))
 	for _, m := range msgs {
-		out = append(out, brtypes.Message{
-			Role:    brtypes.ConversationRole(m.Role),
-			Content: []brtypes.ContentBlock{&brtypes.ContentBlockMemberText{Value: m.Text}},
-		})
+		var content []brtypes.ContentBlock
+		for _, b := range m.Content {
+			switch b.Type {
+			case "text":
+				if b.Text != nil && *b.Text != "" {
+					content = append(content, &brtypes.ContentBlockMemberText{Value: *b.Text})
+				}
+			case "tool_use":
+				content = append(content, &brtypes.ContentBlockMemberToolUse{Value: brtypes.ToolUseBlock{
+					ToolUseId: aws.String(b.ID),
+					Name:      aws.String(b.Name),
+					Input:     document.NewLazyDocument(rawJSONToAny(b.Input)),
+				}})
+			case "tool_result":
+				status := brtypes.ToolResultStatusSuccess
+				if b.IsError != nil && *b.IsError {
+					status = brtypes.ToolResultStatusError
+				}
+				content = append(content, &brtypes.ContentBlockMemberToolResult{Value: brtypes.ToolResultBlock{
+					ToolUseId: aws.String(b.ToolUseID),
+					Status:    status,
+					Content:   []brtypes.ToolResultContentBlock{&brtypes.ToolResultContentBlockMemberText{Value: toolResultText(b.Content)}},
+				}})
+			}
+		}
+		if len(content) == 0 {
+			continue
+		}
+		out = append(out, brtypes.Message{Role: brtypes.ConversationRole(m.Role), Content: content})
 	}
 	return out
+}
+
+// toolResultText flattens a tool_result.content value (string OR block array)
+// into plain text, the same shape internal/openai's OpenAI conversion uses for
+// tool messages — duplicated here rather than imported, since providers/ may
+// not depend on internal/ (design §8 provider isolation).
+func toolResultText(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	if raw[0] == '"' {
+		var s string
+		if json.Unmarshal(raw, &s) == nil {
+			return s
+		}
+		return ""
+	}
+	if raw[0] == '[' {
+		var blocks []schema.ContentBlock
+		if json.Unmarshal(raw, &blocks) == nil {
+			var out string
+			for _, blk := range blocks {
+				if blk.Text != nil {
+					out += *blk.Text
+				}
+			}
+			return out
+		}
+	}
+	return string(raw)
+}
+
+// contentBlocksFromSDK maps a Converse response's content blocks back to the
+// canonical vocabulary. Only text and tool_use appear in model output.
+func contentBlocksFromSDK(blocks []brtypes.ContentBlock) []schema.ContentBlock {
+	var out []schema.ContentBlock
+	for _, block := range blocks {
+		switch b := block.(type) {
+		case *brtypes.ContentBlockMemberText:
+			text := b.Value
+			out = append(out, schema.ContentBlock{Type: "text", Text: &text})
+		case *brtypes.ContentBlockMemberToolUse:
+			out = append(out, schema.ContentBlock{
+				Type:  "tool_use",
+				ID:    aws.ToString(b.Value.ToolUseId),
+				Name:  aws.ToString(b.Value.Name),
+				Input: documentToRawJSON(b.Value.Input),
+			})
+		}
+	}
+	return out
+}
+
+// buildToolConfig translates Anthropic tools/tool_choice into a Bedrock
+// ToolConfiguration, or nil when there are no tools. Only "any" and "tool" are
+// forwarded as an explicit ToolChoice — "auto"/"none"/unset are left unset
+// (the Bedrock default is auto, and some models reject an explicit choice).
+func buildToolConfig(tools []ConverseTool, choice ConverseToolChoice) *brtypes.ToolConfiguration {
+	if len(tools) == 0 {
+		return nil
+	}
+	cfg := &brtypes.ToolConfiguration{}
+	for _, t := range tools {
+		cfg.Tools = append(cfg.Tools, &brtypes.ToolMemberToolSpec{Value: brtypes.ToolSpecification{
+			Name:        aws.String(t.Name),
+			Description: aws.String(t.Description),
+			InputSchema: &brtypes.ToolInputSchemaMemberJson{Value: document.NewLazyDocument(rawJSONToAny(t.InputSchema))},
+		}})
+	}
+	switch choice.Type {
+	case "any":
+		cfg.ToolChoice = &brtypes.ToolChoiceMemberAny{}
+	case "tool":
+		if choice.Name != "" {
+			cfg.ToolChoice = &brtypes.ToolChoiceMemberTool{Value: brtypes.SpecificToolChoice{Name: aws.String(choice.Name)}}
+		}
+	}
+	return cfg
 }
 
 func buildInference(inf map[string]any) *brtypes.InferenceConfiguration {
@@ -243,6 +411,38 @@ func buildModelFields(fields map[string]any) document.Interface {
 		return nil
 	}
 	return document.NewLazyDocument(fields)
+}
+
+// rawJSONToAny decodes a JSON value into a Go value suitable for
+// document.NewLazyDocument. Absent/invalid input becomes an empty object,
+// which is what an empty tool_use.input ("{}") or a schema-less tool decodes
+// to anyway.
+func rawJSONToAny(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return map[string]any{}
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return map[string]any{}
+	}
+	return v
+}
+
+// documentToRawJSON reads back a Bedrock response document (e.g. a
+// tool_use.input the model produced) as JSON for the canonical ContentBlock.
+func documentToRawJSON(doc document.Interface) json.RawMessage {
+	if doc == nil {
+		return json.RawMessage("{}")
+	}
+	var v any
+	if err := doc.UnmarshalSmithyDocument(&v); err != nil {
+		return json.RawMessage("{}")
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return json.RawMessage("{}")
+	}
+	return raw
 }
 
 // asInt32 coerces JSON-decoded numerics (float64) and common integer types to

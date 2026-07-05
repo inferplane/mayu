@@ -1,0 +1,31 @@
+{
+  "server": {
+    "listen": ":8080", "admin_listen": ":9090", "drain_grace": "10s",
+    "admin_auth": { "token_refs": [ { "env": "INFERPLANE_ADMIN_TOKEN" } ] }
+  },
+  "key_store": { "type": "sqlite", "path": "/var/lib/inferplane/keys.db" },
+  "audit": {
+    "failure_mode": "buffer_then_block",
+    "buffer": { "path": "/var/lib/inferplane/audit.wal" },
+    "sinks": [ { "type": "stdout" }, { "type": "file", "path": "/var/lib/inferplane/audit.jsonl" } ]
+  },
+  "_comment_bedrock_glm": "zai.glm-5 is a non-Claude Bedrock model, so the bedrock provider's apiFor() routes it to Converse automatically (no \"api\" field needed on the target — that field only exists to override the default). If your account/region rejects the direct model id, switch it to the apac. cross-region inference profile (e.g. \"apac.zai.glm-5\") instead.",
+  "providers": {
+    "bedrock-apne1": { "type": "bedrock", "region": "ap-northeast-1", "auth": { "mode": "irsa" } }
+  },
+  "_comment_models": "The model key is what Claude Code must send as ANTHROPIC_MODEL — it has to match exactly, since the bedrock provider forwards tool/message content but never rewrites the client-facing model name.",
+  "models": {
+    "zai.glm-5": { "targets": [ { "provider": "bedrock-apne1", "model": "zai.glm-5" } ] }
+  },
+  "teams": {
+    "demo": {
+      "allowed_models": [ "zai.glm-5" ],
+      "rate_limit": { "requests_per_minute": 120 }
+    }
+  },
+  "_comment_pricing": "Without an override, cost for zai.glm-5 settles at 0 microUSD (recorded with missing=true in the audit log) — there is no bundled rate for non-Claude Bedrock models. Fill in real per-million-token USD prices from the Bedrock pricing page to get accurate billing.",
+  "pricing": {
+    "on_missing": "allow",
+    "overrides": { "bedrock-apne1": { "zai.glm-5": { "input_per_mtok": 0.0, "output_per_mtok": 0.0 } } }
+  }
+}
