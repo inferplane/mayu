@@ -93,6 +93,51 @@ func TestToConverseRequestSkipsOversizedToolNames(t *testing.T) {
 	}
 }
 
+func TestToConverseRequestClearsToolChoicePointingAtDroppedTool(t *testing.T) {
+	// tool_choice pins a tool that gets dropped for being oversized — Bedrock
+	// rejects a SpecificToolChoice referencing a tool absent from the tool
+	// list, so the choice must fall back to unset (auto) rather than forward
+	// a dangling reference.
+	longName := "mcp__plugin_aws-serverless_aws-serverless-mcp__secure_esm_dynamodb_policy"
+	raw := []byte(`{"messages":[{"role":"user","content":"hi"}],"tools":[
+		{"name":"bash","input_schema":{"type":"object"}},
+		{"name":"` + longName + `","input_schema":{"type":"object"}}
+	],"tool_choice":{"type":"tool","name":"` + longName + `"}}`)
+	cr, err := toConverseRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr.ToolChoice != (ConverseToolChoice{}) {
+		t.Fatalf("expected tool_choice to fall back to unset, got %+v", cr.ToolChoice)
+	}
+	// A choice pointing at a tool that DID survive must still be forwarded.
+	raw2 := []byte(`{"messages":[{"role":"user","content":"hi"}],"tools":[
+		{"name":"bash","input_schema":{"type":"object"}}
+	],"tool_choice":{"type":"tool","name":"bash"}}`)
+	cr2, err := toConverseRequest(raw2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cr2.ToolChoice.Type != "tool" || cr2.ToolChoice.Name != "bash" {
+		t.Fatalf("expected the surviving tool's choice to be forwarded, got %+v", cr2.ToolChoice)
+	}
+}
+
+func TestToConverseRequestSkipsInvalidToolShapes(t *testing.T) {
+	raw := []byte(`{"messages":[{"role":"user","content":"hi"}],"tools":[
+		{"name":"bash","input_schema":{"type":"object"}},
+		{"name":"","input_schema":{"type":"object"}},
+		{"name":"nullschema","input_schema":null}
+	]}`)
+	cr, err := toConverseRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cr.Tools) != 1 || cr.Tools[0].Name != "bash" {
+		t.Fatalf("expected empty-named and null-schema tools to be dropped, got %+v", cr.Tools)
+	}
+}
+
 func TestToConverseRequestToolBlocks(t *testing.T) {
 	raw := []byte(`{"messages":[
 		{"role":"user","content":[{"type":"text","text":"list files"}]},

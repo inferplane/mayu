@@ -68,8 +68,26 @@ func toConverseRequest(raw []byte) (ConverseRequest, error) {
 		cr.Messages = append(cr.Messages, ConverseMessage{Role: m.Role, Content: blocks})
 	}
 	cr.Tools = parseTools(body.Tools)
-	cr.ToolChoice = parseToolChoice(body.ToolChoice)
+	cr.ToolChoice = resolveToolChoice(parseToolChoice(body.ToolChoice), cr.Tools)
 	return cr, nil
+}
+
+// resolveToolChoice drops a "tool" choice that points at a tool parseTools
+// already dropped (schema-less, empty-named, or over bedrockToolNameMax) —
+// otherwise buildToolConfig would send Bedrock a SpecificToolChoice for a
+// tool absent from the tool list, which Bedrock rejects with a
+// ValidationException. Falling back to the zero value leaves ToolChoice
+// unset on the Bedrock call (buildToolConfig, client.go), i.e. auto.
+func resolveToolChoice(choice ConverseToolChoice, tools []ConverseTool) ConverseToolChoice {
+	if choice.Type != "tool" {
+		return choice
+	}
+	for _, t := range tools {
+		if t.Name == choice.Name {
+			return choice
+		}
+	}
+	return ConverseToolChoice{}
 }
 
 // systemText extracts plain text from an Anthropic system field (string or
@@ -133,9 +151,11 @@ func messageBlocks(m schema.Message) []schema.ContentBlock {
 // model loses that one capability instead of the whole request failing.
 const bedrockToolNameMax = 64
 
-// parseTools decodes Anthropic's "tools" array into Bedrock-shaped tool specs.
-// A tool with no input_schema is skipped: Bedrock requires one, and
-// server-tool shorthands (e.g. computer use) can't be expressed as a ToolSpec.
+// parseTools decodes Anthropic's "tools" array into Bedrock-shaped tool specs,
+// skipping any tool Bedrock would reject outright: no input_schema (server-tool
+// shorthands like computer use can't be expressed as a ToolSpec), an empty or
+// over-length name, or a JSON "null" input_schema. A dropped tool's tool_choice
+// reference is cleaned up separately by resolveToolChoice.
 func parseTools(raw json.RawMessage) []ConverseTool {
 	if len(raw) == 0 {
 		return nil
@@ -150,7 +170,12 @@ func parseTools(raw json.RawMessage) []ConverseTool {
 	}
 	var out []ConverseTool
 	for _, t := range tools {
-		if len(t.InputSchema) == 0 || len(t.Name) > bedrockToolNameMax {
+		// Bedrock's ToolSpecification.Name/InputSchema are both required and
+		// non-null: an empty name, a missing input_schema, or a JSON "null"
+		// input_schema (still 4 bytes, so a bare len==0 check misses it) all
+		// produce a ValidationException — skip the tool rather than send one
+		// Bedrock will reject.
+		if t.Name == "" || len(t.Name) > bedrockToolNameMax || len(t.InputSchema) == 0 || string(t.InputSchema) == "null" {
 			continue
 		}
 		out = append(out, ConverseTool{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema})
