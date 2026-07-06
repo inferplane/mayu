@@ -88,7 +88,7 @@ func SeedIfEmpty(ctx context.Context, store Store, rawFileCfg *config.Config) er
 // providerConfigFromRow maps a DB row to a config.ProviderConfig carrying the
 // ref only (APIKey stays empty — caller resolves).
 func providerConfigFromRow(p ProviderRow) config.ProviderConfig {
-	pc := config.ProviderConfig{Type: p.Type, BaseURL: p.BaseURL, Region: p.Region}
+	pc := config.ProviderConfig{Type: p.Type, BaseURL: p.BaseURL, Region: p.Region, AuthHeader: p.AuthHeader}
 	pc.Auth.Mode = p.AuthMode
 	pc.Auth.Profile = p.AuthProfile
 	switch {
@@ -105,7 +105,7 @@ func providerConfigFromRow(p ProviderRow) config.ProviderConfig {
 func rowFromProviderConfig(name string, pc config.ProviderConfig) ProviderRow {
 	r := ProviderRow{
 		Name: name, Type: pc.Type, BaseURL: pc.BaseURL, Region: pc.Region,
-		AuthMode: pc.Auth.Mode, AuthProfile: pc.Auth.Profile,
+		AuthMode: pc.Auth.Mode, AuthProfile: pc.Auth.Profile, AuthHeader: pc.AuthHeader,
 	}
 	if pc.APIKeyRef != nil {
 		r.APIKeyRefEnv = pc.APIKeyRef.Env

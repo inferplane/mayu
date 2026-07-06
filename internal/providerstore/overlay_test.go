@@ -87,6 +87,41 @@ func TestOverlayIgnoredFileProvidersNotResolved(t *testing.T) {
 	}
 }
 
+// TestAuthHeaderRoundTripsThroughRowConversion (PR #13 review, Finding 1): a
+// file provider's auth_header must survive rowFromProviderConfig → (DB) →
+// providerConfigFromRow, or an OpenRouter-style provider silently regresses to
+// x-api-key the moment the provider store seeds/overlays it.
+func TestAuthHeaderRoundTripsThroughRowConversion(t *testing.T) {
+	pc := config.ProviderConfig{Type: "anthropic", BaseURL: "https://openrouter.ai/api", AuthHeader: "bearer"}
+	row := rowFromProviderConfig("openrouter", pc)
+	if row.AuthHeader != "bearer" {
+		t.Fatalf("rowFromProviderConfig dropped auth_header: %+v", row)
+	}
+	back := providerConfigFromRow(row)
+	if back.AuthHeader != "bearer" {
+		t.Fatalf("providerConfigFromRow dropped auth_header: %+v", back)
+	}
+}
+
+// TestOverlayPreservesAuthHeader is the same guarantee at the seed→overlay
+// level (SeedIfEmpty writes the row, Overlay reads it back).
+func TestOverlayPreservesAuthHeader(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	cfg := fileCfg()
+	cfg.Providers["file-prov"] = config.ProviderConfig{Type: "anthropic", BaseURL: "https://openrouter.ai/api", APIKeyRef: &config.SecretRef{Env: "FILE_KEY"}, AuthHeader: "bearer"}
+	if err := SeedIfEmpty(ctx, s, cfg); err != nil {
+		t.Fatal(err)
+	}
+	eff, err := Overlay(cfg, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eff.Providers["file-prov"].AuthHeader != "bearer" {
+		t.Fatalf("auth_header lost across seed→overlay: %+v", eff.Providers["file-prov"])
+	}
+}
+
 func TestSeedIfEmptySeedsOnceFromFile(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

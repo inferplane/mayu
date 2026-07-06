@@ -34,11 +34,12 @@ type secretRefWrite struct {
 // ProviderWrite is the register/replace DTO. It has NO field that can hold a
 // secret value — only the ref (env name / file path) and the bedrock IAM mode.
 type ProviderWrite struct {
-	Type      string          `json:"type"`
-	BaseURL   string          `json:"base_url,omitempty"`
-	Region    string          `json:"region,omitempty"`
-	Auth      authWrite       `json:"auth,omitempty"`
-	APIKeyRef *secretRefWrite `json:"api_key_ref,omitempty"`
+	Type       string          `json:"type"`
+	BaseURL    string          `json:"base_url,omitempty"`
+	Region     string          `json:"region,omitempty"`
+	Auth       authWrite       `json:"auth,omitempty"`
+	APIKeyRef  *secretRefWrite `json:"api_key_ref,omitempty"`
+	AuthHeader string          `json:"auth_header,omitempty"`
 }
 
 type authWrite struct {
@@ -84,7 +85,7 @@ func ParseProviderWrite(name string, body []byte) (providerstore.ProviderRow, er
 
 	row := providerstore.ProviderRow{
 		Name: name, Type: w.Type, BaseURL: w.BaseURL, Region: w.Region,
-		AuthMode: w.Auth.Mode, AuthProfile: w.Auth.Profile,
+		AuthMode: w.Auth.Mode, AuthProfile: w.Auth.Profile, AuthHeader: w.AuthHeader,
 	}
 	if w.APIKeyRef != nil {
 		// Validate the ref SHAPE through the shared guard (config.ValidateSecretRef

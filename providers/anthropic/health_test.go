@@ -32,6 +32,28 @@ func TestHealthCheck_OK(t *testing.T) {
 	}
 }
 
+func TestHealthCheck_BearerModeUsesAuthorizationHeader(t *testing.T) {
+	// A bearer-configured provider (e.g. OpenRouter) probed with x-api-key
+	// would always 401 and report unhealthy even when actually up.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-api-key") != "" {
+			t.Error("bearer mode must not send x-api-key")
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer sk-secret-value-should-never-leak" {
+			t.Errorf("Authorization = %q, want Bearer sk-secret-value-should-never-leak", got)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	p := newTestProvider(srv.URL)
+	p.bearer = true
+	res := p.HealthCheck(context.Background())
+	if !res.OK {
+		t.Fatalf("want OK, got %+v", res)
+	}
+}
+
 func TestHealthCheck_Unauthorized_Sanitized(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)

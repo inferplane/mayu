@@ -78,7 +78,7 @@ func ProbeHandler(storeEnabled bool, allowedHosts []string) http.Handler {
 			Type:       row.Type,
 			BaseURL:    row.BaseURL,
 			APIKey:     apiKey,
-			Settings:   map[string]string{"region": row.Region, "auth_mode": row.AuthMode, "profile": row.AuthProfile},
+			Settings:   map[string]string{"region": row.Region, "auth_mode": row.AuthMode, "profile": row.AuthProfile, "auth_header": row.AuthHeader},
 			HTTPClient: guardedClient(allow),
 		})
 		if err != nil {

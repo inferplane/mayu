@@ -89,6 +89,20 @@ func TestLoadAcceptsBearerAuthHeader(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsAuthHeaderOnNonAnthropicProvider(t *testing.T) {
+	// auth_header only has an effect on the anthropic provider (live.go only
+	// wires it into Settings for type=="anthropic"); on bedrock/openai_compatible
+	// it would validate but silently do nothing, so it must be rejected outright.
+	for _, typ := range []string{"bedrock", "openai_compatible"} {
+		dir := t.TempDir()
+		f := filepath.Join(dir, "bad.json")
+		os.WriteFile(f, []byte(`{"providers":{"p":{"type":"`+typ+`","auth_header":"bearer"}}}`), 0o600)
+		if _, err := Load(f); err == nil {
+			t.Fatalf("type %q: expected rejection of auth_header on a non-anthropic provider", typ)
+		}
+	}
+}
+
 func TestLoadTeamsAndPricing(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "c.json")

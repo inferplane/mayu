@@ -63,6 +63,7 @@ func TestViewAuthStrings(t *testing.T) {
 		"f": {Type: "openai_compatible", APIKeyRef: &config.SecretRef{File: "/p"}},
 		"n": {Type: "openai_compatible"},
 		"b": bedrock,
+		"r": {Type: "anthropic", APIKeyRef: &config.SecretRef{Env: "OR_KEY"}, AuthHeader: "bearer"},
 	}
 	v := ViewFrom(providers, nil)
 	got := map[string]string{}
@@ -74,6 +75,7 @@ func TestViewAuthStrings(t *testing.T) {
 		"f": "api key · file:/p",
 		"n": "none (keyless)",
 		"b": "IAM · pod_identity",
+		"r": "bearer · env:OR_KEY",
 	}
 	for name, w := range want {
 		if got[name] != w {

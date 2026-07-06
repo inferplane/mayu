@@ -59,6 +59,20 @@ func TestParseProviderWriteValidEnvRef(t *testing.T) {
 	}
 }
 
+func TestParseProviderWriteCarriesAuthHeader(t *testing.T) {
+	// PR #13 review, Finding 2: ProviderWrite must be able to carry
+	// auth_header at all, or an OpenRouter-style draft provider can never be
+	// registered/probed with the right credential header.
+	body := []byte(`{"type":"anthropic","base_url":"https://openrouter.ai/api","api_key_ref":{"env":"OR_KEY"},"auth_header":"bearer"}`)
+	row, err := ParseProviderWrite("openrouter", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.AuthHeader != "bearer" {
+		t.Fatalf("auth_header not carried into the row: %+v", row)
+	}
+}
+
 func TestParseProviderWriteValidBedrock(t *testing.T) {
 	body := []byte(`{"type":"bedrock","region":"us-west-2","auth":{"mode":"profile","profile":"dev"}}`)
 	row, err := ParseProviderWrite("bedrock-us", body)

@@ -84,12 +84,16 @@ func authString(p config.ProviderConfig) string {
 		}
 		return "IAM · " + mode
 	}
+	label := "api key"
+	if p.AuthHeader == "bearer" {
+		label = "bearer"
+	}
 	if p.APIKeyRef != nil {
 		switch {
 		case p.APIKeyRef.Env != "":
-			return "api key · env:" + p.APIKeyRef.Env
+			return label + " · env:" + p.APIKeyRef.Env
 		case p.APIKeyRef.File != "":
-			return "api key · file:" + p.APIKeyRef.File
+			return label + " · file:" + p.APIKeyRef.File
 		}
 	}
 	return "none (keyless)"

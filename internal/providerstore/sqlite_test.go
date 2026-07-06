@@ -2,6 +2,7 @@ package providerstore
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -35,6 +36,91 @@ func TestProviderRoundTrip(t *testing.T) {
 	}
 	if got != row {
 		t.Fatalf("round-trip mismatch:\n got %+v\nwant %+v", got, row)
+	}
+}
+
+func TestProviderRoundTripAuthHeader(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	row := ProviderRow{
+		Name: "openrouter", Type: "anthropic", BaseURL: "https://openrouter.ai/api",
+		APIKeyRefEnv: "OPENROUTER_KEY", AuthHeader: "bearer",
+	}
+	if err := s.UpsertProvider(ctx, row); err != nil {
+		t.Fatalf("UpsertProvider: %v", err)
+	}
+	got, err := s.GetProvider(ctx, "openrouter")
+	if err != nil {
+		t.Fatalf("GetProvider: %v", err)
+	}
+	if got.AuthHeader != "bearer" {
+		t.Fatalf("auth_header not round-tripped: got %+v", got)
+	}
+	list, err := s.ListProviders(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].AuthHeader != "bearer" {
+		t.Fatalf("ListProviders lost auth_header: %+v", list)
+	}
+}
+
+// TestMigrationAddsAuthHeaderColumn opens a store whose providers table
+// predates the auth_header column (created with the OLD schema — no
+// CREATE TABLE IF NOT EXISTS no-ops on an existing table's missing column) and
+// confirms OpenSQLite adds it rather than failing, and that the store is
+// immediately usable with the new column.
+func TestMigrationAddsAuthHeaderColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const oldSchema = `
+CREATE TABLE providers (
+    name             TEXT PRIMARY KEY,
+    type             TEXT NOT NULL,
+    base_url         TEXT NOT NULL DEFAULT '',
+    region           TEXT NOT NULL DEFAULT '',
+    auth_mode        TEXT NOT NULL DEFAULT '',
+    auth_profile     TEXT NOT NULL DEFAULT '',
+    api_key_ref_env  TEXT NOT NULL DEFAULT '',
+    api_key_ref_file TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE model_targets (model TEXT, position INTEGER, provider TEXT, model_id TEXT, api TEXT, PRIMARY KEY (model, position));
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+`
+	if _, err := old.Exec(oldSchema); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`INSERT INTO providers (name, type) VALUES ('pre-existing', 'anthropic')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("OpenSQLite on pre-migration schema: %v", err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+
+	got, err := s.GetProvider(ctx, "pre-existing")
+	if err != nil {
+		t.Fatalf("GetProvider on migrated row: %v", err)
+	}
+	if got.AuthHeader != "" {
+		t.Fatalf("migrated row should default auth_header to empty, got %q", got.AuthHeader)
+	}
+
+	if err := s.UpsertProvider(ctx, ProviderRow{Name: "new", Type: "anthropic", AuthHeader: "bearer"}); err != nil {
+		t.Fatalf("UpsertProvider after migration: %v", err)
+	}
+	got2, err := s.GetProvider(ctx, "new")
+	if err != nil || got2.AuthHeader != "bearer" {
+		t.Fatalf("post-migration write: got=%+v err=%v", got2, err)
 	}
 }
 

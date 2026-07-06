@@ -12,6 +12,7 @@ import (
 
 	"github.com/inferplane/inferplane/pkg/schema"
 	"github.com/inferplane/inferplane/providers"
+	_ "github.com/inferplane/inferplane/providers/anthropic" // registers "anthropic" for TestProbe_AuthHeaderBearerUsesAuthorizationHeader
 )
 
 // noHealthProvider is a provider that does NOT implement HealthChecker, to
@@ -88,6 +89,40 @@ func TestProbe_OK_And_Sanitized(t *testing.T) {
 	}
 	if strings.Contains(res.Detail, "super-secret-do-not-leak") {
 		t.Fatalf("detail leaked the resolved secret: %q", res.Detail)
+	}
+}
+
+// TestProbe_AuthHeaderBearerUsesAuthorizationHeader is the end-to-end proof for
+// PR #13 review Finding 2: probing an OpenRouter-style draft provider
+// (type=anthropic, auth_header=bearer) must send Authorization: Bearer, not
+// x-api-key — otherwise the probe always reports "unhealthy" for a live
+// provider, misleading the operator.
+func TestProbe_AuthHeaderBearerUsesAuthorizationHeader(t *testing.T) {
+	t.Setenv("PROBE_OR_KEY", "or-secret-value")
+	var gotAuth, gotAPIKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotAPIKey = r.Header.Get("x-api-key")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer srv.Close()
+
+	host := strings.TrimPrefix(srv.URL, "http://")
+	host = host[:strings.IndexByte(host, ':')]
+	body := `{"type":"anthropic","base_url":"` + srv.URL + `","api_key_ref":{"env":"PROBE_OR_KEY"},"auth_header":"bearer"}`
+	code, res := doProbe(t, ProbeHandler(true, []string{host}), body)
+	if code != http.StatusOK {
+		t.Fatalf("want 200, got %d", code)
+	}
+	if !res.OK {
+		t.Fatalf("want a healthy probe, got %+v", res)
+	}
+	if gotAPIKey != "" {
+		t.Fatalf("bearer mode must not send x-api-key, got %q", gotAPIKey)
+	}
+	if gotAuth != "Bearer or-secret-value" {
+		t.Fatalf("Authorization = %q, want Bearer or-secret-value", gotAuth)
 	}
 }
 
