@@ -261,10 +261,14 @@ func (p *provider) streamConverse(ctx context.Context, req *providers.ProxyReque
 
 		finish := func() {
 			if blockOpen {
+				// Mark closed before emitting: finish is only ever called
+				// once (every call site returns right after), but leaving
+				// blockOpen stale on an early return here — if the consumer
+				// stops iterating mid-emit — is a needless hidden invariant.
+				blockOpen = false
 				if !emit(&schema.ChatChunk{Type: "content_block_stop", Index: &idx}) {
 					return
 				}
-				blockOpen = false
 			}
 			in, out := usageIn, usageOut
 			delta, _ := json.Marshal(map[string]any{"stop_reason": stopReason, "stop_sequence": nil})
@@ -334,12 +338,13 @@ func (p *provider) streamConverse(ctx context.Context, req *providers.ProxyReque
 				}
 			}
 		}
-		// The stream ended without pairing both events (e.g. no Metadata event
-		// at all) — flush a terminal frame anyway so the client isn't left
-		// hanging, with whatever stop reason/usage we did receive (zero usage
-		// if none arrived).
-		if stopReasonSet || usageSet {
-			finish()
-		}
+		// Reaching here means the event channel closed before both
+		// MessageStop and Metadata arrived (e.g. no Metadata event at all, or
+		// — in principle — a clean close with neither). Flush a terminal
+		// frame unconditionally so the client is never left hanging with no
+		// message_delta/message_stop at all; whichever of stop
+		// reason/usage we didn't receive defaults to its zero value, the
+		// same safe default already used for the no-Metadata case.
+		finish()
 	}, nil
 }

@@ -313,6 +313,32 @@ func TestStreamConverseNoMetadata(t *testing.T) {
 	}
 }
 
+func TestStreamConverseNoTerminalEventsAtAll(t *testing.T) {
+	// Neither MessageStop nor Metadata ever arrives (e.g. the upstream event
+	// channel closes cleanly with no terminal event at all). The client must
+	// still get a message_delta/message_stop pair rather than being left
+	// hanging with only message_start + content deltas.
+	fc := &fakeConverser{streamEv: []ConverseStreamEvent{
+		{Kind: eventTextDelta, TextDelta: "hi"},
+	}}
+	p := &provider{conv: fc, modelAPI: map[string]string{"m": "converse"}}
+	seq, err := p.Stream(context.Background(), &providers.ProxyRequest{Model: "m", Upstream: "m", RawBody: []byte(`{"messages":[]}`), Stream: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sse strings.Builder
+	for ev, err := range seq {
+		if err != nil {
+			t.Fatal(err)
+		}
+		sse.WriteString(string(ev.Raw))
+	}
+	s := sse.String()
+	if !strings.Contains(s, "event: message_delta") || !strings.Contains(s, "event: message_stop") {
+		t.Fatalf("expected a terminal frame even with no MessageStop/Metadata at all: %s", s)
+	}
+}
+
 func TestStreamConverseToolUse(t *testing.T) {
 	fc := &fakeConverser{streamEv: []ConverseStreamEvent{
 		{Kind: eventTextDelta, TextDelta: "Sure, let me check."},

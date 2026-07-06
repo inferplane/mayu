@@ -61,7 +61,7 @@ func TestBuildMessagesDropsEmptyBlocksAndMessages(t *testing.T) {
 
 func TestBuildToolConfigOmitsChoiceForAutoAndNone(t *testing.T) {
 	tools := []ConverseTool{{Name: "bash", Description: "run", InputSchema: json.RawMessage(`{"type":"object"}`)}}
-	for _, choiceType := range []string{"", "auto", "none"} {
+	for _, choiceType := range []string{"", "auto"} {
 		cfg := buildToolConfig(tools, ConverseToolChoice{Type: choiceType})
 		if cfg == nil {
 			t.Fatalf("choice %q: expected non-nil config (tools present)", choiceType)
@@ -69,6 +69,17 @@ func TestBuildToolConfigOmitsChoiceForAutoAndNone(t *testing.T) {
 		if cfg.ToolChoice != nil {
 			t.Fatalf("choice %q: expected ToolChoice to stay unset, got %T", choiceType, cfg.ToolChoice)
 		}
+	}
+}
+
+func TestBuildToolConfigNoneOmitsToolConfigEntirely(t *testing.T) {
+	// Bedrock's ToolChoice union has no "forbid tools" member (only
+	// Auto/Any/Tool). "none" must not silently degrade to auto — the closest
+	// faithful behavior is to send no ToolConfig at all, so the model has no
+	// tools to call.
+	tools := []ConverseTool{{Name: "bash", InputSchema: json.RawMessage(`{"type":"object"}`)}}
+	if cfg := buildToolConfig(tools, ConverseToolChoice{Type: "none"}); cfg != nil {
+		t.Fatalf("choice %q: expected ToolConfiguration to be omitted entirely, got %+v", "none", cfg)
 	}
 }
 

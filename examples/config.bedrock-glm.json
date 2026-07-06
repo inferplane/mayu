@@ -23,9 +23,9 @@
       "rate_limit": { "requests_per_minute": 120 }
     }
   },
-  "_comment_pricing": "Without an override, cost for zai.glm-5 settles at 0 microUSD (recorded with missing=true in the audit log) — there is no bundled rate for non-Claude Bedrock models. Fill in real per-million-token USD prices from the Bedrock pricing page to get accurate billing.",
+  "_comment_pricing": "Without an override, cost for zai.glm-5 settles at 0 microUSD (recorded with missing=true in the audit log) — there is no bundled rate for non-Claude Bedrock models. input_per_mtok/output_per_mtok are plain USD-per-million-tokens (converted to integer microUSD internally at settlement) — fill in real prices from the Bedrock pricing page to get accurate billing; 0 here means unpriced, not free.",
   "pricing": {
     "on_missing": "allow",
-    "overrides": { "bedrock-apne1": { "zai.glm-5": { "input_per_mtok": 0.0, "output_per_mtok": 0.0 } } }
+    "overrides": { "bedrock-apne1": { "zai.glm-5": { "input_per_mtok": 0, "output_per_mtok": 0 } } }
   }
 }

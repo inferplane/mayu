@@ -354,11 +354,15 @@ func contentBlocksFromSDK(blocks []brtypes.ContentBlock) []schema.ContentBlock {
 }
 
 // buildToolConfig translates Anthropic tools/tool_choice into a Bedrock
-// ToolConfiguration, or nil when there are no tools. Only "any" and "tool" are
-// forwarded as an explicit ToolChoice — "auto"/"none"/unset are left unset
+// ToolConfiguration, or nil when there are no tools to send. Only "any" and
+// "tool" are forwarded as an explicit ToolChoice — "auto"/unset are left unset
 // (the Bedrock default is auto, and some models reject an explicit choice).
+// "none" (never call a tool) has no equivalent in Bedrock's ToolChoice union
+// (only Auto/Any/Tool — there is no "forbid" member), so the closest faithful
+// behavior is to send no ToolConfig at all: a model that isn't offered any
+// tools can't call one, which is the outcome "none" asks for.
 func buildToolConfig(tools []ConverseTool, choice ConverseToolChoice) *brtypes.ToolConfiguration {
-	if len(tools) == 0 {
+	if len(tools) == 0 || choice.Type == "none" {
 		return nil
 	}
 	cfg := &brtypes.ToolConfiguration{}
