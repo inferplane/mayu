@@ -149,6 +149,9 @@ func TestHealthReflectsCheckpointsAndLease(t *testing.T) {
 	if h.Mode != "B" || h.SegmentsTracked != 0 {
 		t.Fatalf("pre-ingest health = %+v, want Mode=B SegmentsTracked=0", h)
 	}
+	if h.IsLeader {
+		t.Fatal("IsLeader = true with no lease row at all, want false")
+	}
 	epoch, ok, err := tryAcquireLease(ctx, s.db, "holderA", 15*time.Second)
 	if err != nil || !ok {
 		t.Fatalf("tryAcquireLease: ok=%v err=%v", ok, err)

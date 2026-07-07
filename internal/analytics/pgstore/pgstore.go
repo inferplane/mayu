@@ -105,7 +105,7 @@ func (s *Store) Close() error {
 // unlock call would run on a random connection, almost never the one holding
 // the lock, leaving it held until that connection is eventually recycled).
 // Acquire ONE connection and run lock+migration+unlock all through it.
-func (s *Store) ensureSchema(ctx context.Context) error {
+func (s *Store) ensureSchema(ctx context.Context) (retErr error) {
 	conn, err := s.db.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire analytics schema migration connection: %w", err)
@@ -119,11 +119,21 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 	// RESTORED before the connection goes back to the pool (a bare `SET`,
 	// unlike `SET LOCAL`, persists for the connection's whole session —
 	// leaving it disabled would silently defeat the timeout for whichever
-	// later query happens to reuse this same pooled connection).
+	// later query happens to reuse this same pooled connection). The restore
+	// error is NOT swallowed: if it fails, ensureSchema fails too — this
+	// connection cannot be trusted back into the pool with no server-side
+	// time bound, so failing loudly beats returning success blind to that.
+	// `queryTimeout` is a compile-time numeric constant (never user input),
+	// so inlining it into the SQL text is safe — SET's grammar doesn't accept
+	// a bound parameter here the way SELECT/INSERT do.
 	if _, err := conn.Exec(ctx, `SET statement_timeout = 0`); err != nil {
 		return fmt.Errorf("disable timeout for analytics schema migration: %w", err)
 	}
-	defer conn.Exec(ctx, `SET statement_timeout = $1`, queryTimeout)
+	defer func() {
+		if _, err := conn.Exec(ctx, `SET statement_timeout = `+queryTimeout); err != nil && retErr == nil {
+			retErr = fmt.Errorf("restore analytics query timeout: %w", err)
+		}
+	}()
 
 	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, schemaLockKey); err != nil {
 		return fmt.Errorf("lock analytics schema migration: %w", err)
