@@ -267,8 +267,19 @@ type Config struct {
 // already persists audit gets usage analytics out of the box); Disabled turns
 // it off, and Path overrides the derived location.
 type AnalyticsConfig struct {
-	Path     string `json:"path,omitempty"`
-	Disabled bool   `json:"disabled,omitempty"`
+	Path     string          `json:"path,omitempty"`
+	Disabled bool            `json:"disabled,omitempty"`
+	ModeB    *AnalyticsModeB `json:"mode_b,omitempty"`
+}
+
+// AnalyticsModeB configures the shared Postgres analytics store (ADR-015).
+// DSN is the resolved secret and is never accepted from, or written to, JSON.
+type AnalyticsModeB struct {
+	AggregatedAuditDir string     `json:"aggregated_audit_dir"`
+	DSN                string     `json:"-"`
+	DSNRef             *SecretRef `json:"dsn_ref"`
+	PollInterval       string     `json:"poll_interval"`
+	LeaseTTL           string     `json:"lease_ttl"`
 }
 
 // ResolveAnalytics decides whether the analytics index is enabled and at which
@@ -327,6 +338,9 @@ func LoadRaw(path string) (*Config, error) {
 	// a literal "api_key" key is a config error (§7).
 	var probe struct {
 		Providers map[string]map[string]json.RawMessage `json:"providers"`
+		Analytics struct {
+			ModeB map[string]json.RawMessage `json:"mode_b"`
+		} `json:"analytics"`
 	}
 	if err := json.Unmarshal(data, &probe); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
@@ -335,6 +349,9 @@ func LoadRaw(path string) (*Config, error) {
 		if _, bad := p["api_key"]; bad {
 			return nil, fmt.Errorf("config: provider %q has inline api_key; use api_key_ref (§7)", name)
 		}
+	}
+	if _, bad := probe.Analytics.ModeB["dsn"]; bad {
+		return nil, fmt.Errorf("config: analytics.mode_b has inline dsn; use dsn_ref (§7)")
 	}
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
@@ -357,7 +374,47 @@ func LoadRaw(path string) (*Config, error) {
 	if err := validateAnchor(cfg.Audit.Anchor); err != nil {
 		return nil, err
 	}
+	if err := validateAnalyticsModeB(cfg.Analytics.ModeB); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+// validateAnalyticsModeB checks the opt-in shared analytics store block. The
+// Postgres DSN is always referenced and resolved here, never accepted inline.
+func validateAnalyticsModeB(mb *AnalyticsModeB) error {
+	if mb == nil {
+		return nil
+	}
+	if err := ValidateSecretRef(mb.DSNRef); err != nil {
+		return fmt.Errorf("config: analytics.mode_b.dsn_ref: %w", err)
+	}
+	dsn, err := ResolveSecretRef(mb.DSNRef)
+	if err != nil {
+		return fmt.Errorf("config: analytics.mode_b.dsn_ref: %w", err)
+	}
+	mb.DSN = dsn
+	if err := validateDurationString("analytics.mode_b.poll_interval", mb.PollInterval); err != nil {
+		return err
+	}
+	if err := validateDurationString("analytics.mode_b.lease_ttl", mb.LeaseTTL); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateDurationString(name, value string) error {
+	if value == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return fmt.Errorf("config: %s %q: %w", name, value, err)
+	}
+	if d <= 0 {
+		return fmt.Errorf("config: %s must be > 0, got %q", name, value)
+	}
+	return nil
 }
 
 // validateAnchor checks the opt-in audit-anchor block (ADR-012): type must be

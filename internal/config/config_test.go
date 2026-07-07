@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -479,5 +480,73 @@ func TestAnchorBlockParsesAndValidates(t *testing.T) {
 	// bad interval → error
 	if _, err := Load(write("badi.json", `{"audit":{"anchor":{"type":"s3","bucket":"b","interval":"5 minutes"}}}`)); err == nil {
 		t.Fatal("bad interval must be rejected")
+	}
+}
+
+// --- Phase 1b Task 3: analytics.mode_b block (ADR-015 §5) ---
+
+func TestAnalyticsModeBParsesAndValidates(t *testing.T) {
+	dir := t.TempDir()
+	write := func(n, b string) string { p := filepath.Join(dir, n); os.WriteFile(p, []byte(b), 0o600); return p }
+	t.Setenv("INFERPLANE_ANALYTICS_PG_DSN", "postgres://u:p@host/db")
+
+	cfg, err := Load(write("ok.json", `{"analytics":{"mode_b":{
+		"dsn_ref":{"env":"INFERPLANE_ANALYTICS_PG_DSN"},
+		"aggregated_audit_dir":"/mnt/shared/audit-aggregate",
+		"poll_interval":"5s",
+		"lease_ttl":"15s"
+	}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mb := cfg.Analytics.ModeB
+	if mb == nil {
+		t.Fatal("analytics.mode_b not parsed")
+	}
+	if mb.AggregatedAuditDir != "/mnt/shared/audit-aggregate" {
+		t.Fatalf("aggregated_audit_dir = %q", mb.AggregatedAuditDir)
+	}
+	if mb.DSN != "postgres://u:p@host/db" {
+		t.Fatalf("dsn_ref not resolved: %q", mb.DSN)
+	}
+
+	// absent → nil, existing Mode A/off behavior untouched.
+	cfgA, err := Load(write("a.json", `{"audit":{"buffer":{"path":"/x"},"sinks":[{"type":"stdout"}]}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfgA.Analytics.ModeB != nil {
+		t.Fatal("analytics.mode_b should be nil when absent")
+	}
+	path, enabled := ResolveAnalytics(cfgA)
+	if enabled || path != "" {
+		t.Fatalf("ResolveAnalytics with no analytics config = (%q,%v), want off", path, enabled)
+	}
+}
+
+func TestAnalyticsModeBRejectsInlineDSN(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	os.WriteFile(f, []byte(`{"analytics":{"mode_b":{"dsn":"postgres://u:p@host/db","aggregated_audit_dir":"/x"}}}`), 0o600)
+	_, err := Load(f)
+	if err == nil {
+		t.Fatal("inline dsn (not dsn_ref) must be rejected")
+	}
+	if strings.Contains(err.Error(), "postgres://u:p") {
+		t.Fatalf("error must never echo the inline value: %v", err)
+	}
+}
+
+func TestAnalyticsModeBRejectsMalshapedDSNRef(t *testing.T) {
+	dir := t.TempDir()
+	secret := "postgres://real-secret-value"
+	f := filepath.Join(dir, "bad.json")
+	os.WriteFile(f, []byte(`{"analytics":{"mode_b":{"dsn_ref":{"env":"`+secret+`"},"aggregated_audit_dir":"/x"}}}`), 0o600)
+	_, err := Load(f)
+	if err == nil {
+		t.Fatal("a secret-shaped env ref (not a valid env var name) must be rejected")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("error must never echo the ref value: %v", err)
 	}
 }
