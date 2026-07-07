@@ -4,12 +4,12 @@ import "context"
 
 // Health reports Mode A/B freshness for /admin/analytics/health.
 type Health struct {
-	Mode            string // "A" | "B"
-	IsLeader        bool   // Mode A: always true. Mode B: this replica's lease state.
-	LeaseEpoch      int64  // Mode A: 0.
-	LagSeconds      int64  // Mode A: always 0.
-	LastIngestTS    string // RFC3339Nano, "" if never ingested.
-	SegmentsTracked int    // Mode A: 0.
+	Mode            string `json:"mode"`             // "A" | "B"
+	IsLeader        bool   `json:"is_leader"`        // Mode A: always true. Mode B: this replica's lease state.
+	LeaseEpoch      int64  `json:"lease_epoch"`      // Mode A: 0.
+	LagSeconds      int64  `json:"lag_seconds"`      // Mode A: always 0.
+	LastIngestTS    string `json:"last_ingest_ts"`   // RFC3339Nano, "" if never ingested.
+	SegmentsTracked int    `json:"segments_tracked"` // Mode A: 0.
 }
 
 // Store is the query surface analyticsapi depends on. Mode A (local SQLite)
