@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // analyticsModeBTestDSN skips the test if no local test Postgres is configured
@@ -65,7 +67,24 @@ func TestGatewayAnalyticsModeBEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newGateway: %v", err)
 	}
-	// Truncate any state a previous test run left in the shared test Postgres.
+	// Truncate any state a previous test run left in the shared test
+	// Postgres. Rebuild() deliberately does NOT reset lease.holder
+	// (production Rebuild must not strip a live leader's leadership — see
+	// pgstore's own TestRebuildTruncatesAndBumpsEpochWithoutChangingHolder),
+	// so a lease left LIVE and held by a different instanceID from another
+	// package's test run (they share this same real Postgres) would make
+	// this test's own aggregator wait out that lease's full TTL before it
+	// can become leader — reset it directly, same as pgstore_test.go's
+	// newTestStore helper does for its own package's tests.
+	rawDB, err := pgxpool.New(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("pre-test raw connection: %v", err)
+	}
+	if _, err := rawDB.Exec(context.Background(), `DELETE FROM lease`); err != nil {
+		rawDB.Close()
+		t.Fatalf("pre-test lease reset: %v", err)
+	}
+	rawDB.Close()
 	if err := g.pgstoreQ.Rebuild(context.Background()); err != nil {
 		t.Fatalf("pre-test Rebuild: %v", err)
 	}

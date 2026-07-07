@@ -52,9 +52,30 @@ type Store struct {
 var _ analytics.Store = (*Store)(nil)
 var _ analytics.Rebuilder = (*Store)(nil)
 
+// queryTimeout bounds every Mode B query server-side (Postgres
+// statement_timeout) against a SLOW query — a statement that reaches Postgres
+// but runs too long. It does NOT bound network-level unreachability (a
+// partitioned/down DB host hits the OS TCP timeout, ~2 minutes on Linux,
+// before Postgres ever sees the statement); analytics.Store's query methods
+// take no context (matching Mode A's in-process SQLite, which has no
+// analogous risk), so this is the seam available to bound the risk this
+// package's queries CAN hit without widening that shared interface.
+const queryTimeout = "10000" // ms
+
 // New opens a Mode B Postgres store and ensures its schema exists.
 func New(ctx context.Context, dsn string) (*Store, error) {
-	db, err := pgxpool.New(ctx, dsn)
+	// Parse the DSN as its OWN step, deliberately not wrapped with %w: pgx's
+	// own parse-failure error embeds the connection string verbatim (it can
+	// carry a password), and this repo's convention (§7 gate C1) is that a
+	// secret-bearing value never appears in a returned/logged error. A
+	// connection-level failure from a successfully-parsed config (auth,
+	// network, ...) does not embed the DSN, so it's safe to wrap normally.
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, errors.New("open analytics postgres store: invalid dsn (check dsn_ref resolves to a valid postgres:// connection string)")
+	}
+	cfg.ConnConfig.RuntimeParams["statement_timeout"] = queryTimeout
+	db, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("open analytics postgres store: %w", err)
 	}
@@ -84,12 +105,41 @@ func (s *Store) Close() error {
 // unlock call would run on a random connection, almost never the one holding
 // the lock, leaving it held until that connection is eventually recycled).
 // Acquire ONE connection and run lock+migration+unlock all through it.
-func (s *Store) ensureSchema(ctx context.Context) error {
+func (s *Store) ensureSchema(ctx context.Context) (retErr error) {
 	conn, err := s.db.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire analytics schema migration connection: %w", err)
 	}
 	defer conn.Release()
+
+	// The pool-wide statement_timeout (New) would otherwise apply to
+	// pg_advisory_lock too — under a multi-replica startup storm one replica
+	// can legitimately wait longer than that for the lock, so it must be
+	// disabled for this connection's session before locking, and explicitly
+	// RESTORED before the connection goes back to the pool (a bare `SET`,
+	// unlike `SET LOCAL`, persists for the connection's whole session —
+	// leaving it disabled would silently defeat the timeout for whichever
+	// later query happens to reuse this same pooled connection). The restore
+	// error is NOT swallowed: if it fails, ensureSchema fails too — this
+	// connection cannot be trusted back into the pool with no server-side
+	// time bound, so failing loudly beats returning success blind to that.
+	// `queryTimeout` is a compile-time numeric constant (never user input),
+	// so inlining it into the SQL text is safe — SET's grammar doesn't accept
+	// a bound parameter here the way SELECT/INSERT do.
+	if _, err := conn.Exec(ctx, `SET statement_timeout = 0`); err != nil {
+		return fmt.Errorf("disable timeout for analytics schema migration: %w", err)
+	}
+	defer func() {
+		// context.Background(), not ctx: this cleanup must run to completion
+		// regardless of the caller's context — if ctx were cancelled right as
+		// migration finishes (e.g. a concurrent shutdown signal during boot),
+		// using it here would fail the restore with context.Canceled and
+		// ensureSchema would report failure despite the migration itself
+		// having succeeded (same reasoning as Health()'s own queries).
+		if _, err := conn.Exec(context.Background(), `SET statement_timeout = `+queryTimeout); err != nil && retErr == nil {
+			retErr = fmt.Errorf("restore analytics query timeout: %w", err)
+		}
+	}()
 
 	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, schemaLockKey); err != nil {
 		return fmt.Errorf("lock analytics schema migration: %w", err)
@@ -201,15 +251,20 @@ func (s *Store) Health() (analytics.Health, error) {
 	h := analytics.Health{Mode: "B"}
 	ctx := context.Background()
 
+	// is_leader is computed IN SQL (expires_at > now()) rather than comparing
+	// the DB's TIMESTAMPTZ against the app's time.Now() — PR review: comparing
+	// across the two clocks is exactly the caller-clock-vs-DB-clock mismatch
+	// ADR-015 §3 round-2 already fixed for lease acquire/renew; doing it here
+	// too keeps every liveness decision on the database's single clock.
 	var holder string
-	var expiresAt time.Time
-	err := s.db.QueryRow(ctx, `SELECT holder, epoch, expires_at FROM lease WHERE id=$1`, leaseID).
-		Scan(&holder, &h.LeaseEpoch, &expiresAt)
+	var isLive bool
+	err := s.db.QueryRow(ctx, `SELECT holder, epoch, expires_at > now() FROM lease WHERE id=$1`, leaseID).
+		Scan(&holder, &h.LeaseEpoch, &isLive)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return h, fmt.Errorf("query analytics lease health: %w", err)
 	}
 	if err == nil {
-		h.IsLeader = holder != "" && holder == s.instanceID && time.Now().Before(expiresAt)
+		h.IsLeader = holder != "" && holder == s.instanceID && isLive
 	}
 
 	var last *time.Time
@@ -308,19 +363,18 @@ func (s *Store) ingestBatch(ctx context.Context, holder string, epoch int64, rec
 	return nil
 }
 
+// fenceIngest requires an EXISTING lease row matching holder+epoch —
+// tryAcquireLease is the only place a lease row is ever created (using the
+// real configured TTL); fenceIngest bootstrapping its own row on ErrNoRows
+// (as an earlier version did, with a hardcoded TTL that ignored config) was
+// dead in the real aggregator flow (tick always calls tryAcquireLease first)
+// and just risked drifting from tryAcquireLease's own TTL handling — removed
+// rather than fixed, since there was nothing this path legitimately needed
+// to do beyond what tryAcquireLease already does.
 func fenceIngest(ctx context.Context, tx pgx.Tx, holder string, epoch int64) error {
 	var got int64
 	err := tx.QueryRow(ctx, `SELECT epoch FROM lease WHERE id=$1 AND holder=$2 FOR UPDATE`, leaseID, holder).Scan(&got)
 	if errors.Is(err, pgx.ErrNoRows) {
-		tag, insertErr := tx.Exec(ctx, `INSERT INTO lease(id, holder, epoch, expires_at)
-			VALUES($1, $2, $3, now() + (15 * interval '1 second'))
-			ON CONFLICT (id) DO NOTHING`, leaseID, holder, epoch)
-		if insertErr != nil {
-			return fmt.Errorf("bootstrap analytics lease: %w", insertErr)
-		}
-		if tag.RowsAffected() == 1 {
-			return nil
-		}
 		return errFenced
 	}
 	if err != nil {
