@@ -348,6 +348,7 @@ Steps:
 
 - Modify: `internal/server/analyticsapi/analyticsapi.go`
 - Modify: `internal/server/server.go`
+- Modify: `internal/server/server_test.go`
 - Test: `internal/server/analyticsapi/analyticsapi_test.go`
 
 Steps:

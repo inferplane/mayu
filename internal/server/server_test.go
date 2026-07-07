@@ -426,3 +426,6 @@ func (analyticsStubQ) Summary(analytics.SummaryQuery) (analytics.Summary, error)
 func (analyticsStubQ) TimeSeries(analytics.TimeSeriesQuery) ([]analytics.DayPoint, error) {
 	return []analytics.DayPoint{}, nil
 }
+func (analyticsStubQ) Health() (analytics.Health, error) {
+	return analytics.Health{Mode: "A", IsLeader: true}, nil
+}
