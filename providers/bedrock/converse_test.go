@@ -93,6 +93,24 @@ func TestToConverseRequestSkipsOversizedToolNames(t *testing.T) {
 	}
 }
 
+func TestToConverseRequestSkipsInvalidCharsetToolNames(t *testing.T) {
+	// Bedrock's ToolSpecification.Name only allows [a-zA-Z][a-zA-Z0-9_]* — no
+	// hyphens, dots, or colons. Claude Code / MCP tool names commonly contain
+	// hyphens (e.g. an MCP-qualified name), which is well within the 64-char
+	// limit but still rejected by Bedrock with a ValidationException.
+	raw := []byte(`{"messages":[{"role":"user","content":"hi"}],"tools":[
+		{"name":"bash","input_schema":{"type":"object"}},
+		{"name":"mcp__aws-sdk-v3__getObject","input_schema":{"type":"object"}}
+	]}`)
+	cr, err := toConverseRequest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cr.Tools) != 1 || cr.Tools[0].Name != "bash" {
+		t.Fatalf("expected the hyphenated tool name to be dropped, got %+v", cr.Tools)
+	}
+}
+
 func TestToConverseRequestClearsToolChoicePointingAtDroppedTool(t *testing.T) {
 	// tool_choice pins a tool that gets dropped for being oversized — Bedrock
 	// rejects a SpecificToolChoice referencing a tool absent from the tool
@@ -336,6 +354,38 @@ func TestStreamConverseNoTerminalEventsAtAll(t *testing.T) {
 	s := sse.String()
 	if !strings.Contains(s, "event: message_delta") || !strings.Contains(s, "event: message_stop") {
 		t.Fatalf("expected a terminal frame even with no MessageStop/Metadata at all: %s", s)
+	}
+}
+
+func TestStreamConverseDiscardsOrphanedToolInputDelta(t *testing.T) {
+	// A malformed/truncated upstream stream can send a tool-input delta before
+	// any ToolUseStart (or text delta) has opened a block, leaving idx at its
+	// initial -1. Emitting content_block_delta with index:-1 would hand the
+	// client an invalid SSE frame; the orphaned delta must be discarded
+	// instead, and the rest of the stream still terminates cleanly.
+	fc := &fakeConverser{streamEv: []ConverseStreamEvent{
+		{Kind: eventToolInputDelta, ToolDelta: `{"cmd":"ls"}`},
+		{Kind: eventMessageStop, StopReason: "end_turn"},
+		{Kind: eventUsage, InputTokens: 1, OutputTokens: 1},
+	}}
+	p := &provider{conv: fc, modelAPI: map[string]string{"m": "converse"}}
+	seq, err := p.Stream(context.Background(), &providers.ProxyRequest{Model: "m", Upstream: "m", RawBody: []byte(`{"messages":[]}`), Stream: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sse strings.Builder
+	for ev, err := range seq {
+		if err != nil {
+			t.Fatal(err)
+		}
+		sse.WriteString(string(ev.Raw))
+	}
+	s := sse.String()
+	if strings.Contains(s, `"index":-1`) {
+		t.Fatalf("orphaned tool-input delta must be discarded, not emitted with index:-1: %s", s)
+	}
+	if !strings.Contains(s, "event: message_delta") || !strings.Contains(s, "event: message_stop") {
+		t.Fatalf("expected the stream to still terminate cleanly: %s", s)
 	}
 }
 

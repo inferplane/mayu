@@ -100,6 +100,13 @@ func TestBuildToolConfigNoTools(t *testing.T) {
 	if cfg := buildToolConfig(nil, ConverseToolChoice{}); cfg != nil {
 		t.Fatalf("expected nil ToolConfiguration when there are no tools, got %+v", cfg)
 	}
+	// Same "no tools" path must hold even when tool_choice is "any": if every
+	// tool got dropped upstream (parseTools), sending ToolChoiceMemberAny
+	// against an empty tool list is a Bedrock ValidationException. The
+	// len(tools)==0 guard must win regardless of choice type.
+	if cfg := buildToolConfig(nil, ConverseToolChoice{Type: "any"}); cfg != nil {
+		t.Fatalf("expected nil ToolConfiguration for tool_choice=any with no tools, got %+v", cfg)
+	}
 }
 
 func TestToolResultTextFlattensStringAndBlockArray(t *testing.T) {

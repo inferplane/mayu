@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
+	"regexp"
 	"strings"
 
 	"github.com/inferplane/inferplane/pkg/schema"
@@ -73,7 +74,8 @@ func toConverseRequest(raw []byte) (ConverseRequest, error) {
 }
 
 // resolveToolChoice drops a "tool" choice that points at a tool parseTools
-// already dropped (schema-less, empty-named, or over bedrockToolNameMax) —
+// already dropped (schema-less, empty-named, over bedrockToolNameMax, or an
+// invalid-charset name) —
 // otherwise buildToolConfig would send Bedrock a SpecificToolChoice for a
 // tool absent from the tool list, which Bedrock rejects with a
 // ValidationException. Falling back to the zero value leaves ToolChoice
@@ -151,11 +153,21 @@ func messageBlocks(m schema.Message) []schema.ContentBlock {
 // model loses that one capability instead of the whole request failing.
 const bedrockToolNameMax = 64
 
+// bedrockToolNameRE is Bedrock's ToolSpecification.Name charset: it must start
+// with a letter and contain only letters, digits, and underscores — no
+// hyphens, dots, colons, or spaces. Claude Code / MCP tool names routinely
+// contain hyphens (e.g. "mcp__aws-sdk-v3__getObject"), which pass every other
+// check here but make Bedrock reject the WHOLE request with a
+// ValidationException. Same drop-and-continue trade-off as the oversized-name
+// case below.
+var bedrockToolNameRE = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]*$`)
+
 // parseTools decodes Anthropic's "tools" array into Bedrock-shaped tool specs,
 // skipping any tool Bedrock would reject outright: no input_schema (server-tool
-// shorthands like computer use can't be expressed as a ToolSpec), an empty or
-// over-length name, or a JSON "null" input_schema. A dropped tool's tool_choice
-// reference is cleaned up separately by resolveToolChoice.
+// shorthands like computer use can't be expressed as a ToolSpec), an empty,
+// over-length, or invalid-charset name, or a JSON "null" input_schema. A
+// dropped tool's tool_choice reference is cleaned up separately by
+// resolveToolChoice.
 func parseTools(raw json.RawMessage) []ConverseTool {
 	if len(raw) == 0 {
 		return nil
@@ -171,11 +183,12 @@ func parseTools(raw json.RawMessage) []ConverseTool {
 	var out []ConverseTool
 	for _, t := range tools {
 		// Bedrock's ToolSpecification.Name/InputSchema are both required and
-		// non-null: an empty name, a missing input_schema, or a JSON "null"
-		// input_schema (still 4 bytes, so a bare len==0 check misses it) all
-		// produce a ValidationException — skip the tool rather than send one
-		// Bedrock will reject.
-		if t.Name == "" || len(t.Name) > bedrockToolNameMax || len(t.InputSchema) == 0 || string(t.InputSchema) == "null" {
+		// non-null: an empty name, a name over the length or charset limit, a
+		// missing input_schema, or a JSON "null" input_schema (still 4 bytes,
+		// so a bare len==0 check misses it) all produce a ValidationException
+		// — skip the tool rather than send one Bedrock will reject.
+		if t.Name == "" || len(t.Name) > bedrockToolNameMax || !bedrockToolNameRE.MatchString(t.Name) ||
+			len(t.InputSchema) == 0 || string(t.InputSchema) == "null" {
 			continue
 		}
 		out = append(out, ConverseTool{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema})
@@ -267,6 +280,15 @@ func (p *provider) streamConverse(ctx context.Context, req *providers.ProxyReque
 				// stops iterating mid-emit — is a needless hidden invariant.
 				blockOpen = false
 				if !emit(&schema.ChatChunk{Type: "content_block_stop", Index: &idx}) {
+					// Cannot fall through to message_delta/message_stop here:
+					// emit's false means yield already returned false once,
+					// and Go's range-over-func contract panics if the loop
+					// body calls yield again afterward ("range function
+					// continued iteration after function for loop body
+					// returned false"). A consumer that stopped mid-stream
+					// gets NO further frames from this or any other
+					// provider — this is the iterator protocol, not a gap
+					// specific to usage settlement. Nothing to do but return.
 					return
 				}
 			}
@@ -311,6 +333,13 @@ func (p *provider) streamConverse(ctx context.Context, req *providers.ProxyReque
 					return
 				}
 			case eventToolInputDelta:
+				if idx < 0 {
+					// A tool-input delta before any ToolUseStart/text block has
+					// opened one — malformed/truncated upstream stream. Emitting
+					// content_block_delta with index:-1 would hand the client an
+					// invalid SSE frame; discard the orphaned delta instead.
+					continue
+				}
 				delta, _ := json.Marshal(map[string]any{"type": "input_json_delta", "partial_json": e.ToolDelta})
 				if !emit(&schema.ChatChunk{Type: "content_block_delta", Index: &idx, Delta: delta}) {
 					return

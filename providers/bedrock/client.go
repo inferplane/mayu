@@ -329,6 +329,12 @@ func toolResultText(raw json.RawMessage) string {
 			return out
 		}
 	}
+	// Any other JSON shape (e.g. an object like {"output":"x"}) falls through
+	// here and the raw bytes — braces included — become the block's text
+	// verbatim. Intentional: Anthropic's tool_result.content is documented as
+	// string or block array only, so this is an edge case, but it's a silent
+	// fallthrough — keep it, don't "fix" it into an implicit re-encode that
+	// could diverge from the string/array paths above.
 	return string(raw)
 }
 
