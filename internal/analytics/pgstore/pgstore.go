@@ -130,7 +130,13 @@ func (s *Store) ensureSchema(ctx context.Context) (retErr error) {
 		return fmt.Errorf("disable timeout for analytics schema migration: %w", err)
 	}
 	defer func() {
-		if _, err := conn.Exec(ctx, `SET statement_timeout = `+queryTimeout); err != nil && retErr == nil {
+		// context.Background(), not ctx: this cleanup must run to completion
+		// regardless of the caller's context — if ctx were cancelled right as
+		// migration finishes (e.g. a concurrent shutdown signal during boot),
+		// using it here would fail the restore with context.Canceled and
+		// ensureSchema would report failure despite the migration itself
+		// having succeeded (same reasoning as Health()'s own queries).
+		if _, err := conn.Exec(context.Background(), `SET statement_timeout = `+queryTimeout); err != nil && retErr == nil {
 			retErr = fmt.Errorf("restore analytics query timeout: %w", err)
 		}
 	}()
