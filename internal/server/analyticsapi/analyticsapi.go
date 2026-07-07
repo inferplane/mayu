@@ -14,10 +14,11 @@ import (
 	"github.com/inferplane/inferplane/internal/analytics"
 )
 
-// Querier is satisfied structurally by *analytics.Index.
+// Querier is satisfied structurally by *analytics.Index and *pgstore.Store.
 type Querier interface {
 	Summary(analytics.SummaryQuery) (analytics.Summary, error)
 	TimeSeries(analytics.TimeSeriesQuery) ([]analytics.DayPoint, error)
+	Health() (analytics.Health, error)
 }
 
 const dayLayout = "2006-01-02"
@@ -100,5 +101,48 @@ func TimeSeriesHandler(q Querier) http.Handler {
 			return
 		}
 		writeJSON(w, out)
+	})
+}
+
+// HealthHandler serves /admin/analytics/health (ADR-015 §4) — the querier's
+// own Health(), same for Mode A and Mode B.
+func HealthHandler(q Querier) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h, err := q.Health()
+		if err != nil {
+			http.Error(w, "analytics health query failed", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, h)
+	})
+}
+
+// RebuildHandler serves POST /admin/analytics/rebuild (ADR-015 §6) —
+// operator-triggered recovery. Only a Querier that also implements
+// analytics.Rebuilder supports this (Mode B; Mode A's *analytics.Index does
+// not) — a runtime type assertion, not an interface requirement on Querier,
+// so Mode A needs no no-op Rebuild method.
+func RebuildHandler(q Querier) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		rb, ok := q.(analytics.Rebuilder)
+		if !ok {
+			http.Error(w, "rebuild not supported (analytics mode has no rebuild operation)", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := rb.Rebuild(r.Context()); err != nil {
+			http.Error(w, "rebuild failed", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	})
 }

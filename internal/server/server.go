@@ -109,6 +109,10 @@ func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier,
 			requireAdmin(analyticsapi.SummaryHandler(analyticsQ), emit)))
 		mux.Handle("GET /admin/analytics/timeseries", AdminAuth(adminTokens, verifier, mapping, denied,
 			requireAdmin(analyticsapi.TimeSeriesHandler(analyticsQ), emit)))
+		mux.Handle("GET /admin/analytics/health", AdminAuth(adminTokens, verifier, mapping, denied,
+			requireAdmin(analyticsapi.HealthHandler(analyticsQ), emit)))
+		mux.Handle("POST /admin/analytics/rebuild", AdminAuth(adminTokens, verifier, mapping, denied,
+			requireAdmin(analyticsapi.RebuildHandler(analyticsQ), emit)))
 	}
 	// UI-write provider/model registration (ADR-008), behind the same AdminAuth.
 	// writer is nil when no provider store is configured → every write returns

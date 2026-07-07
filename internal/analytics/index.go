@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sync"
+	"time"
 
 	"github.com/inferplane/inferplane/internal/audit"
 
@@ -36,7 +38,12 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_day ON events(day);
 CREATE INDEX IF NOT EXISTS events_team ON events(team);`
 
-type Index struct{ db *sql.DB }
+type Index struct {
+	db *sql.DB
+
+	mu         sync.Mutex
+	lastIngest time.Time
+}
 
 func OpenSQLite(path string) (*Index, error) {
 	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
@@ -57,24 +64,30 @@ func OpenSQLite(path string) (*Index, error) {
 
 func (ix *Index) Close() error { return ix.db.Close() }
 
-// billable mirrors cmd/inferplane/report.go: only settled completed records.
-func billable(r audit.Record) bool { return r.Event == "request_completed" && r.Cost != nil }
+// Billable mirrors cmd/inferplane/report.go: only settled completed records.
+func Billable(r audit.Record) bool { return r.Event == "request_completed" && r.Cost != nil }
 
-func modelOf(r audit.Record) string {
+// ModelOf returns the resolved model when available, falling back to the
+// requested model.
+func ModelOf(r audit.Record) string {
 	if r.Request.ModelResolved != "" {
 		return r.Request.ModelResolved
 	}
 	return r.Request.ModelRequested
 }
 
-// dayOf extracts the UTC YYYY-MM-DD prefix from an RFC3339(Nano) timestamp.
+// DayOf extracts the UTC YYYY-MM-DD prefix from an RFC3339(Nano) timestamp.
 // The audit TS is already UTC (RFC3339Nano), so a prefix is correct and cheap.
-func dayOf(ts string) string {
+func DayOf(ts string) string {
 	if len(ts) >= 10 {
 		return ts[:10]
 	}
 	return ""
 }
+
+func billable(r audit.Record) bool  { return Billable(r) }
+func modelOf(r audit.Record) string { return ModelOf(r) }
+func dayOf(ts string) string        { return DayOf(ts) }
 
 // execer is satisfied by both *sql.DB and *sql.Tx, so Ingest can run either on
 // the live DB (one autocommit per record) or batched inside a Replay tx.
@@ -83,7 +96,7 @@ type execer interface {
 }
 
 func ingest(e execer, r audit.Record) error {
-	if !billable(r) {
+	if !Billable(r) {
 		return nil
 	}
 	var in, out, cacheRead, cacheCreate int64
@@ -98,14 +111,47 @@ func ingest(e execer, r audit.Record) error {
 	_, err := e.Exec(
 		`INSERT OR IGNORE INTO events(id,day,team,model,provider,status,input_tokens,output_tokens,cache_read,cache_creation,cost_micros)
 		 VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-		r.ID, dayOf(r.TS), r.Principal.Team, modelOf(r), r.Request.Provider, status,
+		r.ID, DayOf(r.TS), r.Principal.Team, ModelOf(r), r.Request.Provider, status,
 		in, out, cacheRead, cacheCreate, r.Cost.AmountUSDMicros)
 	return err
 }
 
 // Ingest upserts one billable record; non-billable records are ignored. PK=ULID
 // with INSERT OR IGNORE makes re-ingestion of the same record a no-op.
-func (ix *Index) Ingest(r audit.Record) error { return ingest(ix.db, r) }
+func (ix *Index) Ingest(r audit.Record) error {
+	if err := ingest(ix.db, r); err != nil {
+		return err
+	}
+	if Billable(r) {
+		ix.markIngest(time.Now().UTC())
+	}
+	return nil
+}
+
+func (ix *Index) markIngest(t time.Time) {
+	ix.mu.Lock()
+	ix.lastIngest = t
+	ix.mu.Unlock()
+}
+
+// Health reports Mode A freshness for /admin/analytics/health.
+func (ix *Index) Health() (Health, error) {
+	ix.mu.Lock()
+	lastIngest := ix.lastIngest
+	ix.mu.Unlock()
+
+	h := Health{
+		Mode:            "A",
+		IsLeader:        true,
+		LeaseEpoch:      0,
+		LagSeconds:      0,
+		SegmentsTracked: 0,
+	}
+	if !lastIngest.IsZero() {
+		h.LastIngestTS = lastIngest.Format(time.RFC3339Nano)
+	}
+	return h, nil
+}
 
 // Replay scans a JSONL audit stream and ingests every billable, newline-
 // terminated line inside ONE transaction (so a large boot replay does not pay
@@ -127,7 +173,7 @@ func (ix *Index) Replay(r io.Reader) (int, error) {
 		line, readErr := br.ReadString('\n')
 		if len(line) > 0 && line[len(line)-1] == '\n' { // complete line only
 			var rec audit.Record
-			if json.Unmarshal([]byte(line), &rec) == nil && billable(rec) {
+			if json.Unmarshal([]byte(line), &rec) == nil && Billable(rec) {
 				if e := ingest(tx, rec); e != nil {
 					return n, e
 				}
@@ -138,7 +184,13 @@ func (ix *Index) Replay(r io.Reader) (int, error) {
 			break
 		}
 	}
-	return n, tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return n, err
+	}
+	if n > 0 {
+		ix.markIngest(time.Now().UTC())
+	}
+	return n, nil
 }
 
 // SummaryQuery bounds the aggregate by inclusive UTC day (YYYY-MM-DD); empty =
