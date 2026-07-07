@@ -22,6 +22,7 @@ func init() { providers.Register("anthropic", factory) }
 type provider struct {
 	baseURL string
 	apiKey  string
+	bearer  bool // Settings["auth_header"]=="bearer": Authorization: Bearer instead of x-api-key
 	client  *http.Client
 }
 
@@ -34,7 +35,7 @@ func factory(cfg providers.Config) (providers.Provider, error) {
 	if client == nil {
 		client = &http.Client{}
 	}
-	return &provider{baseURL: base, apiKey: cfg.APIKey, client: client}, nil
+	return &provider{baseURL: base, apiKey: cfg.APIKey, bearer: cfg.Settings["auth_header"] == "bearer", client: client}, nil
 }
 
 func (p *provider) Name() string { return "anthropic" }
@@ -54,7 +55,12 @@ func (p *provider) buildUpstream(ctx context.Context, path string, req *provider
 	if u.Header.Get("Content-Type") == "" {
 		u.Header.Set("Content-Type", "application/json")
 	}
-	u.Header.Set("x-api-key", p.apiKey) // gateway's credential, never the client's
+	// gateway's credential, never the client's — header choice per auth_header.
+	if p.bearer {
+		u.Header.Set("Authorization", "Bearer "+p.apiKey)
+	} else {
+		u.Header.Set("x-api-key", p.apiKey)
+	}
 	return u, nil
 }
 

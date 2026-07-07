@@ -48,6 +48,29 @@ func TestCompleteForwardsRawBodyAndParsesUsage(t *testing.T) {
 	}
 }
 
+func TestBearerAuthHeaderSetting(t *testing.T) {
+	var gotAPIKey, gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAPIKey = r.Header.Get("x-api-key")
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"type":"message","role":"assistant","model":"m","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+
+	p, _ := factory(providers.Config{Type: "anthropic", BaseURL: upstream.URL, APIKey: "sk-or", Settings: map[string]string{"auth_header": "bearer"}})
+	_, err := p.Complete(context.Background(), &providers.ProxyRequest{RawBody: []byte(`{}`), Headers: http.Header{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotAPIKey != "" {
+		t.Fatalf("x-api-key should be unset in bearer mode, got %q", gotAPIKey)
+	}
+	if gotAuth != "Bearer sk-or" {
+		t.Fatalf("Authorization = %q, want Bearer sk-or", gotAuth)
+	}
+}
+
 func TestStreamTeesRawAndObservesUsage(t *testing.T) {
 	sse := "event: message_start\ndata: {\"type\":\"message_start\"}\n\n" +
 		"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":4,\"output_tokens\":9}}\n\n" +

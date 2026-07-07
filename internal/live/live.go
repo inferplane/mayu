@@ -174,6 +174,9 @@ func BuildState(cfg *config.Config) (*State, map[string]string, error) {
 	identities := make(map[string]string, len(cfg.Providers))
 	for name, pc := range cfg.Providers {
 		var settings map[string]string
+		if pc.Type == "anthropic" && pc.AuthHeader != "" {
+			settings = map[string]string{"auth_header": pc.AuthHeader}
+		}
 		if pc.Type == "bedrock" {
 			settings = map[string]string{
 				"region":    pc.Region,

@@ -24,7 +24,15 @@ func (p *provider) HealthCheck(ctx context.Context) providers.HealthResult {
 	if err != nil {
 		return providers.HealthResult{OK: false, Detail: "could not build probe request"}
 	}
-	req.Header.Set("x-api-key", p.apiKey) // gateway's credential, never echoed back
+	// Same header choice as buildUpstream (anthropic.go) — a bearer-configured
+	// provider (e.g. OpenRouter) that always got probed with x-api-key would
+	// always report unhealthy (401), the exact false-negative Finding 2 (PR
+	// #13 review) warned about, one layer below where it pointed.
+	if p.bearer {
+		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+	} else {
+		req.Header.Set("x-api-key", p.apiKey) // gateway's credential, never echoed back
+	}
 	req.Header.Set("anthropic-version", anthropicVersion)
 
 	resp, err := p.client.Do(req)

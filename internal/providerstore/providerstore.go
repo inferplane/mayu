@@ -35,6 +35,9 @@ type ProviderRow struct {
 	AuthProfile   string
 	APIKeyRefEnv  string
 	APIKeyRefFile string
+	// AuthHeader selects the anthropic provider's credential header
+	// ("x-api-key" default, "bearer") — see config.ProviderConfig.AuthHeader.
+	AuthHeader string
 }
 
 // Target is one entry in a model's ordered fallback chain. It mirrors

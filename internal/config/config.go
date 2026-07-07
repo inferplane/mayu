@@ -68,6 +68,10 @@ type ProviderConfig struct {
 		Mode    string `json:"mode"`
 		Profile string `json:"profile,omitempty"`
 	} `json:"auth,omitempty"`
+	// AuthHeader selects how the anthropic provider sends its credential:
+	// "x-api-key" (default, api.anthropic.com) or "bearer" (Anthropic-compatible
+	// endpoints such as OpenRouter that expect Authorization: Bearer).
+	AuthHeader string `json:"auth_header,omitempty"`
 }
 
 type Target struct {
@@ -417,6 +421,19 @@ func ResolveProviders(cfg *Config) error {
 			return fmt.Errorf("config: provider %q secret: %w", name, err)
 		}
 		p.APIKey = secret
+		if p.AuthHeader != "" {
+			// auth_header only has an effect on the anthropic provider
+			// (live.go only injects it into Settings for type=="anthropic");
+			// on any other type it would validate but silently do nothing —
+			// reject it outright instead of letting an operator believe it
+			// took effect.
+			if p.Type != "anthropic" {
+				return fmt.Errorf("config: provider %q auth_header is only meaningful for type \"anthropic\", got type %q", name, p.Type)
+			}
+			if p.AuthHeader != "x-api-key" && p.AuthHeader != "bearer" {
+				return fmt.Errorf("config: provider %q auth_header must be \"x-api-key\" or \"bearer\", got %q", name, p.AuthHeader)
+			}
+		}
 		cfg.Providers[name] = p
 	}
 	return nil

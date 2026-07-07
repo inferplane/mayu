@@ -1,0 +1,34 @@
+{
+  "server": {
+    "listen": ":8080", "admin_listen": ":9090", "drain_grace": "10s",
+    "admin_auth": { "token_refs": [ { "env": "INFERPLANE_ADMIN_TOKEN" } ] }
+  },
+  "key_store": { "type": "sqlite", "path": "/var/lib/inferplane/keys.db" },
+  "audit": {
+    "failure_mode": "buffer_then_block",
+    "buffer": { "path": "/var/lib/inferplane/audit.wal" },
+    "sinks": [ { "type": "stdout" }, { "type": "file", "path": "/var/lib/inferplane/audit.jsonl" } ]
+  },
+  "_comment_openrouter": "OpenRouter's /v1/messages endpoint speaks the Anthropic protocol verbatim (same wire as api.anthropic.com), so this is the plain 'anthropic' provider type pointed at a different base_url — no conversion, tool calls and streaming pass through unchanged. auth_header:\"bearer\" is required because OpenRouter expects Authorization: Bearer, not x-api-key.",
+  "providers": {
+    "openrouter": {
+      "type": "anthropic",
+      "base_url": "https://openrouter.ai/api",
+      "api_key_ref": { "env": "OPENROUTER_API_KEY" },
+      "auth_header": "bearer"
+    }
+  },
+  "_comment_models": "Client-facing model name (the map key) must be the exact OpenRouter model slug, because the anthropic provider forwards the request body verbatim and never rewrites the top-level \"model\" field. Verify current slugs at openrouter.ai/models before use.",
+  "models": {
+    "deepseek/deepseek-chat":  { "targets": [ { "provider": "openrouter", "model": "deepseek/deepseek-chat" } ] },
+    "z-ai/glm-4.6":            { "targets": [ { "provider": "openrouter", "model": "z-ai/glm-4.6" } ] },
+    "qwen/qwen3-coder":        { "targets": [ { "provider": "openrouter", "model": "qwen/qwen3-coder" } ] },
+    "moonshotai/kimi-k2":      { "targets": [ { "provider": "openrouter", "model": "moonshotai/kimi-k2" } ] }
+  },
+  "teams": {
+    "demo": {
+      "allowed_models": [ "deepseek/deepseek-chat", "z-ai/glm-4.6", "qwen/qwen3-coder", "moonshotai/kimi-k2" ],
+      "rate_limit": { "requests_per_minute": 120 }
+    }
+  }
+}
