@@ -55,7 +55,7 @@ func TestGatewayAnalyticsModeBEndToEnd(t *testing.T) {
 			"mode_b": map[string]any{
 				"dsn_ref":              map[string]any{"env": "E2E_MODE_B_PG_DSN"},
 				"aggregated_audit_dir": auditDir,
-				"poll_interval":        "200ms",
+				"poll_interval":        "1s",
 				"lease_ttl":            "5s",
 			},
 		}

@@ -39,7 +39,9 @@ CREATE TABLE IF NOT EXISTS rollup_day (
   input_tokens BIGINT NOT NULL DEFAULT 0, output_tokens BIGINT NOT NULL DEFAULT 0,
   cost_micros BIGINT NOT NULL DEFAULT 0, request_count BIGINT NOT NULL DEFAULT 0,
   PRIMARY KEY (day, team, model)
-);`
+);
+ALTER TABLE rollup_day ADD COLUMN IF NOT EXISTS cache_read BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE rollup_day ADD COLUMN IF NOT EXISTS cache_creation BIGINT NOT NULL DEFAULT 0;`
 
 // Store implements analytics.Store against a shared Postgres database.
 type Store struct {
@@ -74,13 +76,27 @@ func (s *Store) Close() error {
 	return nil
 }
 
+// ensureSchema serializes migration across replicas via a Postgres session-
+// level advisory lock. pg_advisory_lock/unlock are tied to the SPECIFIC
+// connection that acquired them — pgxpool.Exec/Begin each independently check
+// out a (possibly different) pooled connection, so calling lock/tx/unlock as
+// three separate pool operations does NOT actually serialize anything (the
+// unlock call would run on a random connection, almost never the one holding
+// the lock, leaving it held until that connection is eventually recycled).
+// Acquire ONE connection and run lock+migration+unlock all through it.
 func (s *Store) ensureSchema(ctx context.Context) error {
-	if _, err := s.db.Exec(ctx, `SELECT pg_advisory_lock($1)`, schemaLockKey); err != nil {
+	conn, err := s.db.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire analytics schema migration connection: %w", err)
+	}
+	defer conn.Release()
+
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, schemaLockKey); err != nil {
 		return fmt.Errorf("lock analytics schema migration: %w", err)
 	}
-	defer s.db.Exec(ctx, `SELECT pg_advisory_unlock($1)`, schemaLockKey)
+	defer conn.Exec(ctx, `SELECT pg_advisory_unlock($1)`, schemaLockKey)
 
-	tx, err := s.db.Begin(ctx)
+	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin analytics schema migration: %w", err)
 	}
@@ -100,9 +116,11 @@ func (s *Store) Summary(q analytics.SummaryQuery) (analytics.Summary, error) {
 	where, args := pgDayWhere(q.SinceDay, q.UntilDay)
 
 	row := s.db.QueryRow(context.Background(), `SELECT COALESCE(SUM(request_count),0),
-		COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(cost_micros),0)
+		COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+		COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_creation),0), COALESCE(SUM(cost_micros),0)
 		FROM rollup_day WHERE 1=1`+where, args...)
-	if err := row.Scan(&out.Totals.Requests, &out.Totals.InputTokens, &out.Totals.OutputTokens, &out.Totals.CostMicros); err != nil {
+	if err := row.Scan(&out.Totals.Requests, &out.Totals.InputTokens, &out.Totals.OutputTokens,
+		&out.Totals.CacheReadTokens, &out.Totals.CacheCreationTokens, &out.Totals.CostMicros); err != nil {
 		return out, fmt.Errorf("query analytics summary totals: %w", err)
 	}
 
@@ -183,17 +201,14 @@ func (s *Store) Health() (analytics.Health, error) {
 	h := analytics.Health{Mode: "B"}
 	ctx := context.Background()
 
+	var holder string
 	var expiresAt time.Time
 	err := s.db.QueryRow(ctx, `SELECT holder, epoch, expires_at FROM lease WHERE id=$1`, leaseID).
-		Scan(new(string), &h.LeaseEpoch, &expiresAt)
+		Scan(&holder, &h.LeaseEpoch, &expiresAt)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return h, fmt.Errorf("query analytics lease health: %w", err)
 	}
-	if err == nil && !expiresAt.IsZero() {
-		var holder string
-		if err := s.db.QueryRow(ctx, `SELECT holder FROM lease WHERE id=$1`, leaseID).Scan(&holder); err != nil {
-			return h, fmt.Errorf("query analytics lease holder: %w", err)
-		}
+	if err == nil {
 		h.IsLeader = holder != "" && holder == s.instanceID && time.Now().Before(expiresAt)
 	}
 
@@ -346,8 +361,9 @@ func upsertEvent(ctx context.Context, tx pgx.Tx, r audit.Record, key rollupKey) 
 }
 
 func recomputeRollup(ctx context.Context, tx pgx.Tx, key rollupKey) error {
-	_, err := tx.Exec(ctx, `INSERT INTO rollup_day(day, team, model, input_tokens, output_tokens, cost_micros, request_count)
+	_, err := tx.Exec(ctx, `INSERT INTO rollup_day(day, team, model, input_tokens, output_tokens, cache_read, cache_creation, cost_micros, request_count)
 		SELECT day, team, model, COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+			COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_creation),0),
 			COALESCE(SUM(cost_micros),0), COUNT(*)
 		FROM events
 		WHERE day=$1 AND team=$2 AND model=$3
@@ -355,6 +371,8 @@ func recomputeRollup(ctx context.Context, tx pgx.Tx, key rollupKey) error {
 		ON CONFLICT(day, team, model) DO UPDATE SET
 			input_tokens=excluded.input_tokens,
 			output_tokens=excluded.output_tokens,
+			cache_read=excluded.cache_read,
+			cache_creation=excluded.cache_creation,
 			cost_micros=excluded.cost_micros,
 			request_count=excluded.request_count`, key.day, key.team, key.model)
 	return err

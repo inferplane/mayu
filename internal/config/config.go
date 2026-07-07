@@ -386,6 +386,9 @@ func validateAnalyticsModeB(mb *AnalyticsModeB) error {
 	if mb == nil {
 		return nil
 	}
+	if mb.AggregatedAuditDir == "" {
+		return fmt.Errorf("config: analytics.mode_b.aggregated_audit_dir is required")
+	}
 	if err := ValidateSecretRef(mb.DSNRef); err != nil {
 		return fmt.Errorf("config: analytics.mode_b.dsn_ref: %w", err)
 	}
@@ -394,16 +397,20 @@ func validateAnalyticsModeB(mb *AnalyticsModeB) error {
 		return fmt.Errorf("config: analytics.mode_b.dsn_ref: %w", err)
 	}
 	mb.DSN = dsn
-	if err := validateDurationString("analytics.mode_b.poll_interval", mb.PollInterval); err != nil {
+	// A sub-second TTL/poll truncates to 0 whole seconds once it reaches the
+	// Postgres interval math (pgstore converts via int64(d.Seconds())), which
+	// would make a lease expire the instant it's created — reject rather than
+	// silently accept an unusable value.
+	if err := validateDurationString("analytics.mode_b.poll_interval", mb.PollInterval, time.Second); err != nil {
 		return err
 	}
-	if err := validateDurationString("analytics.mode_b.lease_ttl", mb.LeaseTTL); err != nil {
+	if err := validateDurationString("analytics.mode_b.lease_ttl", mb.LeaseTTL, time.Second); err != nil {
 		return err
 	}
 	return nil
 }
 
-func validateDurationString(name, value string) error {
+func validateDurationString(name, value string, min time.Duration) error {
 	if value == "" {
 		return nil
 	}
@@ -411,8 +418,8 @@ func validateDurationString(name, value string) error {
 	if err != nil {
 		return fmt.Errorf("config: %s %q: %w", name, value, err)
 	}
-	if d <= 0 {
-		return fmt.Errorf("config: %s must be > 0, got %q", name, value)
+	if d < min {
+		return fmt.Errorf("config: %s must be >= %s, got %q", name, min, value)
 	}
 	return nil
 }

@@ -99,7 +99,11 @@ func newGateway(cfgPath string) (*gateway, error) {
 	// OS reclaims the handle, so we don't unwind it there.
 	var analyticsIdx *analytics.Index
 	var analyticsSink audit.Sink
-	if apath, on := config.ResolveAnalytics(raw); on {
+	// When Mode B is configured, Mode A's local SQLite index is not wired up
+	// at all (ADR-015 §1) — queries and ingestion both go to the shared
+	// Postgres store instead, so opening a local index nobody reads/feeds
+	// would just be wasted disk I/O and extra shutdown surface.
+	if apath, on := config.ResolveAnalytics(raw); on && raw.Analytics.ModeB == nil {
 		ix, aerr := analytics.OpenSQLite(apath)
 		if aerr != nil {
 			fmt.Fprintln(os.Stderr, "inferplane: analytics index disabled (open failed):", aerr)

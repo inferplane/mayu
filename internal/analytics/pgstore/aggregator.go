@@ -60,12 +60,17 @@ func NewAggregator(s *Store, cfg AggregatorConfig) *Aggregator {
 	return &Aggregator{store: s, cfg: cfg, instanceID: id}
 }
 
-// Run polls until ctx is cancelled. Lost leadership is a steady-state no-op;
-// only fatal store and filesystem errors are returned.
+// Run polls until ctx is cancelled. Lost leadership is a steady-state no-op.
+// A tick error (a transient filesystem hiccup, a segment rotation race, a
+// momentary Postgres blip) is logged and retried next poll — never
+// propagated to kill the loop (same best-effort retry posture as the
+// gateway's anchorWorker): capabilities keeps advertising Mode B for the
+// life of the process, so a permanently-dead aggregator behind it would
+// silently go stale forever with no way to recover short of a restart.
 func (a *Aggregator) Run(ctx context.Context) error {
 	for {
 		if err := a.tick(ctx); err != nil {
-			return err
+			fmt.Fprintln(os.Stderr, "inferplane: analytics mode_b tick failed (will retry):", err)
 		}
 		timer := time.NewTimer(a.cfg.PollInterval)
 		select {
