@@ -15,6 +15,7 @@ import (
 
 	"github.com/inferplane/inferplane/internal/adminauth"
 	"github.com/inferplane/inferplane/internal/analytics"
+	"github.com/inferplane/inferplane/internal/analytics/pgstore"
 	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/audit/s3anchor"
 	"github.com/inferplane/inferplane/internal/budget"
@@ -45,6 +46,8 @@ type gateway struct {
 	holder        *live.Holder
 	router        *router.Router
 	pstore        providerstore.Store         // nil unless provider_store is configured (ADR-008)
+	pgstoreQ      *pgstore.Store              // nil unless analytics.mode_b is configured (ADR-015)
+	pgstoreAgg    *pgstore.Aggregator         // nil unless Mode B aggregation is configured
 	analyticsIdx  *analytics.Index            // nil unless the analytics index is enabled (spec §4 / D1)
 	analyticsSink audit.Sink                  // async ingestion sink; drained+closed before analyticsIdx on shutdown
 	otelDown      func(context.Context) error // OTel TracerProvider shutdown (nil unless otel configured, ADR-011)
@@ -157,8 +160,24 @@ func newGateway(cfgPath string) (*gateway, error) {
 	// refs resolved (ADR-008 gate G1). Without a store this is exactly config.Load.
 	cfg, err := buildEffective(raw, pstore)
 	if err != nil {
-		closeAll(pstore, store, aud)
+		closeAll(pstore, nil, store, aud)
 		return nil, err
+	}
+
+	var pgstoreQ *pgstore.Store
+	var pgstoreAgg *pgstore.Aggregator
+	if cfg.Analytics.ModeB != nil {
+		aggCfg, err := modeBAggregatorConfig(cfg.Analytics.ModeB)
+		if err != nil {
+			closeAll(pstore, nil, store, aud)
+			return nil, err
+		}
+		pgstoreQ, err = pgstore.New(context.Background(), cfg.Analytics.ModeB.DSN)
+		if err != nil {
+			closeAll(pstore, nil, store, aud)
+			return nil, fmt.Errorf("analytics mode_b postgres store: %w", err)
+		}
+		pgstoreAgg = pgstore.NewAggregator(pgstoreQ, aggCfg)
 	}
 
 	// Topology generation (providers + routes + pricing) — built by the
@@ -166,7 +185,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 	// (ADR-006). Published behind an atomic holder the router reads.
 	st, _, err := live.BuildState(cfg)
 	if err != nil {
-		closeAll(pstore, store, aud)
+		closeAll(pstore, pgstoreQ, store, aud)
 		return nil, err
 	}
 	holder := &live.Holder{}
@@ -198,19 +217,19 @@ func newGateway(cfgPath string) (*gateway, error) {
 	// deployments can terminate their own TLS; K8s terminates at ingress/mesh.
 	// The pair must be fully specified or fully empty.
 	if err := server.ValidateTLS(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile); err != nil {
-		closeAll(pstore, store, aud)
+		closeAll(pstore, pgstoreQ, store, aud)
 		return nil, err
 	}
 
 	dataLn, err := net.Listen("tcp", cfg.Server.Listen)
 	if err != nil {
-		closeAll(pstore, store, aud)
+		closeAll(pstore, pgstoreQ, store, aud)
 		return nil, fmt.Errorf("data listen %q: %w", cfg.Server.Listen, err)
 	}
 	adminLn, err := net.Listen("tcp", cfg.Server.AdminListen)
 	if err != nil {
 		dataLn.Close()
-		closeAll(pstore, store, aud)
+		closeAll(pstore, pgstoreQ, store, aud)
 		return nil, fmt.Errorf("admin listen %q: %w", cfg.Server.AdminListen, err)
 	}
 
@@ -227,7 +246,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 	// boot; enabling masking logs the cache/cost warning.
 	masking, err := buildMasking(cfg)
 	if err != nil {
-		closeAll(pstore, store, aud)
+		closeAll(pstore, pgstoreQ, store, aud)
 		return nil, err
 	}
 
@@ -274,6 +293,8 @@ func newGateway(cfgPath string) (*gateway, error) {
 		holder:        holder,
 		router:        r,
 		pstore:        pstore,
+		pgstoreQ:      pgstoreQ,
+		pgstoreAgg:    pgstoreAgg,
 		analyticsIdx:  analyticsIdx,
 		analyticsSink: analyticsSink,
 		otelDown:      otelDown,
@@ -296,8 +317,10 @@ func newGateway(cfgPath string) (*gateway, error) {
 	// this assembly already knows. Later phases flip the rest on as they land.
 	capabilities := func() configapi.Capabilities {
 		ai := "off"
-		if analyticsIdx != nil {
-			ai = "A" // Mode A (local single-replica); Mode B is a later phase
+		if pgstoreQ != nil {
+			ai = "B" // Mode B (shared Postgres store).
+		} else if analyticsIdx != nil {
+			ai = "A" // Mode A (local single-replica).
 		}
 		return configapi.Capabilities{
 			AnalyticsIndex:      ai,
@@ -307,7 +330,9 @@ func newGateway(cfgPath string) (*gateway, error) {
 		}
 	}
 	var analyticsQ analyticsapi.Querier
-	if analyticsIdx != nil {
+	if pgstoreQ != nil {
+		analyticsQ = pgstoreQ
+	} else if analyticsIdx != nil {
 		analyticsQ = analyticsIdx
 	}
 	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, m, writer, liveExport(holder), capabilities, analyticsQ, cfg.Probe.AllowedHosts...)}
@@ -333,6 +358,25 @@ func buildEffective(raw *config.Config, pstore providerstore.Store) (*config.Con
 		return nil, err
 	}
 	return eff, nil
+}
+
+func modeBAggregatorConfig(mb *config.AnalyticsModeB) (pgstore.AggregatorConfig, error) {
+	cfg := pgstore.AggregatorConfig{AggregatedAuditDir: mb.AggregatedAuditDir}
+	if mb.PollInterval != "" {
+		d, err := time.ParseDuration(mb.PollInterval)
+		if err != nil {
+			return cfg, fmt.Errorf("analytics mode_b poll_interval: %w", err)
+		}
+		cfg.PollInterval = d
+	}
+	if mb.LeaseTTL != "" {
+		d, err := time.ParseDuration(mb.LeaseTTL)
+		if err != nil {
+			return cfg, fmt.Errorf("analytics mode_b lease_ttl: %w", err)
+		}
+		cfg.LeaseTTL = d
+	}
+	return cfg, nil
 }
 
 // buildMasking resolves the configured request-filter plugins into a
@@ -377,10 +421,13 @@ func tracingConfig(o *config.OTelConfig) tracing.Config {
 }
 
 // closeAll closes the partially-opened resources on a newGateway error path
-// (pstore may be nil).
-func closeAll(pstore providerstore.Store, store keystore.Store, aud *audit.Writer) {
+// (pstore and pgstoreQ may be nil).
+func closeAll(pstore providerstore.Store, pgstoreQ *pgstore.Store, store keystore.Store, aud *audit.Writer) {
 	if pstore != nil {
 		pstore.Close()
+	}
+	if pgstoreQ != nil {
+		pgstoreQ.Close()
 	}
 	store.Close()
 	aud.Close()
@@ -589,6 +636,13 @@ func (g *gateway) reloadWorker(ctx context.Context, trigger <-chan os.Signal, do
 	}
 }
 
+func (g *gateway) pgstoreAggregatorWorker(ctx context.Context, done chan<- struct{}) {
+	defer close(done)
+	if err := g.pgstoreAgg.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		fmt.Fprintln(os.Stderr, "inferplane: analytics mode_b aggregator failed:", err)
+	}
+}
+
 // serve runs both planes until ctx is canceled (graceful drain within
 // drain_grace) or a server fails. It owns closing the keystore and audit
 // writer; the in-flight handlers finish before audit drains (§5.4). SIGHUP
@@ -614,6 +668,9 @@ func (g *gateway) serve(ctx context.Context) error {
 	defer g.aud.Close()
 	if g.pstore != nil {
 		defer g.pstore.Close()
+	}
+	if g.pgstoreQ != nil {
+		defer g.pgstoreQ.Close()
 	}
 	if g.otelDown != nil {
 		// Flush spans on teardown under a bounded timeout; errors are logged, never
@@ -642,11 +699,19 @@ func (g *gateway) serve(ctx context.Context) error {
 		anchorDone = make(chan struct{})
 		go g.anchorWorker(workerCtx, anchorDone)
 	}
+	var pgstoreDone chan struct{}
+	if g.pgstoreAgg != nil {
+		pgstoreDone = make(chan struct{})
+		go g.pgstoreAggregatorWorker(workerCtx, pgstoreDone)
+	}
 	defer func() {
 		cancelWorker()
 		<-workerDone
 		if anchorDone != nil {
 			<-anchorDone
+		}
+		if pgstoreDone != nil {
+			<-pgstoreDone
 		}
 	}()
 

@@ -26,6 +26,15 @@ audit collector, Redis-based fencing, incremental rollup counters.
   Tests needing Postgres call `t.Skip` if that env var is unset (CI/dev without a
   Postgres instance must not fail — matches the zero-dependency-default acceptance
   criterion: the default build/test path never requires Postgres).
+- **With `INFERPLANE_TEST_PG_DSN` set, run `go test -p 1 ./...`, not plain
+  `go test ./...`.** `internal/analytics/pgstore` and `cmd/inferplane`'s Mode B
+  test both point at the SAME shared Postgres tables with no per-run schema
+  isolation; Go's default package-level parallelism runs different packages'
+  test binaries concurrently, so without `-p 1` they can interleave on the
+  same rows (observed: spurious "requests=2, want 1" failures that vanish
+  under `-p 1` — confirmed a test-parallelism artifact, not a product bug).
+  A future improvement could give each test run its own schema; not done here
+  (single local Postgres, `-p 1` is a one-flag fix for the actual constraint).
 - Every new package gets a package comment; every exported type/func gets a doc
   comment (project convention — see `internal/analytics/index.go`'s existing style).
 
