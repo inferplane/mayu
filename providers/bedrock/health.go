@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/aws/smithy-go"
+	"github.com/inferplane/inferplane/pkg/schema"
 	"github.com/inferplane/inferplane/providers"
 )
 
@@ -42,8 +43,9 @@ var credentialErrorCodes = map[string]bool{
 // error CODE, never the error message (which can include account ids/arns).
 func (p *provider) HealthCheck(ctx context.Context) providers.HealthResult {
 	start := time.Now()
+	ping := "ping"
 	_, err := p.conv.Converse(ctx, probeModelID, ConverseRequest{
-		Messages:  []ConverseMessage{{Role: "user", Text: "ping"}},
+		Messages:  []ConverseMessage{{Role: "user", Content: []schema.ContentBlock{{Type: "text", Text: &ping}}}},
 		Inference: map[string]any{"maxTokens": 1},
 	})
 	latency := time.Since(start).Milliseconds()
