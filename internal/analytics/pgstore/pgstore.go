@@ -52,9 +52,27 @@ type Store struct {
 var _ analytics.Store = (*Store)(nil)
 var _ analytics.Rebuilder = (*Store)(nil)
 
+// queryTimeout bounds every Mode B query server-side (Postgres statement_timeout)
+// so a stalled/unreachable database can never block an admin query handler
+// indefinitely — analytics.Store's query methods take no context (matching
+// Mode A's in-process SQLite, which has no such risk), so a Postgres-side
+// timeout is the seam that catches it here without widening that interface.
+const queryTimeout = "10000" // ms
+
 // New opens a Mode B Postgres store and ensures its schema exists.
 func New(ctx context.Context, dsn string) (*Store, error) {
-	db, err := pgxpool.New(ctx, dsn)
+	// Parse the DSN as its OWN step, deliberately not wrapped with %w: pgx's
+	// own parse-failure error embeds the connection string verbatim (it can
+	// carry a password), and this repo's convention (§7 gate C1) is that a
+	// secret-bearing value never appears in a returned/logged error. A
+	// connection-level failure from a successfully-parsed config (auth,
+	// network, ...) does not embed the DSN, so it's safe to wrap normally.
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, errors.New("open analytics postgres store: invalid dsn (check dsn_ref resolves to a valid postgres:// connection string)")
+	}
+	cfg.ConnConfig.RuntimeParams["statement_timeout"] = queryTimeout
+	db, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("open analytics postgres store: %w", err)
 	}

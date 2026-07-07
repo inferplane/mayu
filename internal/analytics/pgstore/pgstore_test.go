@@ -93,13 +93,17 @@ func TestStoreSatisfiesAnalyticsStoreAndRebuilder(t *testing.T) {
 func TestUpsertEventCorrectsCostOnReingest(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
+	epoch, ok, err := tryAcquireLease(ctx, s.db, "h1", 15*time.Second)
+	if err != nil || !ok {
+		t.Fatalf("acquire: ok=%v err=%v", ok, err)
+	}
 	r := completedRecord("01UPSERT", "2026-07-07T10:00:00Z", "alpha", "m1", 100, 50, 1000)
-	if err := s.ingestBatch(ctx, "h1", 1, []audit.Record{r}, map[string]int64{"seg-a": 100}); err != nil {
+	if err := s.ingestBatch(ctx, "h1", epoch, []audit.Record{r}, map[string]int64{"seg-a": 100}); err != nil {
 		t.Fatalf("first ingest: %v", err)
 	}
 	// Re-ingest the SAME id with a corrected cost — must UPDATE, not ignore.
 	r.Cost.AmountUSDMicros = 2000
-	if err := s.ingestBatch(ctx, "h1", 1, []audit.Record{r}, map[string]int64{"seg-a": 200}); err != nil {
+	if err := s.ingestBatch(ctx, "h1", epoch, []audit.Record{r}, map[string]int64{"seg-a": 200}); err != nil {
 		t.Fatalf("second ingest: %v", err)
 	}
 	sum, err := s.Summary(analytics.SummaryQuery{})
