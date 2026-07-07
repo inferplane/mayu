@@ -73,6 +73,32 @@ func TestParseProviderWriteCarriesAuthHeader(t *testing.T) {
 	}
 }
 
+func TestParseProviderWriteRejectsInvalidAuthHeader(t *testing.T) {
+	// Case-sensitive, same as config.ResolveProviders' file-config guard.
+	body := []byte(`{"type":"anthropic","api_key_ref":{"env":"K"},"auth_header":"Bearer"}`)
+	_, err := ParseProviderWrite("p", body)
+	if err == nil {
+		t.Fatal("capitalized auth_header must be rejected")
+	}
+	if !strings.Contains(err.Error(), `must be "x-api-key" or "bearer"`) {
+		t.Fatalf("expected the specific config-file-path error message, got: %v", err)
+	}
+}
+
+func TestParseProviderWriteRejectsAuthHeaderOnNonAnthropicType(t *testing.T) {
+	// auth_header only has an effect on the anthropic provider (live.go only
+	// injects it for type=="anthropic"); on any other type it would validate
+	// but silently do nothing.
+	body := []byte(`{"type":"openai","base_url":"https://x","auth_header":"bearer"}`)
+	_, err := ParseProviderWrite("p", body)
+	if err == nil {
+		t.Fatal("auth_header on a non-anthropic type must be rejected")
+	}
+	if !strings.Contains(err.Error(), `only meaningful for type "anthropic"`) {
+		t.Fatalf("expected the specific config-file-path error message, got: %v", err)
+	}
+}
+
 func TestParseProviderWriteValidBedrock(t *testing.T) {
 	body := []byte(`{"type":"bedrock","region":"us-west-2","auth":{"mode":"profile","profile":"dev"}}`)
 	row, err := ParseProviderWrite("bedrock-us", body)

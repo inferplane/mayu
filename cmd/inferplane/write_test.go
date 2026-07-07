@@ -10,6 +10,36 @@ import (
 	"github.com/inferplane/inferplane/internal/server/configapi"
 )
 
+// newServedPstoreGateway is newPstoreGateway plus a live accept loop — needed
+// for a real Authorization-header round-trip rather than just ResolveChain/DB
+// state. It must NOT also register newPstoreGateway's manual
+// store/aud/pstore.Close() cleanup: g.serve's own shutdown already closes all
+// three (gateway.go), so stacking both panics on a double-close of the audit
+// writer's channel.
+func newServedPstoreGateway(t *testing.T) (*gateway, *anthropicUpstream) {
+	t.Helper()
+	up := newAnthropicUpstream(t)
+	t.Setenv("E2E_UPSTREAM_KEY", e2eUpstreamKey)
+	t.Setenv("E2E_ADMIN_TOKEN", e2eAdminToken)
+	dir := t.TempDir()
+	cfgPath := dir + "/config.json"
+	rewriteConfig(t, cfgPath, pstoreConfig(dir, up.srv.URL))
+	g, err := newGateway(cfgPath)
+	if err != nil {
+		t.Fatalf("newGateway: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- g.serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("serve: %v", err)
+		}
+	})
+	return g, up
+}
+
 // pstoreConfig is reloadBaseConfig plus a provider_store block, so newGateway
 // seeds the DB from the file topology and the DB becomes authoritative.
 func pstoreConfig(dir, upstreamURL string) string {
@@ -66,6 +96,39 @@ func TestWriteProviderAndModelAppliesTopology(t *testing.T) {
 	// Persisted in the DB.
 	if _, err := g.pstore.GetProvider(ctx, "up2"); err != nil {
 		t.Fatalf("up2 not persisted: %v", err)
+	}
+}
+
+// TestWriteProviderAuthHeaderBearerWiredToUpstream pins PR #13 review Finding
+// 2: a provider registered through the write API with auth_header:"bearer"
+// must actually send Authorization: Bearer <key> upstream (and NOT
+// x-api-key) — exercising the full write -> ResolveProviders -> BuildState ->
+// live.State path, not just the DTO/DB layers TestParseProviderWriteCarries
+// AuthHeader and the providerstore/config unit tests already cover.
+func TestWriteProviderAuthHeaderBearerWiredToUpstream(t *testing.T) {
+	g, up := newServedPstoreGateway(t)
+	ctx := context.Background()
+
+	if err := g.WriteProvider(ctx, providerstore.ProviderRow{
+		Name: "or", Type: "anthropic", BaseURL: up.srv.URL, APIKeyRefEnv: "E2E_UPSTREAM_KEY", AuthHeader: "bearer",
+	}); err != nil {
+		t.Fatalf("WriteProvider: %v", err)
+	}
+	if err := g.WriteModel(ctx, "m-bearer", []providerstore.Target{{Provider: "or", Model: "claude-test"}}); err != nil {
+		t.Fatalf("WriteModel: %v", err)
+	}
+
+	_, virtualKey := createKey(t, "http://"+g.AdminAddr(), "team", []string{"*"})
+	resp := postMessages(t, "http://"+g.DataAddr(), virtualKey, "m-bearer")
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("POST /v1/messages: status %d", resp.StatusCode)
+	}
+	if up.lastAuthorize != "Bearer "+e2eUpstreamKey {
+		t.Fatalf("Authorization header = %q, want %q", up.lastAuthorize, "Bearer "+e2eUpstreamKey)
+	}
+	if up.apiKey() != "" {
+		t.Fatalf("x-api-key must NOT be sent when auth_header is bearer, got %q", up.apiKey())
 	}
 }
 

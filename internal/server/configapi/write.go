@@ -60,9 +60,12 @@ type targetWrite struct {
 
 // ParseProviderWrite validates a provider write body and returns the row to
 // persist. It (1) rejects an inline api_key (§7, the same probe config.Load
-// runs), (2) requires a type, (3) validates the ref SHAPE (env var name charset
-// / absolute file path) so a pasted secret is rejected, and (4) returns
-// sanitized errors that never echo the caller-supplied ref value (gate C1).
+// runs), (2) requires a type, (3) validates auth_header (only meaningful for
+// type "anthropic", value must be "x-api-key" or "bearer" — the same guard
+// config.ResolveProviders applies to the file-config path), (4) validates the
+// ref SHAPE (env var name charset / absolute file path) so a pasted secret is
+// rejected, and (5) returns sanitized errors that never echo the
+// caller-supplied ref value (gate C1).
 func ParseProviderWrite(name string, body []byte) (providerstore.ProviderRow, error) {
 	var zero providerstore.ProviderRow
 
@@ -81,6 +84,20 @@ func ParseProviderWrite(name string, body []byte) (providerstore.ProviderRow, er
 	}
 	if strings.TrimSpace(w.Type) == "" {
 		return zero, fmt.Errorf("provider type is required")
+	}
+	if w.AuthHeader != "" {
+		// Mirror config.ResolveProviders' two invariants here too, so a
+		// mistake made through the write API gets the same specific,
+		// actionable error the config-file path gives instead of surfacing
+		// only much later as mapWriteResult's generic "invalid configuration"
+		// message (auth_header only has an effect on the anthropic provider —
+		// live.go only injects it into Settings for type=="anthropic").
+		if w.Type != "anthropic" {
+			return zero, fmt.Errorf("auth_header is only meaningful for type %q, got type %q", "anthropic", w.Type)
+		}
+		if w.AuthHeader != "x-api-key" && w.AuthHeader != "bearer" {
+			return zero, fmt.Errorf("auth_header must be %q or %q, got %q", "x-api-key", "bearer", w.AuthHeader)
+		}
 	}
 
 	row := providerstore.ProviderRow{

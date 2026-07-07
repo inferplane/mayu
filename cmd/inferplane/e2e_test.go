@@ -63,12 +63,14 @@ func bootGateway(t *testing.T, mutate func(cfg map[string]any, dir string)) (dat
 }
 
 // anthropicUpstream fakes the Anthropic Messages API. It records the last
-// x-api-key it saw and returns a fixed message with usage.
+// x-api-key / Authorization header it saw and returns a fixed message with
+// usage.
 type anthropicUpstream struct {
 	srv *httptest.Server
 
-	mu         sync.Mutex
-	lastAPIKey string
+	mu            sync.Mutex
+	lastAPIKey    string
+	lastAuthorize string
 }
 
 func newAnthropicUpstream(t *testing.T) *anthropicUpstream {
@@ -77,6 +79,7 @@ func newAnthropicUpstream(t *testing.T) *anthropicUpstream {
 	u.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		u.mu.Lock()
 		u.lastAPIKey = r.Header.Get("x-api-key")
+		u.lastAuthorize = r.Header.Get("Authorization")
 		u.mu.Unlock()
 		switch r.URL.Path {
 		case "/v1/messages":
