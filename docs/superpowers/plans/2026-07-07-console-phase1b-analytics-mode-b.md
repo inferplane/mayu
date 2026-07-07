@@ -102,6 +102,8 @@ Task 1's `Store`/`Health` types (import `internal/analytics`).
 - Create: `internal/analytics/pgstore/pgstore.go`
 - Create: `internal/analytics/pgstore/lease.go`
 - Create: `internal/analytics/pgstore/aggregator.go`
+- Modify: `go.mod`
+- Modify: `go.sum`
 - Test: `internal/analytics/pgstore/pgstore_test.go`
 - Test: `internal/analytics/pgstore/lease_test.go`
 - Test: `internal/analytics/pgstore/aggregator_test.go`
