@@ -13,8 +13,10 @@ import (
 // Capabilities is the console's bootstrap view of which optional subsystems are
 // live. Every field is a non-secret boolean or small enum.
 type Capabilities struct {
-	// AnalyticsIndex is "A" (local single-replica), "B" (shared HA store), or
-	// "off". Phase 0a always reports "off" (no analytics index yet).
+	// AnalyticsIndex is "A" (local single-replica, Phase 1a), "B" (shared
+	// Postgres store + fenced aggregator, Phase 1b, ADR-015), or "off". The
+	// caller (cmd/inferplane gateway assembly) decides which per config —
+	// this package only carries the value through, it never derives it.
 	AnalyticsIndex      string `json:"analytics_index"`
 	LogsBodies          bool   `json:"logs_bodies"`
 	TeamsRecords        bool   `json:"teams_records"`
