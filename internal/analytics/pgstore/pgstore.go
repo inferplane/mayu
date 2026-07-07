@@ -201,15 +201,20 @@ func (s *Store) Health() (analytics.Health, error) {
 	h := analytics.Health{Mode: "B"}
 	ctx := context.Background()
 
+	// is_leader is computed IN SQL (expires_at > now()) rather than comparing
+	// the DB's TIMESTAMPTZ against the app's time.Now() — PR review: comparing
+	// across the two clocks is exactly the caller-clock-vs-DB-clock mismatch
+	// ADR-015 §3 round-2 already fixed for lease acquire/renew; doing it here
+	// too keeps every liveness decision on the database's single clock.
 	var holder string
-	var expiresAt time.Time
-	err := s.db.QueryRow(ctx, `SELECT holder, epoch, expires_at FROM lease WHERE id=$1`, leaseID).
-		Scan(&holder, &h.LeaseEpoch, &expiresAt)
+	var isLive bool
+	err := s.db.QueryRow(ctx, `SELECT holder, epoch, expires_at > now() FROM lease WHERE id=$1`, leaseID).
+		Scan(&holder, &h.LeaseEpoch, &isLive)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return h, fmt.Errorf("query analytics lease health: %w", err)
 	}
 	if err == nil {
-		h.IsLeader = holder != "" && holder == s.instanceID && time.Now().Before(expiresAt)
+		h.IsLeader = holder != "" && holder == s.instanceID && isLive
 	}
 
 	var last *time.Time
@@ -308,19 +313,18 @@ func (s *Store) ingestBatch(ctx context.Context, holder string, epoch int64, rec
 	return nil
 }
 
+// fenceIngest requires an EXISTING lease row matching holder+epoch —
+// tryAcquireLease is the only place a lease row is ever created (using the
+// real configured TTL); fenceIngest bootstrapping its own row on ErrNoRows
+// (as an earlier version did, with a hardcoded TTL that ignored config) was
+// dead in the real aggregator flow (tick always calls tryAcquireLease first)
+// and just risked drifting from tryAcquireLease's own TTL handling — removed
+// rather than fixed, since there was nothing this path legitimately needed
+// to do beyond what tryAcquireLease already does.
 func fenceIngest(ctx context.Context, tx pgx.Tx, holder string, epoch int64) error {
 	var got int64
 	err := tx.QueryRow(ctx, `SELECT epoch FROM lease WHERE id=$1 AND holder=$2 FOR UPDATE`, leaseID, holder).Scan(&got)
 	if errors.Is(err, pgx.ErrNoRows) {
-		tag, insertErr := tx.Exec(ctx, `INSERT INTO lease(id, holder, epoch, expires_at)
-			VALUES($1, $2, $3, now() + (15 * interval '1 second'))
-			ON CONFLICT (id) DO NOTHING`, leaseID, holder, epoch)
-		if insertErr != nil {
-			return fmt.Errorf("bootstrap analytics lease: %w", insertErr)
-		}
-		if tag.RowsAffected() == 1 {
-			return nil
-		}
 		return errFenced
 	}
 	if err != nil {
