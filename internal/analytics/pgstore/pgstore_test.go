@@ -140,6 +140,7 @@ func TestSummaryTimeSeriesReadFromRollupNotLiveEvents(t *testing.T) {
 
 func TestHealthReflectsCheckpointsAndLease(t *testing.T) {
 	s := newTestStore(t)
+	s.instanceID = "holderA" // Health's IsLeader compares holder against s.instanceID
 	ctx := context.Background()
 	h, err := s.Health()
 	if err != nil {
@@ -148,11 +149,12 @@ func TestHealthReflectsCheckpointsAndLease(t *testing.T) {
 	if h.Mode != "B" || h.SegmentsTracked != 0 {
 		t.Fatalf("pre-ingest health = %+v, want Mode=B SegmentsTracked=0", h)
 	}
-	if _, ok, err := tryAcquireLease(ctx, s.db, "holderA", 15*time.Second); err != nil || !ok {
+	epoch, ok, err := tryAcquireLease(ctx, s.db, "holderA", 15*time.Second)
+	if err != nil || !ok {
 		t.Fatalf("tryAcquireLease: ok=%v err=%v", ok, err)
 	}
 	r := completedRecord("01H", "2026-07-07T10:00:00Z", "alpha", "m1", 1, 1, 1)
-	if err := s.ingestBatch(ctx, "holderA", 1, []audit.Record{r}, map[string]int64{"seg-a": 42}); err != nil {
+	if err := s.ingestBatch(ctx, "holderA", epoch, []audit.Record{r}, map[string]int64{"seg-a": 42}); err != nil {
 		t.Fatal(err)
 	}
 	h, err = s.Health()
@@ -161,6 +163,33 @@ func TestHealthReflectsCheckpointsAndLease(t *testing.T) {
 	}
 	if h.SegmentsTracked != 1 || h.LastIngestTS == "" || h.LeaseEpoch == 0 {
 		t.Fatalf("post-ingest health = %+v, want SegmentsTracked=1, non-empty LastIngestTS, nonzero LeaseEpoch", h)
+	}
+	// This is the actual claim the PR fixed: IsLeader must be true for the
+	// live holder whose instanceID matches, computed on the DB's clock.
+	if !h.IsLeader {
+		t.Fatalf("IsLeader = false, want true (holder=%q instanceID=%q, lease live)", "holderA", s.instanceID)
+	}
+
+	// A different identity must never see itself as leader, even though the
+	// lease is currently live for someone else.
+	other := &Store{db: s.db, instanceID: "someone-else"}
+	if h2, err := other.Health(); err != nil || h2.IsLeader {
+		t.Fatalf("IsLeader for a non-holder instanceID = %v (err=%v), want false", h2.IsLeader, err)
+	}
+
+	// Expire the lease (same holder, negative TTL self-expires expires_at —
+	// same pattern as lease_test.go) — IsLeader must flip to false once the
+	// DB's own clock says the lease is no longer live, proving Health() reads
+	// liveness from SQL (`expires_at > now()`), not the app's time.Now().
+	if _, _, err := tryAcquireLease(ctx, s.db, "holderA", -1*time.Second); err != nil {
+		t.Fatalf("expire lease: %v", err)
+	}
+	h, err = s.Health()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.IsLeader {
+		t.Fatal("IsLeader = true after the lease expired, want false")
 	}
 }
 

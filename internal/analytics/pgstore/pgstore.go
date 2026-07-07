@@ -52,11 +52,14 @@ type Store struct {
 var _ analytics.Store = (*Store)(nil)
 var _ analytics.Rebuilder = (*Store)(nil)
 
-// queryTimeout bounds every Mode B query server-side (Postgres statement_timeout)
-// so a stalled/unreachable database can never block an admin query handler
-// indefinitely — analytics.Store's query methods take no context (matching
-// Mode A's in-process SQLite, which has no such risk), so a Postgres-side
-// timeout is the seam that catches it here without widening that interface.
+// queryTimeout bounds every Mode B query server-side (Postgres
+// statement_timeout) against a SLOW query — a statement that reaches Postgres
+// but runs too long. It does NOT bound network-level unreachability (a
+// partitioned/down DB host hits the OS TCP timeout, ~2 minutes on Linux,
+// before Postgres ever sees the statement); analytics.Store's query methods
+// take no context (matching Mode A's in-process SQLite, which has no
+// analogous risk), so this is the seam available to bound the risk this
+// package's queries CAN hit without widening that shared interface.
 const queryTimeout = "10000" // ms
 
 // New opens a Mode B Postgres store and ensures its schema exists.
@@ -108,6 +111,19 @@ func (s *Store) ensureSchema(ctx context.Context) error {
 		return fmt.Errorf("acquire analytics schema migration connection: %w", err)
 	}
 	defer conn.Release()
+
+	// The pool-wide statement_timeout (New) would otherwise apply to
+	// pg_advisory_lock too — under a multi-replica startup storm one replica
+	// can legitimately wait longer than that for the lock, so it must be
+	// disabled for this connection's session before locking, and explicitly
+	// RESTORED before the connection goes back to the pool (a bare `SET`,
+	// unlike `SET LOCAL`, persists for the connection's whole session —
+	// leaving it disabled would silently defeat the timeout for whichever
+	// later query happens to reuse this same pooled connection).
+	if _, err := conn.Exec(ctx, `SET statement_timeout = 0`); err != nil {
+		return fmt.Errorf("disable timeout for analytics schema migration: %w", err)
+	}
+	defer conn.Exec(ctx, `SET statement_timeout = $1`, queryTimeout)
 
 	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, schemaLockKey); err != nil {
 		return fmt.Errorf("lock analytics schema migration: %w", err)
