@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -96,7 +97,7 @@ func TestDataMuxChatCompletionsRoutes(t *testing.T) {
 
 func TestAdminMuxHealthz(t *testing.T) {
 	store := stubStore{}
-	mux := AdminMux(store, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, func() configapi.View { return configapi.View{} }, nil, nil, nil, nil, nil, nil, nil)
+	mux := AdminMux(store, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, func() configapi.View { return configapi.View{} }, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	req := httptest.NewRequest("GET", "/healthz", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -112,7 +113,7 @@ func TestAdminMuxKeysRequiresToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
-	mux := AdminMux(store, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, func() configapi.View { return configapi.View{} }, nil, nil, nil, nil, nil, nil, nil)
+	mux := AdminMux(store, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, func() configapi.View { return configapi.View{} }, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 
 	// no admin token → 401
 	req := httptest.NewRequest("GET", "/admin/keys", nil)
@@ -135,7 +136,7 @@ func TestAdminMuxKeysRequiresToken(t *testing.T) {
 func TestAdminMuxMetricsUnauthed(t *testing.T) {
 	m := metrics.New()
 	m.ObserveRequest("anthropic", "claude-sonnet-4-6", "anthropic-direct", "t", 200, 1.0, 0)
-	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, func() configapi.View { return configapi.View{} }, nil, nil, m, nil, nil, nil, nil)
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, func() configapi.View { return configapi.View{} }, nil, nil, m, nil, nil, nil, nil, nil, nil)
 	req := httptest.NewRequest("GET", "/metrics", nil) // NO auth
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -148,7 +149,7 @@ func TestAdminMuxMetricsUnauthed(t *testing.T) {
 }
 
 func TestAdminMuxServesUI(t *testing.T) {
-	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, func() configapi.View { return configapi.View{} }, nil, nil, nil, nil, nil, nil, nil)
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, func() configapi.View { return configapi.View{} }, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	req := httptest.NewRequest("GET", "/admin/ui/", nil) // NO auth — data-free static page (ADR-001)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -164,7 +165,7 @@ func TestAdminMuxServesUI(t *testing.T) {
 }
 
 func TestAdminMuxUIRedirect(t *testing.T) {
-	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, func() configapi.View { return configapi.View{} }, nil, nil, nil, nil, nil, nil, nil)
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, func() configapi.View { return configapi.View{} }, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	req := httptest.NewRequest("GET", "/admin/ui", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -179,7 +180,7 @@ func TestAdminMuxUIRedirect(t *testing.T) {
 // TestAdminMuxUIDoesNotBypassKeysAuth pins the ADR-001 invariant: wiring the
 // unauthenticated UI must not loosen auth on the keys API.
 func TestAdminMuxUIDoesNotBypassKeysAuth(t *testing.T) {
-	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, func() configapi.View { return configapi.View{} }, nil, nil, nil, nil, nil, nil, nil)
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, func() configapi.View { return configapi.View{} }, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	for _, tc := range []struct{ method, path string }{
 		{"GET", "/admin/keys"},
 		{"POST", "/admin/keys"},
@@ -219,7 +220,7 @@ func TestAdminMuxOIDCWiring(t *testing.T) {
 
 	v := &fakeVerifier{claims: adminauth.Claims{Subject: "u-alpha", Groups: []string{"team-alpha"}}}
 	mapping := adminauth.MappingConfig{GroupMappings: []adminauth.GroupMapping{{Group: "team-alpha", Teams: []string{"alpha"}}}}
-	mux := AdminMux(store, []string{"admin-tok"}, v, mapping, func() configapi.View { return configapi.View{} }, nil, aud, nil, nil, nil, nil, nil)
+	mux := AdminMux(store, []string{"admin-tok"}, v, mapping, func() configapi.View { return configapi.View{} }, nil, aud, nil, nil, nil, nil, nil, nil, nil)
 
 	do := func(bearer, method, path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -263,7 +264,7 @@ func TestAdminMuxOIDCWiring(t *testing.T) {
 // TestAdminMuxNilOIDCUnchanged: without a verifier the mux behaves exactly as
 // the task-6 static-only state; UI/metrics/health stay unauthenticated.
 func TestAdminMuxNilOIDCUnchanged(t *testing.T) {
-	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, func() configapi.View { return configapi.View{} }, nil, nil, nil, nil, nil, nil, nil)
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, func() configapi.View { return configapi.View{} }, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	for path, want := range map[string]int{
 		"/healthz": 200, "/readyz": 200, "/admin/ui/": 200,
 	} {
@@ -291,7 +292,7 @@ func TestAdminMuxConfigEndpoint(t *testing.T) {
 	}, map[string]config.ModelConfig{
 		"claude-sonnet-4-6": {Targets: []config.Target{{Provider: "anthropic-direct", Model: "claude-sonnet-4-6"}}},
 	})
-	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, func() configapi.View { return view }, nil, nil, nil, nil, nil, nil, nil)
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, func() configapi.View { return view }, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 
 	// no token → 401
 	rec := httptest.NewRecorder()
@@ -337,7 +338,7 @@ func TestAdminMuxAuditVerifyBehindAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{},
-		func() configapi.View { return configapi.View{} }, []string{path}, nil, nil, nil, nil, nil, nil)
+		func() configapi.View { return configapi.View{} }, []string{path}, nil, nil, nil, nil, nil, nil, nil, nil)
 
 	// no token → 401
 	rec := httptest.NewRecorder()
@@ -358,7 +359,7 @@ func TestAdminMuxAuditVerifyBehindAuth(t *testing.T) {
 // TestAdminMuxWhoami (ADR-010): /admin/whoami is behind AdminAuth (401 unauth)
 // and returns the identity for a valid token.
 func TestAdminMuxWhoami(t *testing.T) {
-	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, func() configapi.View { return configapi.View{} }, nil, nil, nil, nil, nil, nil, nil)
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{}, func() configapi.View { return configapi.View{} }, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 
 	// no token → 401 (no identity leak)
 	rec := httptest.NewRecorder()
@@ -384,7 +385,7 @@ func TestAdminMux_capabilitiesEndpoint(t *testing.T) {
 	caps := func() configapi.Capabilities {
 		return configapi.Capabilities{AnalyticsIndex: "off", ProviderStore: true}
 	}
-	h := AdminMux(nil, []string{"tok"}, nil, adminauth.MappingConfig{}, nil, nil, nil, nil, nil, nil, caps, nil)
+	h := AdminMux(nil, []string{"tok"}, nil, adminauth.MappingConfig{}, nil, nil, nil, nil, nil, nil, caps, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodGet, "/admin/capabilities", nil)
 	req.Header.Set("Authorization", "Bearer tok")
 	rec := httptest.NewRecorder()
@@ -400,7 +401,7 @@ func TestAdminMux_capabilitiesEndpoint(t *testing.T) {
 func TestAdminMux_analyticsFullAdminOnly(t *testing.T) {
 	fakeQ := analyticsStubQ{}
 	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{},
-		func() configapi.View { return configapi.View{} }, nil, nil, nil, nil, nil, nil, fakeQ)
+		func() configapi.View { return configapi.View{} }, nil, nil, nil, nil, nil, nil, fakeQ, nil, nil)
 
 	// full admin (static token) → 200
 	req := httptest.NewRequest("GET", "/admin/analytics/summary", nil)
@@ -428,4 +429,95 @@ func (analyticsStubQ) TimeSeries(analytics.TimeSeriesQuery) ([]analytics.DayPoin
 }
 func (analyticsStubQ) Health() (analytics.Health, error) {
 	return analytics.Health{Mode: "A", IsLeader: true}, nil
+}
+
+// --- /admin/teams + /admin/users wiring (D3, ADR-016) ---
+
+// TestAdminMux_TeamsWriteRequiresFullAdmin proves PUT/DELETE /admin/teams is
+// gated by requireAdmin (the SAME full-admin tier as the probe/analytics
+// endpoints): a team-mapped OIDC identity can read but not write, so it can
+// never raise its own team's budget via the console.
+func TestAdminMux_TeamsWriteRequiresFullAdmin(t *testing.T) {
+	store, err := keystore.OpenSQLite(filepath.Join(t.TempDir(), "k.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	v := &fakeVerifier{claims: adminauth.Claims{Subject: "u-alpha", Groups: []string{"team-alpha"}}}
+	mapping := adminauth.MappingConfig{GroupMappings: []adminauth.GroupMapping{{Group: "team-alpha", Teams: []string{"alpha"}}}}
+	configTeams := func() []string { return nil }
+	mux := AdminMux(store, []string{"admin-tok"}, v, mapping, func() configapi.View { return configapi.View{} },
+		nil, nil, nil, nil, nil, nil, nil, store, configTeams)
+
+	do := func(bearer, method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// team-mapped OIDC identity: read allowed
+	if rec := do(jwtShaped, "GET", "/admin/teams", ""); rec.Code != 200 {
+		t.Fatalf("team-mapped GET /admin/teams = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	// team-mapped OIDC identity: write denied, even for its own team
+	if rec := do(jwtShaped, "PUT", "/admin/teams/alpha", `{"rpm":1}`); rec.Code != 403 {
+		t.Fatalf("team-mapped PUT /admin/teams/alpha = %d, want 403", rec.Code)
+	}
+	// full admin (static break-glass token): write allowed
+	if rec := do("admin-tok", "PUT", "/admin/teams/alpha", `{"rpm":1}`); rec.Code != 200 {
+		t.Fatalf("full-admin PUT /admin/teams/alpha = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if rec := do("admin-tok", "DELETE", "/admin/teams/alpha", ""); rec.Code != 204 {
+		t.Fatalf("full-admin DELETE /admin/teams/alpha = %d, want 204", rec.Code)
+	}
+	// no token → 401 (unauthenticated)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/admin/teams", nil))
+	if rec.Code != 401 {
+		t.Fatalf("no-token /admin/teams = %d, want 401", rec.Code)
+	}
+}
+
+// TestAdminMux_UsersEndpointAnyAdminIdentity proves /admin/users (derived
+// read-only, no writes exist) is reachable by any AdminAuth identity, not
+// just full admins — it is a projection of data the team-mapped identity can
+// already see via /admin/keys.
+func TestAdminMux_UsersEndpointAnyAdminIdentity(t *testing.T) {
+	store, err := keystore.OpenSQLite(filepath.Join(t.TempDir(), "k.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	store.CreateWithOptions(context.Background(), "alpha", []string{"*"}, keystore.KeyOptions{Owner: "alice"})
+
+	v := &fakeVerifier{claims: adminauth.Claims{Subject: "u-alpha", Groups: []string{"team-alpha"}}}
+	mapping := adminauth.MappingConfig{GroupMappings: []adminauth.GroupMapping{{Group: "team-alpha", Teams: []string{"alpha"}}}}
+	mux := AdminMux(store, []string{"admin-tok"}, v, mapping, func() configapi.View { return configapi.View{} },
+		nil, nil, nil, nil, nil, nil, nil, store, func() []string { return nil })
+
+	req := httptest.NewRequest("GET", "/admin/users", nil)
+	req.Header.Set("Authorization", "Bearer "+jwtShaped)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"alice"`) {
+		t.Fatalf("team-mapped GET /admin/users = %d %s, want 200 with alice", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAdminMux_TeamsOmittedWhenNilTeamStore proves a nil teamStore (the
+// optional-dependency shape shared with analyticsQ) omits both mounts
+// entirely rather than panicking or 500ing.
+func TestAdminMux_TeamsOmittedWhenNilTeamStore(t *testing.T) {
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{},
+		func() configapi.View { return configapi.View{} }, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	req := httptest.NewRequest("GET", "/admin/teams", nil)
+	req.Header.Set("Authorization", "Bearer admin-tok")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 404 {
+		t.Fatalf("nil teamStore: /admin/teams = %d, want 404 (unmounted)", rec.Code)
+	}
 }

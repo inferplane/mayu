@@ -14,7 +14,7 @@ import (
 func probeTestMux() http.Handler {
 	// writer nil → provider store disabled → probe returns 405 (like the write path).
 	return AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{},
-		func() configapi.View { return configapi.View{} }, nil, nil, nil, nil, nil, nil, nil)
+		func() configapi.View { return configapi.View{} }, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 }
 
 func TestProbeRoute_RequiresAuth(t *testing.T) {

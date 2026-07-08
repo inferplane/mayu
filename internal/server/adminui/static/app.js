@@ -5,6 +5,7 @@
 
 let adminToken = "";
 let lastIssuedKey = ""; // shown-once plaintext, page-lifetime only
+let whoamiIsAdmin = false; // gates the Teams write form/actions client-side (server still enforces via requireAdmin)
 
 const $ = (id) => document.getElementById(id);
 
@@ -53,6 +54,7 @@ function showView(name) {
   $("view-title").textContent = VIEWS[name];
   if (name === "overview") refreshOverview();
   if (name === "usage") refreshUsageView();
+  if (name === "teams") refreshTeamsView();
   if (name === "providers") refreshProviders();
   if (name === "governance") refreshGovernance();
 }
@@ -641,6 +643,7 @@ async function loadWhoami() {
   } catch {
     return; // identity is advisory; the form still works (server enforces)
   }
+  whoamiIsAdmin = !!me.is_admin;
   const line = $("whoami-line");
   const input = $("team"), sel = $("team-select");
   const teams = me.teams || [];
@@ -728,6 +731,129 @@ $("create-form").addEventListener("submit", async (e) => {
 
 $("copy").addEventListener("click", async () => {
   await navigator.clipboard.writeText($("plaintext").textContent);
+});
+
+/* ---------- teams & users (D3, ADR-016) ---------- */
+
+// teamLimitsSummary mirrors keyLimitsSummary's compact-string convention —
+// avoids five mostly-empty table columns.
+function teamLimitsSummary(t) {
+  const parts = [];
+  if (t.budget_usd_micros) parts.push("$" + (t.budget_usd_micros / 1e6).toFixed(2) + " (" + (t.budget_on_exceeded || "block") + ")");
+  if (t.rpm) parts.push(t.rpm + " rpm");
+  if (t.tpm) parts.push(t.tpm + " tpm");
+  if (t.tokens_per_day) parts.push(t.tokens_per_day + " tok/day (" + (t.quota_on_exceeded || "block") + ")");
+  return parts.length ? parts.join(" · ") : "—";
+}
+
+function fillTeamForm(t) {
+  $("tf-name").value = t.name;
+  $("tf-budget").value = t.budget_usd_micros ? String(t.budget_usd_micros / 1e6) : "";
+  $("tf-rpm").value = t.rpm || "";
+  $("tf-tpm").value = t.tpm || "";
+  $("tf-tpd").value = t.tokens_per_day || "";
+  $("tf-quota-exceeded").value = t.quota_on_exceeded || "";
+  $("tf-budget-exceeded").value = t.budget_on_exceeded || "";
+  $("tf-models").value = (t.allowed_models || []).join(", ");
+}
+
+// refreshTeamsView renders the team table (joined with spend when the
+// analytics index is on) and the derived, read-only users table. The write
+// form/actions are hidden for a non-admin identity — the server enforces via
+// requireAdmin regardless (§9.1: this is a client-side hint, not the gate).
+async function refreshTeamsView() {
+  const content = $("teams-content");
+  if (!capOn("teams_records")) { content.hidden = true; return; }
+  content.hidden = false;
+  $("team-form-card").hidden = !whoamiIsAdmin;
+
+  let spendByTeam = {};
+  if (capOn("analytics_index")) {
+    try {
+      const s = await api("GET", "/admin/analytics/summary", null, true);
+      if (s && s !== DISABLED) {
+        for (const r of s.by_team || []) spendByTeam[r.team] = r.cost_micros;
+      }
+    } catch { /* spend join is best-effort */ }
+  }
+
+  let teams;
+  try { teams = await api("GET", "/admin/teams"); } catch { return; }
+  const tbody = $("teams-table").querySelector("tbody");
+  tbody.textContent = "";
+  const rows = teams.data || [];
+  if (!rows.length) {
+    tbody.appendChild(emptyRow(5, "no teams yet"));
+  } else {
+    for (const t of rows) {
+      const tr = document.createElement("tr");
+      tr.append(td(t.name), td(t.source));
+      tr.appendChild(td(t.name in spendByTeam ? usd(spendByTeam[t.name]) : "—"));
+      tr.appendChild(td(t.source === "record" ? teamLimitsSummary(t) : "—"));
+      const cell = document.createElement("td");
+      if (whoamiIsAdmin && t.source === "record") {
+        const edit = document.createElement("button");
+        edit.className = "ghost"; edit.textContent = "edit";
+        edit.addEventListener("click", () => fillTeamForm(t));
+        const del = document.createElement("button");
+        del.className = "ghost"; del.textContent = "✕";
+        del.addEventListener("click", async () => {
+          if (!confirm("Delete team record " + t.name + "?")) return;
+          try { await api("DELETE", "/admin/teams/" + encodeURIComponent(t.name)); await refreshTeamsView(); }
+          catch (err) { $("team-form-status").className = "status err"; $("team-form-status").textContent = String(err.message || err); }
+        });
+        cell.append(edit, del);
+      }
+      tr.appendChild(cell);
+      tbody.appendChild(tr);
+    }
+  }
+
+  let users;
+  try { users = await api("GET", "/admin/users"); } catch { users = { data: [] }; }
+  const ubody = $("users-table").querySelector("tbody");
+  ubody.textContent = "";
+  const urows = users.data || [];
+  if (!urows.length) {
+    ubody.appendChild(emptyRow(3, "no keys issued yet"));
+  } else {
+    for (const u of urows) {
+      const tr = document.createElement("tr");
+      tr.append(td(u.owner), td((u.teams || []).join(", ")), td(String(u.key_count)));
+      ubody.appendChild(tr);
+    }
+  }
+}
+
+$("team-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const status = $("team-form-status");
+  status.textContent = "";
+  status.className = "status";
+  try {
+    const name = $("tf-name").value.trim();
+    const body = {};
+    const budget = $("tf-budget").value;
+    if (budget) {
+      // Same 53-bit-float precision guard as the key-issuance form.
+      if (Number(budget) > 1e9) throw new Error("budget must be under $1,000,000,000");
+      body.budget_usd_micros = Math.round(Number(budget) * 1e6);
+    }
+    if ($("tf-rpm").value) body.rpm = parseInt($("tf-rpm").value, 10);
+    if ($("tf-tpm").value) body.tpm = parseInt($("tf-tpm").value, 10);
+    if ($("tf-tpd").value) body.tokens_per_day = parseInt($("tf-tpd").value, 10);
+    if ($("tf-quota-exceeded").value) body.quota_on_exceeded = $("tf-quota-exceeded").value;
+    if ($("tf-budget-exceeded").value) body.budget_on_exceeded = $("tf-budget-exceeded").value;
+    const models = $("tf-models").value.split(",").map((s) => s.trim()).filter(Boolean);
+    if (models.length) body.allowed_models = models;
+    await api("PUT", "/admin/teams/" + encodeURIComponent(name), body);
+    status.textContent = "saved ✓ " + name;
+    $("team-form").reset();
+    await refreshTeamsView();
+  } catch (err) {
+    status.className = "status err";
+    status.textContent = String(err.message || err);
+  }
 });
 
 /* ---------- settings: connection quickstart snippets ---------- */

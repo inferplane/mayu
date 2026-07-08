@@ -56,6 +56,32 @@ type Store interface {
 	Close() error
 }
 
+// TeamRecord is a team's governance policy + defaults, stored as a first-class
+// keystore row (D3, ADR-016). Zero value of a numeric field means "unlimited",
+// same convention as KeyOptions. Budget is integer microUSD, never float.
+type TeamRecord struct {
+	Name             string
+	AllowedModels    []string // default allow-list for keys created under this team; not itself hot-path enforced (ADR-016)
+	RPM              int64
+	TPM              int64
+	TokensPerDay     int64
+	QuotaOnExceeded  string // "" | "block" | "warn"
+	BudgetUSDMicros  int64
+	BudgetOnExceeded string // "" | "block" | "warn"
+	CreatedAt        string
+	UpdatedAt        string
+}
+
+// TeamStore is a separate interface (not folded into Store) so the existing
+// fake Store implementations in internal/server's tests keep compiling
+// unchanged — only backends that want to support D3 team records need it.
+type TeamStore interface {
+	UpsertTeam(ctx context.Context, t TeamRecord) error
+	GetTeam(ctx context.Context, name string) (TeamRecord, bool, error)
+	ListTeams(ctx context.Context) ([]TeamRecord, error)
+	DeleteTeam(ctx context.Context, name string) error
+}
+
 var b32 = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
 
 // generateKey returns a high-entropy virtual key ("ik_" + 32 random bytes in

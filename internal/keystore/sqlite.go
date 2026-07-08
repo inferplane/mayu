@@ -23,6 +23,9 @@ type SQLiteStore struct{ db *sql.DB }
 // and so the two can't silently diverge if a future column is added to one
 // but not the other. migrateGovernanceColumns still runs (idempotent no-op on
 // a fresh DB) to upgrade pre-existing databases that predate this feature.
+// `teams` (D3, ADR-016) is a brand-new table, so CREATE TABLE IF NOT EXISTS
+// alone is sufficient — it never needs the ALTER-TABLE migration path below,
+// since there's no pre-existing `teams` table missing columns to catch up on.
 const schema = `
 CREATE TABLE IF NOT EXISTS keys (
     key_id             TEXT PRIMARY KEY,
@@ -39,6 +42,19 @@ CREATE TABLE IF NOT EXISTS keys (
     metadata           TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_keys_hash ON keys(key_hash) WHERE revoked = 0;
+
+CREATE TABLE IF NOT EXISTS teams (
+    name                TEXT PRIMARY KEY,
+    allowed_models      TEXT NOT NULL DEFAULT '',
+    rpm                 INTEGER NOT NULL DEFAULT 0,
+    tpm                 INTEGER NOT NULL DEFAULT 0,
+    tokens_per_day      INTEGER NOT NULL DEFAULT 0,
+    quota_on_exceeded   TEXT NOT NULL DEFAULT '',
+    budget_usd_micros   INTEGER NOT NULL DEFAULT 0,
+    budget_on_exceeded  TEXT NOT NULL DEFAULT '',
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL
+);
 `
 
 func OpenSQLite(path string) (*SQLiteStore, error) {
@@ -293,3 +309,81 @@ func (s *SQLiteStore) List(ctx context.Context) ([]Principal, error) {
 func (s *SQLiteStore) Close() error { return s.db.Close() }
 
 var _ Store = (*SQLiteStore)(nil)
+
+var ErrTeamNotFound = errors.New("keystore: team not found")
+
+const teamColumns = `name, allowed_models, rpm, tpm, tokens_per_day, quota_on_exceeded, budget_usd_micros, budget_on_exceeded, created_at, updated_at`
+
+func scanTeam(row interface{ Scan(...any) error }) (TeamRecord, error) {
+	var t TeamRecord
+	var models string
+	if err := row.Scan(&t.Name, &models, &t.RPM, &t.TPM, &t.TokensPerDay,
+		&t.QuotaOnExceeded, &t.BudgetUSDMicros, &t.BudgetOnExceeded, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		return TeamRecord{}, err
+	}
+	t.AllowedModels = splitModels(models)
+	return t, nil
+}
+
+// UpsertTeam creates or fully replaces a team record. created_at is preserved
+// across an update (set once, on first insert); updated_at always advances.
+func (s *SQLiteStore) UpsertTeam(ctx context.Context, t TeamRecord) error {
+	now := nowRFC3339()
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO teams (name, allowed_models, rpm, tpm, tokens_per_day, quota_on_exceeded, budget_usd_micros, budget_on_exceeded, created_at, updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?)
+		 ON CONFLICT(name) DO UPDATE SET
+		   allowed_models=excluded.allowed_models, rpm=excluded.rpm, tpm=excluded.tpm,
+		   tokens_per_day=excluded.tokens_per_day, quota_on_exceeded=excluded.quota_on_exceeded,
+		   budget_usd_micros=excluded.budget_usd_micros, budget_on_exceeded=excluded.budget_on_exceeded,
+		   updated_at=excluded.updated_at`,
+		t.Name, joinModels(t.AllowedModels), t.RPM, t.TPM, t.TokensPerDay,
+		t.QuotaOnExceeded, t.BudgetUSDMicros, t.BudgetOnExceeded, now, now)
+	if err != nil {
+		return fmt.Errorf("keystore: upsert team: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) GetTeam(ctx context.Context, name string) (TeamRecord, bool, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+teamColumns+` FROM teams WHERE name = ?`, name)
+	t, err := scanTeam(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return TeamRecord{}, false, nil
+	}
+	if err != nil {
+		return TeamRecord{}, false, err
+	}
+	return t, true, nil
+}
+
+func (s *SQLiteStore) ListTeams(ctx context.Context) ([]TeamRecord, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+teamColumns+` FROM teams ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TeamRecord
+	for rows.Next() {
+		t, err := scanTeam(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) DeleteTeam(ctx context.Context, name string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM teams WHERE name = ?`, name)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrTeamNotFound
+	}
+	return nil
+}
+
+var _ TeamStore = (*SQLiteStore)(nil)

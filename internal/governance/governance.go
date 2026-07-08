@@ -56,6 +56,7 @@ type KeyPolicy struct {
 // resolved on (ADR-006).
 type Governor struct {
 	teams   map[string]TeamPolicy
+	lookup  func(team string) (TeamPolicy, bool) // D3/ADR-016: optional dynamic override, checked before teams
 	lim     limiter.LimiterStore
 	bud     budget.BudgetStore
 	metrics *metrics.Metrics // nil-safe: no-op when nil
@@ -65,6 +66,31 @@ type Governor struct {
 // budget_spend / pricing_miss; pass nil to disable metrics (unit tests).
 func NewGovernor(teams map[string]TeamPolicy, lim limiter.LimiterStore, bud budget.BudgetStore, m *metrics.Metrics) *Governor {
 	return &Governor{teams: teams, lim: lim, bud: bud, metrics: m}
+}
+
+// SetTeamLookup installs a dynamic team-policy source (D3, ADR-016) — e.g. a
+// keystore team-record lookup — consulted on every PreCheck/Settle BEFORE the
+// static config map, so editing a team's budget/limits in the admin console
+// takes effect on the very next request: no restart, no hot-reload. Passing
+// nil (the default) reproduces today's config-only behavior exactly. The
+// lookup's second return value distinguishes "no record for this team" (fall
+// through to config) from a real hit; SetTeamLookup itself makes no I/O call.
+func (g *Governor) SetTeamLookup(f func(team string) (TeamPolicy, bool)) {
+	g.lookup = f
+}
+
+// policyOf resolves a team's policy: a dynamic-lookup hit wins over a config
+// entry of the same name (ADR-016 precedence — an admin console edit must not
+// be silently shadowed by the config file); a team present in neither is
+// ungoverned (ok=false).
+func (g *Governor) policyOf(team string) (TeamPolicy, bool) {
+	if g.lookup != nil {
+		if p, ok := g.lookup(team); ok {
+			return p, true
+		}
+	}
+	p, ok := g.teams[team]
+	return p, ok
 }
 
 // PricingVersionOf returns the rate table version for the audit CostRef,
@@ -90,7 +116,7 @@ type GovDecision struct {
 // (but a key limit, if any, still applies — see KeyPolicy). keyID scopes the
 // key-level counters; pass "" with a zero KeyPolicy when there is none.
 func (g *Governor) PreCheck(team, keyID string, kp KeyPolicy, estimateTokens int64) GovDecision {
-	if p, ok := g.teams[team]; ok {
+	if p, ok := g.policyOf(team); ok {
 		// rate limit (RPM): 1 request unit
 		if p.RatePerMin > 0 && !g.lim.AllowRate("rate:"+team, 1, p.RatePerMin, max64(p.RateBurst, 1)) {
 			return GovDecision{Status: 429, Reason: "rate limit exceeded"}
@@ -141,7 +167,7 @@ func (g *Governor) PreCheck(team, keyID string, kp KeyPolicy, estimateTokens int
 // Key-level spend is deliberately NOT added to /metrics: metric labels are
 // config-bounded (CLAUDE.md) and must never carry a key_id.
 func (g *Governor) Settle(team, keyID string, kp KeyPolicy, provider, model string, u pricing.Usage, table *pricing.Table) (costMicros int64, pricingMissing bool) {
-	p := g.teams[team]
+	p, _ := g.policyOf(team)
 	if p.TokensPerDay > 0 {
 		g.lim.DebitQuota("quota:"+team, u.Input+u.Output, 24*time.Hour)
 		// Reflect the post-debit daily quota utilization into the gauge (0..1).
