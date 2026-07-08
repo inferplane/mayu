@@ -82,6 +82,7 @@ func teamView(t keystore.TeamRecord, source string) map[string]any {
 	v["budget_on_exceeded"] = t.BudgetOnExceeded
 	v["guardrail_id"] = t.GuardrailID
 	v["guardrail_version"] = t.GuardrailVersion
+	v["allowed_regions"] = t.AllowedRegions
 	v["created_at"] = t.CreatedAt
 	v["updated_at"] = t.UpdatedAt
 	return v
@@ -126,6 +127,9 @@ type teamWriteBody struct {
 	// Guardrail for this team (D6, ADR-019). Empty ID = no override.
 	GuardrailID      string `json:"guardrail_id,omitempty"`
 	GuardrailVersion string `json:"guardrail_version,omitempty"`
+	// AllowedRegions restricts this team to providers labeled with one of
+	// these regions (D7, ADR-020). Empty = unrestricted.
+	AllowedRegions []string `json:"allowed_regions,omitempty"`
 }
 
 // maxAllowedModelsBytes bounds the serialized allowed_models list, mirroring
@@ -168,6 +172,33 @@ func (b teamWriteBody) validate() error {
 	}
 	if err := validateGuardrailFields(b.GuardrailID, b.GuardrailVersion); err != nil {
 		return err
+	}
+	if err := validateAllowedRegions(b.AllowedRegions); err != nil {
+		return err
+	}
+	return nil
+}
+
+// maxAllowedRegionsBytes mirrors maxAllowedModelsBytes's cap on the joined list.
+const maxAllowedRegionsBytes = 4096
+
+// validateAllowedRegions checks allowed_regions shape (D7, ADR-020): joined
+// size bound, and each entry free of control characters and commas — a comma
+// would corrupt the stored comma-joined column (keystore.joinModels reuse) on
+// round-trip.
+func validateAllowedRegions(regions []string) error {
+	if len(strings.Join(regions, ",")) > maxAllowedRegionsBytes {
+		return fmt.Errorf("allowed_regions exceeds %d bytes joined", maxAllowedRegionsBytes)
+	}
+	for _, region := range regions {
+		if strings.Contains(region, ",") {
+			return fmt.Errorf("allowed_regions entries must not contain ','")
+		}
+		for _, r := range region {
+			if unicode.IsControl(r) {
+				return fmt.Errorf("allowed_regions entries must not contain control characters")
+			}
+		}
 	}
 	return nil
 }
@@ -223,6 +254,7 @@ func (h *TeamsHandler) upsert(w http.ResponseWriter, r *http.Request, id princip
 		TokensPerDay: body.TokensPerDay, QuotaOnExceeded: body.QuotaOnExceeded,
 		BudgetUSDMicros: body.BudgetUSDMicros, BudgetOnExceeded: body.BudgetOnExceeded,
 		GuardrailID: body.GuardrailID, GuardrailVersion: body.GuardrailVersion,
+		AllowedRegions: body.AllowedRegions,
 	}
 	if err := h.store.UpsertTeam(r.Context(), rec); err != nil {
 		http.Error(w, `{"error":"upsert failed"}`, http.StatusInternalServerError)

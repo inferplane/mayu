@@ -263,3 +263,42 @@ func TestBreakerOpsRaceFree(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+// TestResolveChainRegionNilProviderConfigs (D7, ADR-020): a live.State built
+// via NewState (no BuildState, as every existing test in this file does)
+// carries a nil providerConfigs map — ChainTarget.Region must read as ""
+// rather than panic on the nil-map lookup.
+func TestResolveChainRegionNilProviderConfigs(t *testing.T) {
+	provs := map[string]providers.Provider{"a": mockprovider.New("m")}
+	models := map[string]config.ModelConfig{"m": {Targets: []config.Target{{Provider: "a", Model: "m1"}}}}
+	r, _ := newTestRouter(provs, models)
+	chain, _, err := r.ResolveChain("m")
+	if err != nil || len(chain) != 1 {
+		t.Fatalf("resolve: %v %+v", err, chain)
+	}
+	if chain[0].Region != "" {
+		t.Fatalf("Region = %q, want \"\" (unlabeled)", chain[0].Region)
+	}
+}
+
+func TestFilterRegions(t *testing.T) {
+	chain := []ChainTarget{
+		{ProviderName: "us", Region: "us"},
+		{ProviderName: "eu", Region: "eu"},
+		{ProviderName: "unlabeled", Region: ""},
+	}
+	// No policy → unrestricted, unchanged (and not even copied).
+	if got := FilterRegions(chain, nil); len(got) != 3 {
+		t.Fatalf("nil allowed: got %d targets, want 3 unchanged", len(got))
+	}
+	// Restricted to "eu" → only the eu target survives; the unlabeled target
+	// is fail-closed dropped even though it was never explicitly excluded.
+	got := FilterRegions(chain, []string{"eu"})
+	if len(got) != 1 || got[0].ProviderName != "eu" {
+		t.Fatalf("eu-restricted: got %+v, want only eu", got)
+	}
+	// Restricted to a region nothing matches → empty chain (caller 403s).
+	if got := FilterRegions(chain, []string{"apac"}); len(got) != 0 {
+		t.Fatalf("apac-restricted: got %+v, want empty", got)
+	}
+}

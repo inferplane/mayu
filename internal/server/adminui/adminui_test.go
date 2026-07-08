@@ -361,3 +361,29 @@ func TestAdminUI_guardrailFieldsWired(t *testing.T) {
 		t.Error("app.js does not prefill guardrail_id when editing a team")
 	}
 }
+
+// TestAdminUI_regionFieldsWired (D7, ADR-020): the team form carries the
+// allowed_regions input, submits it through the existing PUT /admin/teams/{name}
+// call, and states the fail-closed-on-unlabeled-provider invariant.
+func TestAdminUI_regionFieldsWired(t *testing.T) {
+	_, html := get(t, "/index.html")
+	if !strings.Contains(html, `id="tf-regions"`) {
+		t.Error("index.html missing the tf-regions team-form element")
+	}
+	for _, banned := range []string{"onclick=", "onsubmit=", "onchange=", "style=", "onload="} {
+		if strings.Contains(html, banned) {
+			t.Errorf("index.html contains inline %q in the team-form region field (CSP)", banned)
+		}
+	}
+	if !strings.Contains(html, "fail-closed") {
+		t.Error("index.html missing the fail-closed-on-unlabeled-provider hint for allowed regions")
+	}
+
+	_, js := get(t, "/app.js")
+	if !strings.Contains(js, `body.allowed_regions = regions;`) {
+		t.Error("app.js does not submit allowed_regions in the team-form handler")
+	}
+	if !strings.Contains(js, `$("tf-regions").value = (t.allowed_regions || []).join(", ");`) {
+		t.Error("app.js does not prefill allowed_regions when editing a team")
+	}
+}

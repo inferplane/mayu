@@ -237,17 +237,26 @@ func newGateway(cfgPath string) (*gateway, error) {
 		return governance.PolicyFromLimits(rec.RPM, rec.TPM, rec.TokensPerDay,
 			rec.QuotaOnExceeded, rec.BudgetUSDMicros, rec.BudgetOnExceeded), true
 	})
-	// Per-team record lookup for NON-governance overrides (D6/ADR-019 today —
-	// the guardrail override; D7/ADR-020's region-lock reuses this same
-	// closure shape). Same fresh-per-request posture as SetTeamLookup above; a
-	// lookup error falls back to "no override" rather than blocking traffic.
+	// Per-team record lookup for NON-governance overrides (D6/ADR-019's
+	// guardrail override; D7/ADR-020's region-lock reuses this same closure).
+	// Same fresh-per-request posture as SetTeamLookup above; a lookup error
+	// falls back to "no override" rather than blocking traffic. A DB record,
+	// when present, wins WHOLESALE over config (ADR-016 priority) — but a
+	// config-only team (no DB record) still gets its config-declared region
+	// policy applied, since keystore.TeamRecord has no other source for it.
 	teamPolicy := func(team string) (keystore.TeamRecord, bool) {
 		rec, ok, err := store.GetTeam(context.Background(), team)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "inferplane: team policy lookup:", err)
 			return keystore.TeamRecord{}, false
 		}
-		return rec, ok
+		if ok {
+			return rec, true
+		}
+		if tc, ok := cfg.Teams[team]; ok && len(tc.AllowedRegions) > 0 {
+			return keystore.TeamRecord{AllowedRegions: tc.AllowedRegions}, true
+		}
+		return keystore.TeamRecord{}, false
 	}
 
 	// Budget-alert webhook (D5b, ADR-017): opt-in, off unless configured. The
@@ -379,6 +388,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 			Guardrails:          masking != nil,
 			KeyGovernanceFields: true, // keystore always has budget/TPM/RPM/expiry/owner (Phase 2)
 			TeamsRecords:        true, // keystore always supports TeamStore (D3, ADR-016)
+			RegionPolicy:        true, // enforcement path always present (D7, ADR-020) — same rationale as TeamsRecords
 			BudgetAlerts:        notifier != nil,
 		}
 	}

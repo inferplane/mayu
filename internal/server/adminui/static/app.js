@@ -744,6 +744,7 @@ function teamLimitsSummary(t) {
   if (t.tpm) parts.push(t.tpm + " tpm");
   if (t.tokens_per_day) parts.push(t.tokens_per_day + " tok/day (" + (t.quota_on_exceeded || "block") + ")");
   if (t.guardrail_id) parts.push("guardrail " + t.guardrail_id + (t.guardrail_version ? ":" + t.guardrail_version : ""));
+  if (t.allowed_regions && t.allowed_regions.length) parts.push("regions " + t.allowed_regions.join(","));
   return parts.length ? parts.join(" · ") : "—";
 }
 
@@ -758,6 +759,7 @@ function fillTeamForm(t) {
   $("tf-models").value = (t.allowed_models || []).join(", ");
   $("tf-guardrail-id").value = t.guardrail_id || "";
   $("tf-guardrail-version").value = t.guardrail_version || "";
+  $("tf-regions").value = (t.allowed_regions || []).join(", ");
 }
 
 // refreshTeamsView renders the team table (joined with spend when the
@@ -851,6 +853,8 @@ $("team-form").addEventListener("submit", async (e) => {
     if (models.length) body.allowed_models = models;
     if ($("tf-guardrail-id").value.trim()) body.guardrail_id = $("tf-guardrail-id").value.trim();
     if ($("tf-guardrail-version").value.trim()) body.guardrail_version = $("tf-guardrail-version").value.trim();
+    const regions = $("tf-regions").value.split(",").map((s) => s.trim()).filter(Boolean);
+    if (regions.length) body.allowed_regions = regions;
     await api("PUT", "/admin/teams/" + encodeURIComponent(name), body);
     status.textContent = "saved ✓ " + name;
     $("team-form").reset();

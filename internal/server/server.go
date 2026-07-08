@@ -39,7 +39,8 @@ func DataMux(r *router.Router, store keystore.Store, aud *audit.Writer, gov *gov
 	msgs.SetTeamPolicy(teamPolicy)
 	mux.Handle("POST /v1/messages", msgs)
 	ct := anthropicapi.NewCountTokensHandler(r)
-	ct.SetMasking(mask) // mask the count body too (T6); never 500
+	ct.SetMasking(mask)          // mask the count body too (T6); never 500
+	ct.SetTeamPolicy(teamPolicy) // region lock (D7, ADR-020): never call an out-of-region TokenCounter
 	mux.Handle("POST /v1/messages/count_tokens", ct)
 	chat := openaiapi.NewChatHandlerMetrics(r, aud, gov, m)
 	chat.SetMasking(mask) // masked teams rejected on the OpenAI ingress (T6b)

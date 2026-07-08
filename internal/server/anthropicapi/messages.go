@@ -127,6 +127,30 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 404, "not_found_error", "unknown model: "+parsed.Model)
 		return
 	}
+	// Team-record fresh lookup (D6/D7, ADR-016 pattern): one call reused below
+	// both for the region filter and the guardrail override — a team with no
+	// record is indistinguishable from a record with no overrides (zero value).
+	var teamRec keystore.TeamRecord
+	if h.teamPolicy != nil {
+		teamRec, _ = h.teamPolicy(p.Team)
+	}
+	// Per-team region lock (D7, ADR-020): drop targets outside the team's
+	// allowed regions BEFORE any billing/masking work. An unlabeled target is
+	// always dropped for a restricted team (fail-closed — it cannot prove
+	// residency). If every target is filtered out, this is a hard deny, same
+	// shape as the allow-list 403 above.
+	if len(teamRec.AllowedRegions) > 0 {
+		if filtered := router.FilterRegions(chain, teamRec.AllowedRegions); len(filtered) == 0 {
+			errMsg := "region_blocked"
+			h.audit(p, parsed.Model, "", &audit.OutcomeRef{Status: 403, Error: &errMsg}, false, traceID)
+			h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 403, time.Since(start).Seconds(), 0)
+			tracing.SetStatus(span, false, "region blocked")
+			writeErr(w, 403, "permission_error", "no allowed-region target for model: "+parsed.Model)
+			return
+		} else {
+			chain = filtered
+		}
+	}
 	// PII masking (ADR-009): for a masked team, mask request text BEFORE the
 	// governance estimate and the upstream call. Masking updates BOTH RawBody and
 	// the parsed request (the openai_compatible provider converts from Parsed, not
@@ -177,17 +201,6 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	h.audit(p, parsed.Model, chain[0].Upstream, nil, piiMasked, traceID)
 	stream := parsed.Stream != nil && *parsed.Stream
 
-	// Team-record per-team guardrail override (D6, ADR-019): one fresh lookup
-	// for the whole request (reused across every fallback attempt below) — a
-	// record with no override (empty GuardrailID) is indistinguishable from
-	// no record at all, so the provider's own default applies either way.
-	var teamGuardrailID, teamGuardrailVersion string
-	if h.teamPolicy != nil {
-		if rec, ok := h.teamPolicy(p.Team); ok {
-			teamGuardrailID, teamGuardrailVersion = rec.GuardrailID, rec.GuardrailVersion
-		}
-	}
-
 	// Priority fallback chain (§4.5): try targets in order. A pre-TTFT failure
 	// (Complete error, or Stream() error before the first event) falls back to
 	// the next target, records the breaker result, and sets x-inferplane-fallback.
@@ -202,8 +215,8 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			Model: parsed.Model, Upstream: ct.Upstream, Parsed: &parsed,
 			RawBody: raw, Headers: upHeaders, Stream: stream,
 			IngressProtocol:  "anthropic",
-			GuardrailID:      teamGuardrailID,
-			GuardrailVersion: teamGuardrailVersion,
+			GuardrailID:      teamRec.GuardrailID,
+			GuardrailVersion: teamRec.GuardrailVersion,
 		}
 		last := i == len(chain)-1
 		if i > 0 {

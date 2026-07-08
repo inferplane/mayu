@@ -205,6 +205,7 @@
               <input id="tf-models" type="text" placeholder="default allowed models — comma-separated (optional)">
               <input id="tf-guardrail-id" type="text" placeholder="guardrail ID override (optional, bedrock)">
               <input id="tf-guardrail-version" type="text" placeholder="guardrail version (optional, default DRAFT)">
+              <input id="tf-regions" type="text" placeholder="allowed regions — comma-separated (optional)">
               <button type="submit">SAVE TEAM</button>
             </form>
             <p id="team-form-status" class="status"></p>
@@ -222,6 +223,12 @@
               <span class="ko">가드레일 오버라이드는 이 팀에 <b>다른</b> Bedrock
               Guardrail을 지정할 뿐, provider에 설정된 기본 가드레일을 끌 수는 없습니다
               (팀별 opt-out 없음, D6/ADR-019).</span></p>
+            <p class="hint">Allowed regions restrict this team to providers labeled with
+              one of these regions — a provider with NO region label is always
+              blocked for a restricted team (fail-closed, D7/ADR-020).
+              <span class="ko">허용 region은 이 팀을 지정된 region으로 라벨링된
+              provider로만 제한합니다 — region 라벨이 없는 provider는 제한된 팀에서
+              항상 차단됩니다(fail-closed, D7/ADR-020).</span></p>
           </div>
           <div class="card">
             <div class="microlabel">teams</div>
@@ -286,7 +293,7 @@
               <option value="none">no key (bedrock / keyless)</option>
             </select>
             <input id="pf-refval" type="text" placeholder="ref NAME or PATH — never the secret value">
-            <input id="pf-region" type="text" placeholder="region (bedrock)">
+            <input id="pf-region" type="text" placeholder="region label (any provider type; blank = fail-closed for restricted teams)">
             <input id="pf-authmode" type="text" placeholder="auth mode (bedrock, e.g. irsa)">
             <button type="button" id="pf-test" class="ghost">TEST CONNECTION</button>
             <button type="submit">SAVE PROVIDER</button>
