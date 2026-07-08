@@ -57,6 +57,7 @@ type gateway struct {
 	anchorEvery   time.Duration               // anchor interval
 	anchorLast    atomic.Int64                // highest record count successfully anchored (shared: worker + finalAnchor)
 	metrics       *metrics.Metrics            // for the anchor-failure counter
+	notifier      *alert.Notifier             // nil unless budget_alerts is configured (D5b, ADR-017)
 	reloadMu      sync.Mutex                  // serializes reloads AND UI writes (concurrent SIGHUPs/triggers)
 	dataLn        net.Listener
 	adminLn       net.Listener
@@ -335,6 +336,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 		analyticsIdx:  analyticsIdx,
 		analyticsSink: analyticsSink,
 		otelDown:      otelDown,
+		notifier:      notifier,
 		instance:      inst,
 		anchorer:      anchorer,
 		anchorEvery:   anchorEvery,
@@ -708,6 +710,13 @@ func (g *gateway) serve(ctx context.Context) error {
 		defer g.finalAnchor()
 	}
 	defer g.store.Close()
+	// Wait for in-flight budget-alert webhook deliveries (D5b, ADR-017) before
+	// exit so a rolling deploy's last-window alerts aren't silently abandoned.
+	// Registered here so it runs after the data plane has drained (below), by
+	// which point any final Settle→Observe goroutines have been spawned.
+	if g.notifier != nil {
+		defer g.notifier.Close()
+	}
 	// Shutdown order (LIFO — registered here, run in reverse): aud.Close drains
 	// the writer (enqueuing the last records into the analytics sink) → the sink
 	// drains its worker (ingesting them) → the index closes. So these are

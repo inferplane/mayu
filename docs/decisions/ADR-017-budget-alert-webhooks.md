@@ -103,6 +103,10 @@ One HTTP POST, JSON body:
 No retry — a missed alert is not re-delivered; the next threshold crossing (or
 the next window) will fire again. `http.Client` has a configurable timeout
 (default 5s) so an unreachable destination cannot leak goroutines indefinitely.
+Each delivery goroutine is tracked by a `sync.WaitGroup`; `Notifier.Close()`
+(called on the graceful-shutdown path after the data plane drains) waits for
+in-flight deliveries so a rolling deploy's last-window alerts are not silently
+abandoned — the wait is bounded by the per-delivery client timeout.
 
 **Why this client has no `DialContext` metadata-IP guard, unlike the connection
 probe** (`internal/server/configapi/probe.go`): the probe's guard exists

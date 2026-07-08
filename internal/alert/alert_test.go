@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -170,6 +171,45 @@ func TestRecent_RingCapAndOrder(t *testing.T) {
 	if len(fires) != recentCap {
 		t.Fatalf("expected ring capped at %d, got %d", recentCap, len(fires))
 	}
+}
+
+func TestClose_WaitsForInFlightDeliveries(t *testing.T) {
+	release := make(chan struct{})
+	var served int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release // block until the test lets delivery complete
+		atomic.AddInt32(&served, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	n := New(srv.URL, []float64{0.5}, 5*time.Second)
+	n.Observe("team", 600, 1000) // spawns a delivery goroutine, now blocked in the handler
+
+	done := make(chan struct{})
+	go func() { n.Close(); close(done) }()
+
+	// Close must still be blocking while the delivery is in flight.
+	select {
+	case <-done:
+		t.Fatal("Close returned before the in-flight delivery finished")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release) // let the delivery complete
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return after the delivery finished")
+	}
+	if atomic.LoadInt32(&served) != 1 {
+		t.Fatalf("expected the in-flight delivery to complete, served=%d", served)
+	}
+}
+
+func TestClose_NilSafe(t *testing.T) {
+	var n *Notifier
+	n.Close() // must not panic
 }
 
 func TestDeliver_ErrorNeverLeaksURL(t *testing.T) {

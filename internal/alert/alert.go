@@ -49,6 +49,7 @@ type Notifier struct {
 	url        string
 	thresholds []float64 // sorted ascending
 	client     *http.Client
+	wg         sync.WaitGroup // tracks in-flight deliver() goroutines, for graceful shutdown
 
 	mu     sync.Mutex
 	fired  map[string]float64 // team -> highest threshold fired in the current window
@@ -123,10 +124,23 @@ func (n *Notifier) Observe(team string, spentMicros, limitMicros int64) {
 		SpentMicros: spentMicros,
 		LimitMicros: limitMicros,
 	}
+	n.wg.Add(1)
 	go n.deliver(fire)
 }
 
+// Close waits for in-flight webhook deliveries to finish (bounded by each
+// delivery's own http.Client timeout), so a graceful shutdown does not
+// silently abandon an alert POST spawned in the last window. Safe to call
+// once; the Notifier must not be used afterward.
+func (n *Notifier) Close() {
+	if n == nil {
+		return
+	}
+	n.wg.Wait()
+}
+
 func (n *Notifier) deliver(fire Fire) {
+	defer n.wg.Done()
 	body, _ := json.Marshal(map[string]any{
 		"event":            "budget_alert",
 		"team":             fire.Team,

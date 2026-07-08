@@ -529,7 +529,10 @@ func TestE2EBudgetAlertFires(t *testing.T) {
 	// acquisition so a second POST arriving between them can't be observed
 	// only in the snapshot (that would make len(fires) disagree with the
 	// break condition that just fired).
-	deadline := time.Now().Add(2 * time.Second)
+	// Poll deadline exceeds the 2s webhook timeout above, leaving CI margin
+	// for webhook + delivery latency (a deadline equal to the timeout would
+	// leave zero slack on a loaded runner).
+	deadline := time.Now().Add(8 * time.Second)
 	var fires []map[string]any
 	for {
 		mu.Lock()
