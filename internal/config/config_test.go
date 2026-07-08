@@ -550,3 +550,123 @@ func TestAnalyticsModeBRejectsMalshapedDSNRef(t *testing.T) {
 		t.Fatalf("error must never echo the ref value: %v", err)
 	}
 }
+
+// --- budget_alerts block (D5b, ADR-017) ---
+
+func TestBudgetAlertsParsesAndValidates(t *testing.T) {
+	dir := t.TempDir()
+	write := func(n, b string) string { p := filepath.Join(dir, n); os.WriteFile(p, []byte(b), 0o600); return p }
+	t.Setenv("INFERPLANE_ALERT_WEBHOOK", "https://hooks.example.com/services/T00/B00/xyz")
+
+	cfg, err := Load(write("ok.json", `{"budget_alerts":{
+		"webhook_url_ref":{"env":"INFERPLANE_ALERT_WEBHOOK"},
+		"thresholds":[0.5, 0.9],
+		"timeout":"2s"
+	}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ba := cfg.BudgetAlerts
+	if ba == nil {
+		t.Fatal("budget_alerts not parsed")
+	}
+	if ba.WebhookURL != "https://hooks.example.com/services/T00/B00/xyz" {
+		t.Fatalf("webhook_url_ref not resolved: %q", ba.WebhookURL)
+	}
+	if len(ba.Thresholds) != 2 || ba.Thresholds[0] != 0.5 {
+		t.Fatalf("thresholds = %v", ba.Thresholds)
+	}
+
+	// absent → nil, alerting off.
+	cfgA, err := Load(write("a.json", `{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfgA.BudgetAlerts != nil {
+		t.Fatal("budget_alerts should be nil when absent")
+	}
+}
+
+func TestBudgetAlertsDefaultsThresholds(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "ok.json")
+	t.Setenv("INFERPLANE_ALERT_WEBHOOK", "https://hooks.example.com/x")
+	os.WriteFile(f, []byte(`{"budget_alerts":{"webhook_url_ref":{"env":"INFERPLANE_ALERT_WEBHOOK"}}}`), 0o600)
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.BudgetAlerts.Thresholds; len(got) != 2 || got[0] != 0.8 || got[1] != 1.0 {
+		t.Fatalf("default thresholds = %v, want [0.8 1.0]", got)
+	}
+}
+
+func TestBudgetAlertsRejectsInlineWebhookURL(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	os.WriteFile(f, []byte(`{"budget_alerts":{"webhook_url":"https://hooks.example.com/secret-token"}}`), 0o600)
+	_, err := Load(f)
+	if err == nil {
+		t.Fatal("inline webhook_url (not webhook_url_ref) must be rejected")
+	}
+	if strings.Contains(err.Error(), "secret-token") {
+		t.Fatalf("error must never echo the inline value: %v", err)
+	}
+}
+
+func TestBudgetAlertsRejectsMalshapedURLRef(t *testing.T) {
+	dir := t.TempDir()
+	secret := "https://hooks.example.com/real-secret-value"
+	f := filepath.Join(dir, "bad.json")
+	os.WriteFile(f, []byte(`{"budget_alerts":{"webhook_url_ref":{"env":"`+secret+`"}}}`), 0o600)
+	_, err := Load(f)
+	if err == nil {
+		t.Fatal("a secret-shaped env ref (not a valid env var name) must be rejected")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("error must never echo the ref value: %v", err)
+	}
+}
+
+func TestBudgetAlertsRejectsNonHTTPWebhook(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	t.Setenv("INFERPLANE_ALERT_WEBHOOK_BAD", "not-a-url")
+	os.WriteFile(f, []byte(`{"budget_alerts":{"webhook_url_ref":{"env":"INFERPLANE_ALERT_WEBHOOK_BAD"}}}`), 0o600)
+	if _, err := Load(f); err == nil {
+		t.Fatal("a non-absolute-http(s) resolved URL must be rejected")
+	}
+}
+
+func TestBudgetAlertsRejectsMissingWebhookURLRef(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	os.WriteFile(f, []byte(`{"budget_alerts":{}}`), 0o600)
+	_, err := Load(f)
+	if err == nil {
+		t.Fatal("budget_alerts without webhook_url_ref must be rejected")
+	}
+	if !strings.Contains(err.Error(), "webhook_url_ref is required") {
+		t.Fatalf("error should name the missing field, got: %v", err)
+	}
+}
+
+func TestBudgetAlertsRejectsEmptyResolvedWebhookURL(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	t.Setenv("INFERPLANE_ALERT_WEBHOOK_EMPTY", "")
+	os.WriteFile(f, []byte(`{"budget_alerts":{"webhook_url_ref":{"env":"INFERPLANE_ALERT_WEBHOOK_EMPTY"}}}`), 0o600)
+	if _, err := Load(f); err == nil {
+		t.Fatal("an env ref resolving to an empty string must be rejected (empty string parses but is not absolute)")
+	}
+}
+
+func TestBudgetAlertsRejectsBadThreshold(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	t.Setenv("INFERPLANE_ALERT_WEBHOOK_OK", "https://hooks.example.com/x")
+	os.WriteFile(f, []byte(`{"budget_alerts":{"webhook_url_ref":{"env":"INFERPLANE_ALERT_WEBHOOK_OK"},"thresholds":[0]}}`), 0o600)
+	if _, err := Load(f); err == nil {
+		t.Fatal("a non-positive threshold must be rejected")
+	}
+}

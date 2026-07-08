@@ -376,6 +376,20 @@
           </table>
         </div>
 
+        <div class="card affordance" data-cap="budget_alerts">
+          <div class="microlabel">budget alerts · recent fires</div>
+          <p class="hint">Webhook fires when a team's monthly budget utilization
+            crosses a configured threshold (<code>budget_alerts</code>, ADR-017).
+            Per-instance state — a multi-replica deployment may fire once per
+            replica. <span class="ko">팀 예산 사용률이 임계치를 넘으면 웹훅이
+            발화합니다. 인스턴스별 상태라 다중 레플리카에서는 레플리카당
+            중복 발화할 수 있습니다.</span></p>
+          <table class="data" id="alerts-table">
+            <thead><tr><th>time</th><th>team</th><th>threshold</th><th>ratio</th><th>delivered</th></tr></thead>
+            <tbody><tr><td colspan="5" class="empty">connect to load…</td></tr></tbody>
+          </table>
+        </div>
+
         <div class="card">
           <div class="microlabel">audit integrity</div>
           <p class="hint">Verify the tamper-evident hash chain of each file

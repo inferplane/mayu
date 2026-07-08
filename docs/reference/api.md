@@ -26,6 +26,7 @@ contract is in [docs/api-reference.md](../api-reference.md).
 | Model catalog | `internal/server/configapi/catalog.go` | `GET /admin/providers/catalog?type=<t>` — embedded known-model ids for the console typeahead (ADR-014); advisory (unknown type ⇒ empty, never blocks a save) |
 | Provider store | `internal/providerstore/` | opt-in DB-authoritative provider/model topology (ADR-008); refs only (no secret column), durable seed marker, Postgres-portable DDL |
 | Audit verify API | `internal/server/auditapi/` | `GET /admin/audit/verify` per-sink hash-chain check (ADR-003 #2); complete-prefix, 16 MiB cap |
+| Budget alerts API | `internal/server/adminapi/alerts.go` | `GET /admin/alerts/recent` (**full-admin only**, D5b/ADR-017) — recent-fires ring (last 50) of the budget-alert webhook emitter (`internal/alert.Notifier`); per-instance state |
 | Metrics endpoint | `internal/server/metricsapi.go` | unauthenticated Prometheus `/metrics` |
 | OpenAI conversion | `internal/openai/convert.go` | OpenAI ⇄ canonical request/response/chunk |
 
@@ -40,8 +41,8 @@ contract is in [docs/api-reference.md](../api-reference.md).
 - `internal/server/auth.go` — `KeyAuth` virtual-key resolution
 
 ### 5. Cross-references
-- Related modules: `internal/router`, `internal/governance`, `providers/`
-- Related ADRs: docs/decisions/ADR-016-teams-as-keystore-records.md
+- Related modules: `internal/router`, `internal/governance`, `internal/alert`, `providers/`
+- Related ADRs: docs/decisions/ADR-016-teams-as-keystore-records.md, docs/decisions/ADR-017-budget-alert-webhooks.md
 - Related runbooks: docs/runbooks/
 
 <a id="korean"></a>
@@ -67,6 +68,7 @@ HTTP 표면입니다. 두 인그레스(Anthropic Messages, OpenAI Chat Completio
 | 모델 카탈로그 | `internal/server/configapi/catalog.go` | `GET /admin/providers/catalog?type=<t>` — 콘솔 typeahead용 내장 모델 ID (ADR-014); 어드바이저리(미지 타입 ⇒ 빈 목록, 저장 차단 안 함) |
 | Provider 스토어 | `internal/providerstore/` | 옵트인 DB 권위 프로바이더/모델 토폴로지 (ADR-008); ref만 저장(시크릿 컬럼 없음), durable seed 마커, Postgres 이식 가능 DDL |
 | Audit verify API | `internal/server/auditapi/` | `GET /admin/audit/verify` sink별 해시체인 검증 (ADR-003 #2); 완전 prefix, 16 MiB 캡 |
+| 예산 알림 API | `internal/server/adminapi/alerts.go` | `GET /admin/alerts/recent` (**풀 어드민 전용**, D5b/ADR-017) — 예산 알림 웹훅 발신기(`internal/alert.Notifier`)의 최근 발화(최대 50건) 링; 인스턴스별 상태 |
 | 메트릭 엔드포인트 | `internal/server/metricsapi.go` | 무인증 Prometheus `/metrics` |
 | OpenAI 변환 | `internal/openai/convert.go` | OpenAI ⇄ canonical 요청/응답/청크 |
 
@@ -81,6 +83,6 @@ HTTP 표면입니다. 두 인그레스(Anthropic Messages, OpenAI Chat Completio
 - `internal/server/auth.go` — `KeyAuth` 가상 키 해석
 
 ### 5. 상호 참조
-- 관련 모듈: `internal/router`, `internal/governance`, `providers/`
-- 관련 ADR: docs/decisions/ADR-016-teams-as-keystore-records.md
+- 관련 모듈: `internal/router`, `internal/governance`, `internal/alert`, `providers/`
+- 관련 ADR: docs/decisions/ADR-016-teams-as-keystore-records.md, docs/decisions/ADR-017-budget-alert-webhooks.md
 - 관련 런북: docs/runbooks/

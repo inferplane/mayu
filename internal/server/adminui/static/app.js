@@ -973,6 +973,31 @@ async function refreshGovernance() {
       sbody.appendChild(tr);
     }
   }
+  // budget-alert recent fires (D5b, ADR-017) — capability-gated, full-admin only.
+  if (capOn("budget_alerts")) {
+    const abody = $("alerts-table").querySelector("tbody");
+    abody.textContent = "";
+    try {
+      const out = await api("GET", "/admin/alerts/recent", null, true);
+      const fires = (out && out !== DISABLED) ? (out.fires || []) : [];
+      if (!fires.length) {
+        abody.appendChild(emptyRow(5, "no alerts fired yet"));
+      } else {
+        for (const f of fires) {
+          const tr = document.createElement("tr");
+          tr.appendChild(td(f.ts || ""));
+          tr.appendChild(td(f.team || ""));
+          tr.appendChild(td(((f.threshold || 0) * 100).toFixed(0) + "%"));
+          tr.appendChild(td(((f.ratio || 0) * 100).toFixed(0) + "%"));
+          tr.appendChild(td(f.delivered ? "yes" : ("no" + (f.error ? " (" + f.error + ")" : ""))));
+          abody.appendChild(tr);
+        }
+      }
+    } catch {
+      abody.textContent = "";
+      abody.appendChild(emptyRow(5, "failed to load"));
+    }
+  }
 }
 
 // Verify the audit chain via the token-gated admin API (NOT a bare fetch — it
