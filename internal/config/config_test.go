@@ -638,6 +638,19 @@ func TestBudgetAlertsRejectsNonHTTPWebhook(t *testing.T) {
 	}
 }
 
+func TestBudgetAlertsRejectsMissingWebhookURLRef(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	os.WriteFile(f, []byte(`{"budget_alerts":{}}`), 0o600)
+	_, err := Load(f)
+	if err == nil {
+		t.Fatal("budget_alerts without webhook_url_ref must be rejected")
+	}
+	if !strings.Contains(err.Error(), "webhook_url_ref is required") {
+		t.Fatalf("error should name the missing field, got: %v", err)
+	}
+}
+
 func TestBudgetAlertsRejectsBadThreshold(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "bad.json")

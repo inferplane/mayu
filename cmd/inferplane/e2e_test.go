@@ -524,21 +524,23 @@ func TestE2EBudgetAlertFires(t *testing.T) {
 		t.Fatalf("request: status %d, want 200", resp.StatusCode)
 	}
 
-	// The webhook delivery is async (fire-and-forget) — poll briefly.
+	// The webhook delivery is async (fire-and-forget) — poll briefly. The
+	// break decision and the snapshot are taken under the SAME lock
+	// acquisition so a second POST arriving between them can't be observed
+	// only in the snapshot (that would make len(fires) disagree with the
+	// break condition that just fired).
 	deadline := time.Now().Add(2 * time.Second)
+	var fires []map[string]any
 	for {
 		mu.Lock()
-		n := len(gotFires)
-		mu.Unlock()
-		if n > 0 || time.Now().After(deadline) {
+		if len(gotFires) > 0 || time.Now().After(deadline) {
+			fires = append([]map[string]any{}, gotFires...)
+			mu.Unlock()
 			break
 		}
+		mu.Unlock()
 		time.Sleep(10 * time.Millisecond)
 	}
-
-	mu.Lock()
-	fires := gotFires
-	mu.Unlock()
 	if len(fires) != 1 {
 		t.Fatalf("webhook received %d POSTs, want 1: %+v", len(fires), fires)
 	}

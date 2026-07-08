@@ -10,9 +10,11 @@ package alert
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -102,7 +104,11 @@ func (n *Notifier) Observe(team string, spentMicros, limitMicros int64) {
 		}
 	}
 	if crossed == 0 {
-		n.fired[team] = prev
+		if prev == 0 {
+			delete(n.fired, team) // bound map size: nothing armed, no need to remember this team
+		} else {
+			n.fired[team] = prev
+		}
 		n.mu.Unlock()
 		return
 	}
@@ -150,6 +156,9 @@ func (n *Notifier) deliver(fire Fire) {
 		fire.Error = "webhook request build failed"
 	}
 	n.record(fire)
+	if fire.Error != "" {
+		fmt.Fprintf(os.Stderr, "inferplane: budget alert webhook for team %q: %s\n", fire.Team, fire.Error)
+	}
 }
 
 // classifyError returns a sanitized delivery-failure classification — never

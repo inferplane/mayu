@@ -127,6 +127,19 @@ func TestObserve_RatioDropRearms(t *testing.T) {
 	waitForFires(t, n, 2)
 }
 
+func TestObserve_FiredMapEvictsUnarmedTeams(t *testing.T) {
+	n := New("http://example.invalid", []float64{0.8}, time.Second)
+	// A team observed below every threshold must not grow the fired map —
+	// bounds memory for high team churn (nothing to remember for it).
+	n.Observe("quiet-team", 100, 1000) // ratio 0.1, never crosses 0.8
+	n.mu.Lock()
+	_, tracked := n.fired["quiet-team"]
+	n.mu.Unlock()
+	if tracked {
+		t.Fatal("a team that never crossed a threshold must not be tracked in fired")
+	}
+}
+
 func TestObserve_NoLimitOrThresholds(t *testing.T) {
 	n := New("http://example.invalid", []float64{0.8}, time.Second)
 	n.Observe("teamA", 500, 0) // limit<=0

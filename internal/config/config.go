@@ -408,6 +408,9 @@ func validateBudgetAlerts(ba *BudgetAlertsConfig) error {
 	if ba == nil {
 		return nil
 	}
+	if ba.WebhookURLRef == nil {
+		return fmt.Errorf("config: budget_alerts.webhook_url_ref is required")
+	}
 	if err := ValidateSecretRef(ba.WebhookURLRef); err != nil {
 		return fmt.Errorf("config: budget_alerts.webhook_url_ref: %w", err)
 	}
