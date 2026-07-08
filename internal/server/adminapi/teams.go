@@ -2,6 +2,7 @@ package adminapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -186,24 +187,28 @@ func (h *TeamsHandler) upsert(w http.ResponseWriter, r *http.Request, id princip
 		http.Error(w, `{"error":"upsert failed"}`, http.StatusInternalServerError)
 		return
 	}
-	h.adminEvent("admin_team_upserted", id, name)
-	got, _, err := h.store.GetTeam(r.Context(), name)
-	if err != nil {
+	// Read back before emitting the audit event: an upsert that "succeeded"
+	// but can't be read back (a concurrent delete winning the race, or a
+	// genuine store error) must not leave a misleadingly-successful
+	// admin_team_upserted record in the audit chain.
+	got, ok, err := h.store.GetTeam(r.Context(), name)
+	if err != nil || !ok {
 		http.Error(w, `{"error":"upsert succeeded but read-back failed"}`, http.StatusInternalServerError)
 		return
 	}
+	h.adminEvent("admin_team_upserted", id, name)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(teamView(got, "record"))
 }
 
 func (h *TeamsHandler) delete(w http.ResponseWriter, r *http.Request, id principal.AdminIdentity) {
 	name := strings.TrimPrefix(r.URL.Path, "/admin/teams/")
-	if name == "" {
-		writeJSONError(w, http.StatusBadRequest, "team name required in path")
+	if err := validateTeamName(name); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := h.store.DeleteTeam(r.Context(), name); err != nil {
-		if err == keystore.ErrTeamNotFound {
+		if errors.Is(err, keystore.ErrTeamNotFound) {
 			http.Error(w, `{"error":"team not found"}`, http.StatusNotFound)
 			return
 		}

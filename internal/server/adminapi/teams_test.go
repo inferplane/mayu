@@ -76,6 +76,17 @@ func TestTeamsHandler_deleteMissingReturns404(t *testing.T) {
 	}
 }
 
+// TestTeamsHandler_deleteValidatesNameSameAsUpsert proves DELETE rejects a
+// malformed name (control characters, over-length) with 400 before it ever
+// reaches the store — the same validateTeamName gate PUT already used.
+func TestTeamsHandler_deleteValidatesNameSameAsUpsert(t *testing.T) {
+	h := NewTeamsHandler(newTestStore(t), nil, nil)
+	rec := doAsTeams(t, h, &adminID, "DELETE", "/admin/teams/"+strings.Repeat("x", 257), "")
+	if rec.Code != 400 {
+		t.Fatalf("delete over-length name: got %d, want 400", rec.Code)
+	}
+}
+
 func TestTeamsHandler_upsertIsIdempotentUpdate(t *testing.T) {
 	h := NewTeamsHandler(newTestStore(t), nil, nil)
 	doAsTeams(t, h, &adminID, "PUT", "/admin/teams/t", `{"rpm":1}`)
@@ -168,6 +179,33 @@ func TestTeamsHandler_auditEventsOnUpsertAndDelete(t *testing.T) {
 	got := em.events()
 	if len(got) != 2 || got[0] != "admin_team_upserted" || got[1] != "admin_team_deleted" {
 		t.Fatalf("audit events = %v, want [admin_team_upserted admin_team_deleted]", got)
+	}
+}
+
+// vanishingTeamStore simulates a concurrent delete winning the race between
+// UpsertTeam succeeding and the handler's own read-back — GetTeam always
+// reports "not found" regardless of what was just upserted.
+type vanishingTeamStore struct{ keystore.TeamStore }
+
+func (vanishingTeamStore) UpsertTeam(context.Context, keystore.TeamRecord) error { return nil }
+func (vanishingTeamStore) GetTeam(context.Context, string) (keystore.TeamRecord, bool, error) {
+	return keystore.TeamRecord{}, false, nil
+}
+
+// TestTeamsHandler_upsertReadBackNotFoundIs500NotEmpty200 pins the fix for a
+// real bug: the read-back after UpsertTeam must check its ok return value —
+// discarding it would encode and 200 a zero-value TeamRecord as if the
+// upsert had produced an empty team, and would emit admin_team_upserted
+// despite the response being an error.
+func TestTeamsHandler_upsertReadBackNotFoundIs500NotEmpty200(t *testing.T) {
+	em := &emittedRecords{}
+	h := NewTeamsHandler(vanishingTeamStore{}, nil, em.emit)
+	rec := doAsTeams(t, h, &adminID, "PUT", "/admin/teams/t", `{"rpm":1}`)
+	if rec.Code != 500 {
+		t.Fatalf("read-back not-found: got %d %s, want 500 (not a fabricated 200)", rec.Code, rec.Body.String())
+	}
+	if got := em.events(); len(got) != 0 {
+		t.Fatalf("audit events = %v, want none — a failed read-back must not record admin_team_upserted", got)
 	}
 }
 
