@@ -177,3 +177,62 @@ func TestGovernorCountersIndependentOfTable(t *testing.T) {
 		t.Fatal("budget counter did not accumulate across Settle calls (table-independent state expected)")
 	}
 }
+
+func TestGovernorSettleBudgetNotify(t *testing.T) {
+	teams := map[string]TeamPolicy{"t": {BudgetMicrosPerMonth: 1_000_000, BudgetExceeded: "block"}}
+	g := NewGovernor(teams, limiter.NewMemory(), budget.NewMemory(), nil)
+	var gotTeam string
+	var gotSpent, gotLimit int64
+	calls := 0
+	g.SetBudgetNotify(func(team string, spent, limit int64) {
+		calls++
+		gotTeam, gotSpent, gotLimit = team, spent, limit
+	})
+	tbl := pricing.New(pricing.OnMissingAllow, map[pricing.Key]pricing.Rate{{Provider: "p", Model: "m"}: {InputPerMTok: 1_000_000}})
+	g.Settle("t", "", KeyPolicy{}, "p", "m", pricing.Usage{Input: 400_000}, tbl) // 400k µUSD
+
+	if calls != 1 {
+		t.Fatalf("expected exactly one notify call, got %d", calls)
+	}
+	if gotTeam != "t" || gotSpent != 400_000 || gotLimit != 1_000_000 {
+		t.Fatalf("notify(team=%q, spent=%d, limit=%d), want (t, 400000, 1000000)", gotTeam, gotSpent, gotLimit)
+	}
+}
+
+func TestGovernorSettleBudgetNotify_UnbudgetedTeamSkipped(t *testing.T) {
+	teams := map[string]TeamPolicy{"t": {}} // no budget configured
+	g := NewGovernor(teams, limiter.NewMemory(), budget.NewMemory(), nil)
+	calls := 0
+	g.SetBudgetNotify(func(string, int64, int64) { calls++ })
+	tbl := testTable()
+	g.Settle("t", "", KeyPolicy{}, "p", "m", pricing.Usage{Input: 400_000}, tbl)
+	if calls != 0 {
+		t.Fatalf("unbudgeted team must not invoke the budget-notify hook, got %d calls", calls)
+	}
+}
+
+func TestGovernorSettleBudgetNotify_KeyBudgetExcluded(t *testing.T) {
+	// Per-key budgets must never reach the notify hook: key_id can't be a
+	// metric/alert label (CLAUDE.md).
+	teams := map[string]TeamPolicy{"t": {}} // no TEAM budget
+	g := NewGovernor(teams, limiter.NewMemory(), budget.NewMemory(), nil)
+	calls := 0
+	g.SetBudgetNotify(func(string, int64, int64) { calls++ })
+	kp := KeyPolicy{BudgetMicrosPerMonth: 1_000_000}
+	tbl := testTable()
+	g.Settle("t", "k1", kp, "p", "m", pricing.Usage{Input: 400_000}, tbl)
+	if calls != 0 {
+		t.Fatalf("key-budget debit must not invoke the team budget-notify hook, got %d calls", calls)
+	}
+}
+
+func TestGovernorSettleSetsBudgetUtilizationGauge(t *testing.T) {
+	m := metrics.New()
+	teams := map[string]TeamPolicy{"t": {BudgetMicrosPerMonth: 1_000_000, BudgetExceeded: "block"}}
+	g := NewGovernor(teams, limiter.NewMemory(), budget.NewMemory(), m)
+	tbl := testTable()
+	g.Settle("t", "", KeyPolicy{}, "p", "m", pricing.Usage{Input: 400_000}, tbl)
+	if got, err := testutil.GatherAndCount(m.Registry(), "inferplane_budget_utilization_ratio"); err != nil || got == 0 {
+		t.Fatalf("budget_utilization_ratio not recorded (count=%d err=%v)", got, err)
+	}
+}

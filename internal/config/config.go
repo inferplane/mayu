@@ -280,6 +280,19 @@ type Config struct {
 	OTel          *OTelConfig               `json:"otel,omitempty"`
 	Probe         ProbeConfig               `json:"probe,omitempty"`
 	Analytics     AnalyticsConfig           `json:"analytics,omitempty"`
+	BudgetAlerts  *BudgetAlertsConfig       `json:"budget_alerts,omitempty"`
+}
+
+// BudgetAlertsConfig enables webhook budget alerts (D5b, ADR-017): a team's
+// monthly-budget utilization crossing a threshold POSTs a JSON payload to
+// WebhookURLRef. The URL is referenced, never inline — Slack incoming-webhook
+// and SNS HTTPS-subscription URLs routinely embed a capability token, the
+// same trust level as an API key (§7). Absent (nil) → alerting off.
+type BudgetAlertsConfig struct {
+	WebhookURLRef *SecretRef `json:"webhook_url_ref"`
+	WebhookURL    string     `json:"-"`                    // resolved at load
+	Thresholds    []float64  `json:"thresholds,omitempty"` // ratios in (0,+inf); default [0.8, 1.0]
+	Timeout       string     `json:"timeout,omitempty"`    // Go duration; default "5s"
 }
 
 // AnalyticsConfig configures the derived analytics index (design spec §4 / D1).
@@ -364,6 +377,7 @@ func LoadRaw(path string) (*Config, error) {
 		Audit struct {
 			LogBodies map[string]json.RawMessage `json:"log_bodies"`
 		} `json:"audit"`
+		BudgetAlerts map[string]json.RawMessage `json:"budget_alerts"`
 	}
 	if err := json.Unmarshal(data, &probe); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
@@ -381,6 +395,9 @@ func LoadRaw(path string) (*Config, error) {
 	}
 	if _, bad := probe.Audit.LogBodies["dsn"]; bad {
 		return nil, fmt.Errorf("config: audit.log_bodies has inline dsn; use dsn_ref (§7)")
+	}
+	if _, bad := probe.BudgetAlerts["webhook_url"]; bad {
+		return nil, fmt.Errorf("config: budget_alerts has inline webhook_url; use webhook_url_ref (§7)")
 	}
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
@@ -407,6 +424,9 @@ func LoadRaw(path string) (*Config, error) {
 		return nil, err
 	}
 	if err := validateBodyLog(cfg.Audit.LogBodies); err != nil {
+		return nil, err
+	}
+	if err := validateBudgetAlerts(cfg.BudgetAlerts); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
@@ -487,6 +507,43 @@ func ResolveBodyPath(c *Config) string {
 		}
 	}
 	return "bodies.db"
+}
+
+// validateBudgetAlerts checks the opt-in budget-alert block (D5b, ADR-017).
+// The webhook URL is always referenced and resolved here, never accepted
+// inline; it must resolve to an absolute http(s) URL. Thresholds default to
+// [0.8, 1.0] when unset; each must be > 0. nil block (alerting off) is valid.
+func validateBudgetAlerts(ba *BudgetAlertsConfig) error {
+	if ba == nil {
+		return nil
+	}
+	if ba.WebhookURLRef == nil {
+		return fmt.Errorf("config: budget_alerts.webhook_url_ref is required")
+	}
+	if err := ValidateSecretRef(ba.WebhookURLRef); err != nil {
+		return fmt.Errorf("config: budget_alerts.webhook_url_ref: %w", err)
+	}
+	webhookURL, err := ResolveSecretRef(ba.WebhookURLRef)
+	if err != nil {
+		return fmt.Errorf("config: budget_alerts.webhook_url_ref: %w", err)
+	}
+	u, err := url.Parse(webhookURL)
+	if err != nil || !u.IsAbs() || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("config: budget_alerts webhook URL must be an absolute http(s) URL")
+	}
+	ba.WebhookURL = webhookURL
+	if len(ba.Thresholds) == 0 {
+		ba.Thresholds = []float64{0.8, 1.0}
+	}
+	for _, t := range ba.Thresholds {
+		if t <= 0 {
+			return fmt.Errorf("config: budget_alerts.thresholds entries must be > 0, got %v", t)
+		}
+	}
+	if err := validateDurationString("budget_alerts.timeout", ba.Timeout, time.Millisecond); err != nil {
+		return err
+	}
+	return nil
 }
 
 // validateAnalyticsModeB checks the opt-in shared analytics store block. The

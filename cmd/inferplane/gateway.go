@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/inferplane/inferplane/internal/adminauth"
+	"github.com/inferplane/inferplane/internal/alert"
 	"github.com/inferplane/inferplane/internal/analytics"
 	"github.com/inferplane/inferplane/internal/analytics/pgstore"
 	"github.com/inferplane/inferplane/internal/audit"
@@ -60,6 +61,7 @@ type gateway struct {
 	bodyStore     bodystore.Store             // nil unless audit.log_bodies is configured (D4, ADR-018)
 	bodyRec       *bodystore.Recorder         // nil unless audit.log_bodies is configured
 	bodyMaxBytes  int64                       // total body-store size cap, for the purge worker
+	notifier      *alert.Notifier             // nil unless budget_alerts is configured (D5b, ADR-017)
 	reloadMu      sync.Mutex                  // serializes reloads AND UI writes (concurrent SIGHUPs/triggers)
 	dataLn        net.Listener
 	adminLn       net.Listener
@@ -240,6 +242,19 @@ func newGateway(cfgPath string) (*gateway, error) {
 			rec.QuotaOnExceeded, rec.BudgetUSDMicros, rec.BudgetOnExceeded), true
 	})
 
+	// Budget-alert webhook (D5b, ADR-017): opt-in, off unless configured. The
+	// webhook URL is never logged (it may embed a Slack/SNS capability token).
+	var notifier *alert.Notifier
+	if ba := cfg.BudgetAlerts; ba != nil {
+		var timeout time.Duration
+		if ba.Timeout != "" {
+			timeout, _ = time.ParseDuration(ba.Timeout) // shape already validated at config load
+		}
+		notifier = alert.New(ba.WebhookURL, ba.Thresholds, timeout)
+		gov.SetBudgetNotify(notifier.Observe)
+		fmt.Println("inferplane: budget alerts enabled")
+	}
+
 	// Optional self-TLS for the data plane (design §2.3): non-K8s single-binary
 	// deployments can terminate their own TLS; K8s terminates at ingress/mesh.
 	// The pair must be fully specified or fully empty.
@@ -360,6 +375,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 		analyticsIdx:  analyticsIdx,
 		analyticsSink: analyticsSink,
 		otelDown:      otelDown,
+		notifier:      notifier,
 		instance:      inst,
 		anchorer:      anchorer,
 		anchorEvery:   anchorEvery,
@@ -394,7 +410,12 @@ func newGateway(cfgPath string) (*gateway, error) {
 			KeyGovernanceFields: true, // keystore always has budget/TPM/RPM/expiry/owner (Phase 2)
 			TeamsRecords:        true, // keystore always supports TeamStore (D3, ADR-016)
 			LogsBodies:          bodyRec != nil,
+			BudgetAlerts:        notifier != nil,
 		}
+	}
+	var alertFires func() []alert.Fire
+	if notifier != nil {
+		alertFires = notifier.Recent
 	}
 	var analyticsQ analyticsapi.Querier
 	if pgstoreQ != nil {
@@ -412,7 +433,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 		}
 		return names
 	}
-	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, m, writer, liveExport(holder), capabilities, analyticsQ, store, configTeams, bodyRec, cfg.Probe.AllowedHosts...)}
+	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, m, writer, liveExport(holder), capabilities, analyticsQ, store, configTeams, alertFires, bodyRec, cfg.Probe.AllowedHosts...)}
 	return g, nil
 }
 
@@ -752,6 +773,13 @@ func (g *gateway) serve(ctx context.Context) error {
 		defer g.finalAnchor()
 	}
 	defer g.store.Close()
+	// Wait for in-flight budget-alert webhook deliveries (D5b, ADR-017) before
+	// exit so a rolling deploy's last-window alerts aren't silently abandoned.
+	// Registered here so it runs after the data plane has drained (below), by
+	// which point any final Settle→Observe goroutines have been spawned.
+	if g.notifier != nil {
+		defer g.notifier.Close()
+	}
 	// Shutdown order (LIFO — registered here, run in reverse): aud.Close drains
 	// the writer (enqueuing the last records into the analytics sink) → the sink
 	// drains its worker (ingesting them) → the index closes. So these are

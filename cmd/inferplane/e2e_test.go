@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/inferplane/inferplane/internal/audit"
 )
@@ -471,5 +472,101 @@ func TestE2EAdminActionsAudited(t *testing.T) {
 		if !bytes.Contains(raw, []byte(want)) {
 			t.Fatalf("audit log missing %s:\n%s", want, raw)
 		}
+	}
+}
+
+// TestE2EBudgetAlertFires (D5b, ADR-017): a team crossing a configured budget
+// threshold fires a webhook POST and shows up in /admin/alerts/recent.
+func TestE2EBudgetAlertFires(t *testing.T) {
+	up := newAnthropicUpstream(t)
+
+	var mu sync.Mutex
+	var gotFires []map[string]any
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		json.NewDecoder(r.Body).Decode(&payload)
+		mu.Lock()
+		gotFires = append(gotFires, payload)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer webhook.Close()
+
+	t.Setenv("E2E_ALERT_WEBHOOK", webhook.URL)
+	dataURL, adminURL, _ := bootGateway(t, func(cfg map[string]any, dir string) {
+		withAnthropicProvider(up.srv.URL)(cfg, dir)
+		// Cost of one request (10 in + 5 out tokens @ $1/token override) = $15.
+		// A $20 monthly budget puts that at ratio 0.75 — crosses 0.5, not 1.0.
+		cfg["teams"] = map[string]any{
+			"alerted": map[string]any{
+				"budget": map[string]any{"usd_per_month": 20.0, "on_exceeded": "warn"},
+			},
+		}
+		cfg["pricing"] = map[string]any{
+			"overrides": map[string]any{
+				"up": map[string]any{
+					"claude-test": map[string]any{"input_per_mtok": 1000000.0, "output_per_mtok": 1000000.0},
+				},
+			},
+		}
+		cfg["budget_alerts"] = map[string]any{
+			"webhook_url_ref": map[string]any{"env": "E2E_ALERT_WEBHOOK"},
+			"thresholds":      []any{0.5, 1.0},
+			"timeout":         "2s",
+		}
+	})
+
+	_, key := createKey(t, adminURL, "alerted", []string{"claude-test"})
+	resp := postMessages(t, dataURL, key, "claude-test")
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("request: status %d, want 200", resp.StatusCode)
+	}
+
+	// The webhook delivery is async (fire-and-forget) — poll briefly. The
+	// break decision and the snapshot are taken under the SAME lock
+	// acquisition so a second POST arriving between them can't be observed
+	// only in the snapshot (that would make len(fires) disagree with the
+	// break condition that just fired).
+	// Poll deadline exceeds the 2s webhook timeout above, leaving CI margin
+	// for webhook + delivery latency (a deadline equal to the timeout would
+	// leave zero slack on a loaded runner).
+	deadline := time.Now().Add(8 * time.Second)
+	var fires []map[string]any
+	for {
+		mu.Lock()
+		if len(gotFires) > 0 || time.Now().After(deadline) {
+			fires = append([]map[string]any{}, gotFires...)
+			mu.Unlock()
+			break
+		}
+		mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(fires) != 1 {
+		t.Fatalf("webhook received %d POSTs, want 1: %+v", len(fires), fires)
+	}
+	if fires[0]["event"] != "budget_alert" || fires[0]["team"] != "alerted" {
+		t.Fatalf("webhook payload = %+v", fires[0])
+	}
+	if got, want := fires[0]["threshold"], 0.5; got != want {
+		t.Fatalf("threshold = %v, want %v", got, want)
+	}
+
+	// GET /admin/alerts/recent (full-admin only) reflects the same fire.
+	req, _ := http.NewRequest(http.MethodGet, adminURL+"/admin/alerts/recent", nil)
+	req.Header.Set("Authorization", "Bearer "+e2eAdminToken)
+	arec, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /admin/alerts/recent: %v", err)
+	}
+	defer arec.Body.Close()
+	body, _ := io.ReadAll(arec.Body)
+	if arec.StatusCode != http.StatusOK {
+		t.Fatalf("GET /admin/alerts/recent: status %d: %s", arec.StatusCode, body)
+	}
+	if !bytes.Contains(body, []byte(`"team":"alerted"`)) {
+		t.Fatalf("/admin/alerts/recent missing the fire: %s", body)
 	}
 }

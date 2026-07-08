@@ -353,3 +353,29 @@ func TestAdminUI_bodyLoggingWired(t *testing.T) {
 		t.Error("showView does not call refreshLogsView() for the logs section")
 	}
 }
+
+func TestAdminUI_budgetAlertsWired(t *testing.T) {
+	_, html := get(t, "/index.html")
+	for _, id := range []string{`data-cap="budget_alerts"`, `id="alerts-table"`} {
+		if !strings.Contains(html, id) {
+			t.Errorf("index.html missing budget-alerts element %s", id)
+		}
+	}
+	for _, banned := range []string{"onclick=", "onsubmit=", "onchange=", "style=", "onload="} {
+		if strings.Contains(html, banned) {
+			t.Errorf("index.html contains inline %q in the budget-alerts card (CSP)", banned)
+		}
+	}
+	// per-instance honesty (same posture as ADR-013's limiter/budget caveat).
+	if !strings.Contains(html, "Per-instance state") {
+		t.Error("index.html missing per-instance-state honesty hint for budget alerts")
+	}
+
+	_, js := get(t, "/app.js")
+	if !strings.Contains(js, `api("GET", "/admin/alerts/recent", null, true)`) {
+		t.Error("app.js missing token-gated call to /admin/alerts/recent")
+	}
+	if strings.Contains(js, `fetch("/admin/alerts`) || strings.Contains(js, "fetch(`/admin/alerts") {
+		t.Error("app.js bare-fetches /admin/alerts (must use api())")
+	}
+}
