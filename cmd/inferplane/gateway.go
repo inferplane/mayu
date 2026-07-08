@@ -216,6 +216,25 @@ func newGateway(cfgPath string) (*gateway, error) {
 	// is passed into Settle per request from the resolved snapshot, so the
 	// governor holds no pricing — only its persistent rate/budget counters.
 	gov := governance.NewGovernor(policies, limiter.NewMemory(), budget.NewMemory(), m) // budget_spend / pricing_miss
+	// D3 (ADR-016): a team record in the keystore takes precedence over the
+	// config map above, and is checked fresh on every request — no restart, no
+	// hot-reload needed for an admin-console budget/limit edit to take effect.
+	// A lookup ERROR (not a miss) falls back to the config map rather than
+	// blocking all traffic on a transient keystore error; store already does
+	// one SQLite read per request on this exact hot path (Resolve), so this
+	// adds one more point read, not a new failure class.
+	gov.SetTeamLookup(func(team string) (governance.TeamPolicy, bool) {
+		rec, ok, err := store.GetTeam(context.Background(), team)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "inferplane: team lookup:", err)
+			return governance.TeamPolicy{}, false
+		}
+		if !ok {
+			return governance.TeamPolicy{}, false
+		}
+		return governance.PolicyFromLimits(rec.RPM, rec.TPM, rec.TokensPerDay,
+			rec.QuotaOnExceeded, rec.BudgetUSDMicros, rec.BudgetOnExceeded), true
+	})
 
 	// Optional self-TLS for the data plane (design §2.3): non-K8s single-binary
 	// deployments can terminate their own TLS; K8s terminates at ingress/mesh.
@@ -331,6 +350,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 			ProviderStore:       writer != nil,
 			Guardrails:          masking != nil,
 			KeyGovernanceFields: true, // keystore always has budget/TPM/RPM/expiry/owner (Phase 2)
+			TeamsRecords:        true, // keystore always supports TeamStore (D3, ADR-016)
 		}
 	}
 	var analyticsQ analyticsapi.Querier
@@ -339,7 +359,17 @@ func newGateway(cfgPath string) (*gateway, error) {
 	} else if analyticsIdx != nil {
 		analyticsQ = analyticsIdx
 	}
-	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, m, writer, liveExport(holder), capabilities, analyticsQ, cfg.Probe.AllowedHosts...)}
+	// configTeams surfaces config-declared team NAMES only (no values — those
+	// live in the file) so /admin/teams can show them as "source":"config"
+	// until/unless a DB record for the same name takes precedence (ADR-016).
+	configTeams := func() []string {
+		names := make([]string, 0, len(cfg.Teams))
+		for name := range cfg.Teams {
+			names = append(names, name)
+		}
+		return names
+	}
+	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, m, writer, liveExport(holder), capabilities, analyticsQ, store, configTeams, cfg.Probe.AllowedHosts...)}
 	return g, nil
 }
 

@@ -15,8 +15,8 @@ backends are a swap, not a rewrite.
 ### 2. Components
 | Component | Path | Purpose |
 |---|---|---|
-| Key store | `internal/keystore/sqlite.go` | SHA-256-hashed virtual keys, Postgres-portable schema |
-| Store interface | `internal/keystore/keystore.go` | `Store`, `Principal`, `Allows()` (RBAC) |
+| Key store | `internal/keystore/sqlite.go` | SHA-256-hashed virtual keys, Postgres-portable schema; also owns the `teams` table (D3, ADR-016): `name` (PK), `allowed_models`, `rpm`, `tpm`, `tokens_per_day`, `quota_on_exceeded`, `budget_usd_micros`, `budget_on_exceeded`, `created_at`, `updated_at` — a brand-new table added via `CREATE TABLE IF NOT EXISTS` inside the existing migration transaction (no `ALTER TABLE` path needed) |
+| Store interface | `internal/keystore/keystore.go` | `Store`, `Principal`, `Allows()` (RBAC); `TeamStore` (`UpsertTeam`/`GetTeam`/`ListTeams`/`DeleteTeam`, D3) is a separate interface so the existing `Store` fakes in `internal/server`'s tests are unaffected |
 | Provider store | `internal/providerstore/sqlite.go` | opt-in DB topology (ADR-008): `providers` (refs only — no secret column), `model_targets` (ordered routes), `meta` (durable `seeded` marker); Postgres-portable TEXT-only DDL |
 | Audit writer | `internal/audit/writer.go` | single-writer hash chain, WAL truncation |
 | Audit WAL | `internal/audit/wal.go` | disk buffer for `buffer_then_block` durability |
@@ -31,6 +31,11 @@ backends are a swap, not a rewrite.
 - Per-instance audit hash chain so restarts segment cleanly instead of reading as tampering.
 - Admin-plane events (`admin_key_created` / `admin_key_revoked` / `admin_denied`, ADR-004) carry `principal.user` (opaque OIDC `sub` — never email) and `principal.auth_method` (`oidc` | `break_glass`); `auth_method` is appended at the END of `PrincipalRef` so pre-change chains still verify byte-exactly (mixed-version fixture test).
 - Two-phase stores (check then debit) so a denied request never charges the team.
+- Team governance policy has two sources — the config file and a `teams` DB
+  record — with the DB record winning when both name the same team (D3,
+  ADR-016); `internal/governance.Governor` resolves this via a per-request
+  keystore lookup (`SetTeamLookup`), not a cache, so a console edit enforces
+  on the very next request with no restart.
 
 ### 4. Code Pointers
 - `internal/keystore/sqlite.go` — schema + SHA-256 lookup
@@ -53,8 +58,8 @@ backends are a swap, not a rewrite.
 ### 2. 구성요소
 | 구성요소 | 경로 | 목적 |
 |---|---|---|
-| 키 스토어 | `internal/keystore/sqlite.go` | SHA-256 해시 가상 키, Postgres 이식 스키마 |
-| Store 인터페이스 | `internal/keystore/keystore.go` | `Store`, `Principal`, `Allows()` (RBAC) |
+| 키 스토어 | `internal/keystore/sqlite.go` | SHA-256 해시 가상 키, Postgres 이식 스키마; `teams` 테이블도 소유(D3, ADR-016): `name`(PK), `allowed_models`, `rpm`, `tpm`, `tokens_per_day`, `quota_on_exceeded`, `budget_usd_micros`, `budget_on_exceeded`, `created_at`, `updated_at` — 기존 마이그레이션 트랜잭션 안에서 `CREATE TABLE IF NOT EXISTS`로 추가된 신규 테이블(ALTER TABLE 불필요) |
+| Store 인터페이스 | `internal/keystore/keystore.go` | `Store`, `Principal`, `Allows()` (RBAC); `TeamStore`(`UpsertTeam`/`GetTeam`/`ListTeams`/`DeleteTeam`, D3)는 별도 인터페이스로 분리되어 `internal/server` 테스트의 기존 `Store` fake들에 영향 없음 |
 | Provider 스토어 | `internal/providerstore/sqlite.go` | 옵트인 DB 토폴로지 (ADR-008): `providers`(ref만·시크릿 컬럼 없음), `model_targets`(순서 라우트), `meta`(durable `seeded` 마커); Postgres 이식 TEXT 전용 DDL |
 | 감사 writer | `internal/audit/writer.go` | 단일 writer 해시 체인, WAL 절단 |
 | 감사 WAL | `internal/audit/wal.go` | `buffer_then_block` 내구성용 디스크 버퍼 |
@@ -67,6 +72,11 @@ backends are a swap, not a rewrite.
 - SQLite(`modernc.org/sqlite`, cgo 없음) 기본 → 정적 바이너리, 5분 기동.
 - 인스턴스별 감사 해시 체인으로 재시작이 변조로 읽히지 않고 깔끔히 분절.
 - 2단계 스토어(검사 후 차감)로 거부된 요청은 팀에 과금하지 않음.
+- 팀 거버넌스 정책은 config 파일과 `teams` DB 레코드 두 소스를 가지며, 같은 팀
+  이름이 양쪽에 있으면 DB 레코드가 승리합니다(D3, ADR-016).
+  `internal/governance.Governor`는 캐시가 아니라 요청당 keystore 조회
+  (`SetTeamLookup`)로 이를 해결하므로, 콘솔에서의 수정이 재시작 없이 바로 다음
+  요청부터 적용됩니다.
 
 ### 4. 코드 포인터
 - `internal/keystore/sqlite.go` — 스키마 + SHA-256 조회

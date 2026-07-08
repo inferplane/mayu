@@ -70,7 +70,7 @@ func negotiateModels(anthropicH, openaiH http.Handler) http.Handler {
 // receives admin-action audit records (key create/revoke + denials, §5.5
 // "admin API calls are audit events"); nil skips. When m is nil the /metrics
 // endpoint is omitted.
-func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier, mapping adminauth.MappingConfig, configView func() configapi.View, auditFileSinks []string, aud *audit.Writer, m *metrics.Metrics, writer configapi.Writer, configExport func() configapi.ExportDoc, capabilities func() configapi.Capabilities, analyticsQ analyticsapi.Querier, probeAllowedHosts ...string) http.Handler {
+func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier, mapping adminauth.MappingConfig, configView func() configapi.View, auditFileSinks []string, aud *audit.Writer, m *metrics.Metrics, writer configapi.Writer, configExport func() configapi.ExportDoc, capabilities func() configapi.Capabilities, analyticsQ analyticsapi.Querier, teamStore keystore.TeamStore, configTeams func() []string, probeAllowedHosts ...string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
@@ -113,6 +113,21 @@ func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier,
 			requireAdmin(analyticsapi.HealthHandler(analyticsQ), emit)))
 		mux.Handle("POST /admin/analytics/rebuild", AdminAuth(adminTokens, verifier, mapping, denied,
 			requireAdmin(analyticsapi.RebuildHandler(analyticsQ), emit)))
+	}
+	// Team governance records (D3, ADR-016): teams as first-class keystore rows.
+	// Reads are available to any AdminAuth identity; writes are full-admin only
+	// (requireAdmin) — a team-mapped identity must not raise its own team's
+	// budget. nil teamStore omits the mount (same optional-dependency shape as
+	// analyticsQ above), though in practice the keystore always supports
+	// TeamStore once wired by the assembly. Users are a derived read-only
+	// projection of key owners (no users table) — any AdminAuth identity may
+	// read /admin/users.
+	if teamStore != nil {
+		teamsH := adminapi.NewTeamsHandler(teamStore, configTeams, emit)
+		mux.Handle("GET /admin/teams", AdminAuth(adminTokens, verifier, mapping, denied, teamsH))
+		mux.Handle("PUT /admin/teams/", AdminAuth(adminTokens, verifier, mapping, denied, requireAdmin(teamsH, emit)))
+		mux.Handle("DELETE /admin/teams/", AdminAuth(adminTokens, verifier, mapping, denied, requireAdmin(teamsH, emit)))
+		mux.Handle("GET /admin/users", AdminAuth(adminTokens, verifier, mapping, denied, adminapi.NewUsersHandler(store)))
 	}
 	// UI-write provider/model registration (ADR-008), behind the same AdminAuth.
 	// writer is nil when no provider store is configured → every write returns

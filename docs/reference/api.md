@@ -18,6 +18,7 @@ contract is in [docs/api-reference.md](../api-reference.md).
 | Anthropic ingress | `internal/server/anthropicapi/` | `/v1/messages`, `/v1/messages/count_tokens`, `/v1/models` |
 | OpenAI ingress | `internal/server/openaiapi/` | `/v1/chat/completions`, `/v1/models` |
 | Admin keys API | `internal/server/adminapi/keys.go` | issue / list / revoke virtual keys (per-team entitlement + admin audit, ADR-004) |
+| Admin teams/users API | `internal/server/adminapi/teams.go` | `GET /admin/teams` (any AdminAuth identity); `PUT`/`DELETE /admin/teams/{name}` upsert/delete a team governance record (**full-admin only**, ADR-016 D3) — enforced dynamically in the request hot path via `Governor.SetTeamLookup`, no restart; `GET /admin/users` derived read-only owner projection (no users table, no per-user spend) |
 | Whoami API | `internal/server/adminapi/whoami.go` | `GET /admin/whoami` secret-free resolved identity (subject/teams/is_admin/auth_method) for self-service key issuance (ADR-010) |
 | Admin key console | `internal/server/adminui/` | `/admin/ui/` embedded static console (data-free, unauthenticated; data via `/admin/keys`, ADR-001) |
 | Config view/write API | `internal/server/configapi/` | `GET /admin/config` read-only topology (ADR-005); `PUT`/`DELETE /admin/providers/{name}` + `PUT`/`DELETE /admin/models/{name}` UI-write (ADR-008; 405 unless `provider_store` enabled); `GET /admin/config/export` secret-free Git export |
@@ -40,7 +41,7 @@ contract is in [docs/api-reference.md](../api-reference.md).
 
 ### 5. Cross-references
 - Related modules: `internal/router`, `internal/governance`, `providers/`
-- Related ADRs: docs/decisions/ (none yet)
+- Related ADRs: docs/decisions/ADR-016-teams-as-keystore-records.md
 - Related runbooks: docs/runbooks/
 
 <a id="korean"></a>
@@ -58,6 +59,7 @@ HTTP 표면입니다. 두 인그레스(Anthropic Messages, OpenAI Chat Completio
 | Anthropic 인그레스 | `internal/server/anthropicapi/` | `/v1/messages`, `/v1/messages/count_tokens`, `/v1/models` |
 | OpenAI 인그레스 | `internal/server/openaiapi/` | `/v1/chat/completions`, `/v1/models` |
 | 관리 키 API | `internal/server/adminapi/keys.go` | 가상 키 발급 / 목록 / 폐기 (팀별 권한 + 관리 감사, ADR-004) |
+| 관리 팀/유저 API | `internal/server/adminapi/teams.go` | `GET /admin/teams`(모든 AdminAuth 신원); `PUT`/`DELETE /admin/teams/{name}` 팀 거버넌스 레코드 upsert/삭제(**풀 어드민 전용**, ADR-016 D3) — `Governor.SetTeamLookup`으로 요청 hot path에서 재시작 없이 동적 적용; `GET /admin/users` 파생 읽기 전용 owner 프로젝션(유저 테이블 없음, 유저별 spend 없음) |
 | Whoami API | `internal/server/adminapi/whoami.go` | `GET /admin/whoami` 시크릿 무노출 신원(subject/teams/is_admin/auth_method) — 셀프서비스 키 발급용 (ADR-010) |
 | 관리 키 콘솔 | `internal/server/adminui/` | `/admin/ui/` 내장 정적 콘솔(데이터 없음·무인증, 데이터는 `/admin/keys` 경유, ADR-001) |
 | Config 뷰/쓰기 API | `internal/server/configapi/` | `GET /admin/config` 읽기 전용 토폴로지 (ADR-005); `PUT`/`DELETE /admin/providers/{name}` + `PUT`/`DELETE /admin/models/{name}` UI 쓰기 (ADR-008; `provider_store` 미설정 시 405); `GET /admin/config/export` 시크릿 무노출 Git export |
@@ -80,5 +82,5 @@ HTTP 표면입니다. 두 인그레스(Anthropic Messages, OpenAI Chat Completio
 
 ### 5. 상호 참조
 - 관련 모듈: `internal/router`, `internal/governance`, `providers/`
-- 관련 ADR: docs/decisions/ (아직 없음)
+- 관련 ADR: docs/decisions/ADR-016-teams-as-keystore-records.md
 - 관련 런북: docs/runbooks/

@@ -249,3 +249,60 @@ func TestAdminUI_keyGovernanceFieldsWired(t *testing.T) {
 		t.Error("app.js does not send budget_usd_micros on key create")
 	}
 }
+
+// TestAdminUI_teamsRecordsWired pins D3/ADR-016's console surface: the write
+// form + tables exist, go through the token-gated api() helper (never a bare
+// fetch — the same CSP/auth contract as the provider-write and whoami UI),
+// and the HA/derived-users honesty hints are present verbatim.
+func TestAdminUI_teamsRecordsWired(t *testing.T) {
+	_, html := get(t, "/index.html")
+	for _, id := range []string{
+		`id="team-form"`, `id="tf-name"`, `id="tf-budget"`, `id="tf-rpm"`, `id="tf-tpm"`,
+		`id="tf-tpd"`, `id="tf-quota-exceeded"`, `id="tf-budget-exceeded"`, `id="tf-models"`,
+		`id="teams-table"`, `id="users-table"`, `id="teams-content"`,
+	} {
+		if !strings.Contains(html, id) {
+			t.Errorf("index.html missing teams-view element %s", id)
+		}
+	}
+	// no inline handlers/styles (CSP default-src 'self')
+	for _, banned := range []string{"onclick=", "onsubmit=", "onchange=", "style=", "onload="} {
+		if strings.Contains(html, banned) {
+			t.Errorf("index.html contains inline %q in the teams section (CSP)", banned)
+		}
+	}
+	// HA honesty (ADR-013) and the derived-users limitation are stated verbatim.
+	for _, want := range []string{"per gateway instance", "there is no", "not available"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("index.html missing honesty hint %q", want)
+		}
+	}
+
+	_, js := get(t, "/app.js")
+	for _, call := range []string{
+		`api("GET", "/admin/teams")`, `api("PUT", "/admin/teams/`,
+		`api("DELETE", "/admin/teams/`, `api("GET", "/admin/users")`,
+	} {
+		if !strings.Contains(js, call) {
+			t.Errorf("app.js missing token-gated call %q", call)
+		}
+	}
+	for _, bad := range []string{
+		`fetch("/admin/teams`, "fetch(`/admin/teams", `fetch("/admin/users`, "fetch(`/admin/users",
+	} {
+		if strings.Contains(js, bad) {
+			t.Errorf("app.js bare-fetches a teams/users endpoint %q (must use api())", bad)
+		}
+	}
+	if !strings.Contains(js, "refreshTeamsView") {
+		t.Error("app.js missing refreshTeamsView()")
+	}
+	if !strings.Contains(js, `if (name === "teams") refreshTeamsView();`) {
+		t.Error("showView does not call refreshTeamsView() for the teams section")
+	}
+	// write affordances are gated on the client-side whoamiIsAdmin hint (the
+	// server enforces via requireAdmin regardless — this is UX, not the gate).
+	if !strings.Contains(js, "whoamiIsAdmin") {
+		t.Error("app.js does not gate the team write form on admin identity")
+	}
+}

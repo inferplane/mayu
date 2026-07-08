@@ -183,6 +183,58 @@
             derived from issued keys. <span class="ko">팀·유저 레코드가 비활성화돼
             있습니다. 현재 팀은 발급된 키에서 파생됩니다.</span></p>
         </div>
+        <div id="teams-content" hidden>
+          <div class="card" id="team-form-card">
+            <div class="microlabel">team governance</div>
+            <form id="team-form" class="row">
+              <input id="tf-name" type="text" placeholder="team name" required>
+              <input id="tf-budget" type="number" step="0.01" min="0" placeholder="budget USD (optional)">
+              <input id="tf-rpm" type="number" min="0" step="1" placeholder="RPM (optional)">
+              <input id="tf-tpm" type="number" min="0" step="1" placeholder="TPM (optional)">
+              <input id="tf-tpd" type="number" min="0" step="1" placeholder="tokens/day (optional)">
+              <select id="tf-quota-exceeded">
+                <option value="">quota exceeded: block (default)</option>
+                <option value="block">quota exceeded: block</option>
+                <option value="warn">quota exceeded: warn</option>
+              </select>
+              <select id="tf-budget-exceeded">
+                <option value="">budget exceeded: block (default)</option>
+                <option value="block">budget exceeded: block</option>
+                <option value="warn">budget exceeded: warn</option>
+              </select>
+              <input id="tf-models" type="text" placeholder="default allowed models — comma-separated (optional)">
+              <button type="submit">SAVE TEAM</button>
+            </form>
+            <p id="team-form-status" class="status"></p>
+            <p class="hint">Rate/TPM/quota/budget limits are enforced live on every
+              request for this team the moment you save — no restart.
+              <span class="ko">RPM/TPM/쿼터/예산 한도는 저장 즉시 이 팀의 모든 요청에
+              실시간으로 적용됩니다 — 재시작이 필요 없습니다.</span></p>
+            <p class="hint">Counters are enforced <b>per gateway instance</b> (ADR-013)
+              — with N replicas a team may consume up to N× before blocking.
+              <span class="ko">카운터는 <b>인스턴스별</b>로 집계됩니다(ADR-013) —
+              레플리카가 N개면 차단 전까지 최대 N배까지 소비될 수 있습니다.</span></p>
+          </div>
+          <div class="card">
+            <div class="microlabel">teams</div>
+            <table class="data" id="teams-table">
+              <thead><tr><th>name</th><th>source</th><th class="num">spend (30d)</th><th>limits</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="card">
+            <div class="microlabel">users</div>
+            <p class="hint">Users are derived read-only from key owners — there is no
+              users table. Per-user spend is not available: audit events carry a team,
+              not an owner. <span class="ko">유저는 키 소유자에서 파생된 읽기 전용
+              목록입니다(별도 테이블 없음). 오디트 이벤트에는 팀만 기록되어 유저별
+              spend는 제공되지 않습니다.</span></p>
+            <table class="data" id="users-table">
+              <thead><tr><th>owner</th><th>teams</th><th class="num">keys</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
       </section>
 
       <!-- ===== providers ===== -->
