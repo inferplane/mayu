@@ -58,7 +58,7 @@ func New() *Metrics {
 			Name: "inferplane_quota_utilization_ratio", Help: "Quota utilization 0..1.",
 		}, []string{"team", "window"}),
 		budgetUtil: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "inferplane_budget_utilization_ratio", Help: "Monthly budget utilization 0..1 (D5b, ADR-017).",
+			Name: "inferplane_budget_utilization_ratio", Help: "Monthly budget utilization ratio (>1.0 = over budget, D5b/ADR-017).",
 		}, []string{"team"}),
 		budgetSpend: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "inferplane_budget_spend_usd_total", Help: "Approximate spend in USD (observability only; settlement truth is the µUSD store).",

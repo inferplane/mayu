@@ -144,7 +144,9 @@ func (n *Notifier) deliver(fire Fire) {
 		case doErr != nil:
 			fire.Error = classifyError(doErr)
 		case resp.StatusCode >= 300:
-			fire.Error = "webhook returned status " + resp.Status
+			// Canonical, Go-controlled reason phrase — never the server's raw
+			// resp.Status line (classification-string posture, ADR-017 §6).
+			fire.Error = "webhook returned non-2xx: " + http.StatusText(resp.StatusCode)
 		default:
 			fire.Delivered = true
 		}

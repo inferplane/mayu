@@ -192,6 +192,15 @@ func (g *Governor) Settle(team, keyID string, kp KeyPolicy, provider, model stri
 	}
 	if p.BudgetMicrosPerMonth > 0 {
 		g.bud.Debit("budget:"+team, costMicros, 30*24*time.Hour)
+		// Debit and Spent are each individually mutex-protected but not one
+		// atomic operation: a concurrent Settle for the same team can debit
+		// between these two calls. Under concurrent load this can make the
+		// read-back spend already reflect a later request's debit too,
+		// skipping an intermediate alert threshold (the Notifier still fires
+		// the highest crossed one — no double-fire, just a possible skip of
+		// an earlier one). A tighter-scoped case of the per-instance/replica
+		// approximation ADR-017 §8 documents; ponytail: add
+		// BudgetStore.DebitAndRead if this needs to be exact.
 		spent := g.bud.Spent("budget:"+team, 30*24*time.Hour)
 		g.metrics.SetBudgetUtilization(team, float64(spent)/float64(p.BudgetMicrosPerMonth))
 		if g.notifyBudget != nil {
