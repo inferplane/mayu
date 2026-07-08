@@ -651,6 +651,16 @@ func TestBudgetAlertsRejectsMissingWebhookURLRef(t *testing.T) {
 	}
 }
 
+func TestBudgetAlertsRejectsEmptyResolvedWebhookURL(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	t.Setenv("INFERPLANE_ALERT_WEBHOOK_EMPTY", "")
+	os.WriteFile(f, []byte(`{"budget_alerts":{"webhook_url_ref":{"env":"INFERPLANE_ALERT_WEBHOOK_EMPTY"}}}`), 0o600)
+	if _, err := Load(f); err == nil {
+		t.Fatal("an env ref resolving to an empty string must be rejected (empty string parses but is not absolute)")
+	}
+}
+
 func TestBudgetAlertsRejectsBadThreshold(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "bad.json")
