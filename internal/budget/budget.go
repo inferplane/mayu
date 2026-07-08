@@ -18,6 +18,10 @@ const (
 type BudgetStore interface {
 	Check(key string, estimateMicros, limitMicros int64, window time.Duration) Decision
 	Debit(key string, actualMicros int64, window time.Duration)
+	// Spent reports µUSD debited in the current window (0 if none or elapsed).
+	// Used for the budget-utilization gauge and alert threshold evaluation
+	// (D5b, ADR-017) — mirrors limiter.LimiterStore.QuotaUsed.
+	Spent(key string, window time.Duration) int64
 }
 
 type win struct {
@@ -50,6 +54,12 @@ func (b *Memory) Debit(key string, actualMicros int64, window time.Duration) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.cur(key, window).spent += actualMicros
+}
+
+func (b *Memory) Spent(key string, window time.Duration) int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.cur(key, window).spent
 }
 
 func (b *Memory) cur(key string, window time.Duration) *win {

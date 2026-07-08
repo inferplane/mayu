@@ -1,0 +1,145 @@
+package alert
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+func waitForFires(t *testing.T, n *Notifier, want int) []Fire {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		if fires := n.Recent(); len(fires) >= want {
+			return fires
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d fire(s), got %d", want, len(n.Recent()))
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+func TestObserve_FiresOnThresholdCross(t *testing.T) {
+	var mu sync.Mutex
+	var received []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		json.NewDecoder(r.Body).Decode(&payload)
+		mu.Lock()
+		received = append(received, payload)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	n := New(srv.URL, []float64{0.8, 1.0}, time.Second)
+
+	// Below any threshold: no fire.
+	n.Observe("teamA", 700_000, 1_000_000)
+	time.Sleep(20 * time.Millisecond)
+	if len(n.Recent()) != 0 {
+		t.Fatalf("expected no fire below threshold, got %d", len(n.Recent()))
+	}
+
+	// Cross 0.8.
+	n.Observe("teamA", 850_000, 1_000_000)
+	fires := waitForFires(t, n, 1)
+	if fires[0].Threshold != 0.8 || !fires[0].Delivered {
+		t.Fatalf("expected delivered fire at 0.8, got %+v", fires[0])
+	}
+
+	// Same ratio again: dedupe, no second fire.
+	n.Observe("teamA", 850_000, 1_000_000)
+	time.Sleep(20 * time.Millisecond)
+	if len(n.Recent()) != 1 {
+		t.Fatalf("expected dedupe at same ratio, got %d fires", len(n.Recent()))
+	}
+
+	// Cross 1.0.
+	n.Observe("teamA", 1_050_000, 1_000_000)
+	fires = waitForFires(t, n, 2)
+	if fires[0].Threshold != 1.0 {
+		t.Fatalf("expected newest fire at 1.0, got %+v", fires[0])
+	}
+
+	mu.Lock()
+	gotPayloads := len(received)
+	mu.Unlock()
+	if gotPayloads != 2 {
+		t.Fatalf("expected 2 webhook POSTs, got %d", gotPayloads)
+	}
+}
+
+func TestObserve_RatioDropRearms(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	n := New(srv.URL, []float64{0.8}, time.Second)
+	n.Observe("teamA", 900_000, 1_000_000) // crosses 0.8
+	waitForFires(t, n, 1)
+
+	// Window rolled over: ratio drops below the last-fired threshold.
+	n.Observe("teamA", 100_000, 1_000_000)
+	time.Sleep(20 * time.Millisecond)
+	if len(n.Recent()) != 1 {
+		t.Fatalf("expected no fire on ratio drop, got %d", len(n.Recent()))
+	}
+
+	// Crossing 0.8 again after re-arm fires again.
+	n.Observe("teamA", 900_000, 1_000_000)
+	waitForFires(t, n, 2)
+}
+
+func TestObserve_NoLimitOrThresholds(t *testing.T) {
+	n := New("http://example.invalid", []float64{0.8}, time.Second)
+	n.Observe("teamA", 500, 0) // limit<=0
+	if len(n.Recent()) != 0 {
+		t.Fatalf("expected no-op with limit<=0")
+	}
+
+	n2 := New("http://example.invalid", nil, time.Second)
+	n2.Observe("teamA", 500, 1000)
+	if len(n2.Recent()) != 0 {
+		t.Fatalf("expected no-op with no thresholds")
+	}
+}
+
+func TestRecent_RingCapAndOrder(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	n := New(srv.URL, []float64{0.1}, time.Second)
+	for i := 0; i < recentCap+5; i++ {
+		// Force a fire every time by dropping ratio then re-crossing.
+		n.Observe("team", 0, 1000)
+		n.Observe("team", 200, 1000)
+	}
+	fires := waitForFires(t, n, recentCap)
+	if len(fires) != recentCap {
+		t.Fatalf("expected ring capped at %d, got %d", recentCap, len(fires))
+	}
+}
+
+func TestDeliver_ErrorNeverLeaksURL(t *testing.T) {
+	// A URL with an embedded token pointing at a closed port -> connection error.
+	secretURL := "http://127.0.0.1:1/webhook?token=super-secret-token"
+	n := New(secretURL, []float64{0.5}, 200*time.Millisecond)
+	n.Observe("team", 600, 1000)
+	fires := waitForFires(t, n, 1)
+	if fires[0].Delivered {
+		t.Fatalf("expected delivery failure for unreachable URL")
+	}
+	if strings.Contains(fires[0].Error, "super-secret-token") || strings.Contains(fires[0].Error, secretURL) {
+		t.Fatalf("error must not leak the webhook URL, got %q", fires[0].Error)
+	}
+}

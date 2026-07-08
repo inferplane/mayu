@@ -18,6 +18,7 @@ type Metrics struct {
 	fallbackTotal   *prometheus.CounterVec   // inferplane_fallback_total
 	circuitState    *prometheus.GaugeVec     // inferplane_circuit_state
 	quotaUtil       *prometheus.GaugeVec     // inferplane_quota_utilization_ratio
+	budgetUtil      *prometheus.GaugeVec     // inferplane_budget_utilization_ratio
 	budgetSpend     *prometheus.CounterVec   // inferplane_budget_spend_usd_total
 	pricingMiss     *prometheus.CounterVec   // inferplane_pricing_miss_total
 	auditFailures   *prometheus.CounterVec   // inferplane_audit_write_failures_total
@@ -56,6 +57,9 @@ func New() *Metrics {
 		quotaUtil: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "inferplane_quota_utilization_ratio", Help: "Quota utilization 0..1.",
 		}, []string{"team", "window"}),
+		budgetUtil: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "inferplane_budget_utilization_ratio", Help: "Monthly budget utilization 0..1 (D5b, ADR-017).",
+		}, []string{"team"}),
 		budgetSpend: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "inferplane_budget_spend_usd_total", Help: "Approximate spend in USD (observability only; settlement truth is the µUSD store).",
 		}, []string{"team", "model", "cost_type"}),
@@ -76,7 +80,7 @@ func New() *Metrics {
 		}),
 	}
 	reg.MustRegister(m.tokenUsage, m.requestDuration, m.ttft, m.requestsTotal,
-		m.fallbackTotal, m.circuitState, m.quotaUtil, m.budgetSpend, m.pricingMiss,
+		m.fallbackTotal, m.circuitState, m.quotaUtil, m.budgetUtil, m.budgetSpend, m.pricingMiss,
 		m.auditFailures, m.auditBufferUtil, m.piiMask, m.anchorFail)
 	// Prometheus only emits a labeled metric family once it has at least one
 	// observed child series. Pre-initialize the token-usage family to zero so
@@ -148,6 +152,12 @@ func (m *Metrics) SetQuotaUtilization(team, window string, ratio float64) {
 		return
 	}
 	m.quotaUtil.WithLabelValues(team, window).Set(ratio)
+}
+func (m *Metrics) SetBudgetUtilization(team string, ratio float64) {
+	if m == nil {
+		return
+	}
+	m.budgetUtil.WithLabelValues(team).Set(ratio)
 }
 func (m *Metrics) AddBudgetSpend(team, model, costType string, usd float64) {
 	if m == nil {

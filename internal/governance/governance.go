@@ -55,11 +55,12 @@ type KeyPolicy struct {
 // (no live/config import) and billing a request on the same generation it
 // resolved on (ADR-006).
 type Governor struct {
-	teams   map[string]TeamPolicy
-	lookup  func(team string) (TeamPolicy, bool) // D3/ADR-016: optional dynamic override, checked before teams
-	lim     limiter.LimiterStore
-	bud     budget.BudgetStore
-	metrics *metrics.Metrics // nil-safe: no-op when nil
+	teams        map[string]TeamPolicy
+	lookup       func(team string) (TeamPolicy, bool)              // D3/ADR-016: optional dynamic override, checked before teams
+	notifyBudget func(team string, spentMicros, limitMicros int64) // D5b/ADR-017: optional budget-alert hook, called after each team debit
+	lim          limiter.LimiterStore
+	bud          budget.BudgetStore
+	metrics      *metrics.Metrics // nil-safe: no-op when nil
 }
 
 // NewGovernor builds the Governor. m is the Prometheus metrics sink for
@@ -77,6 +78,16 @@ func NewGovernor(teams map[string]TeamPolicy, lim limiter.LimiterStore, bud budg
 // through to config) from a real hit; SetTeamLookup itself makes no I/O call.
 func (g *Governor) SetTeamLookup(f func(team string) (TeamPolicy, bool)) {
 	g.lookup = f
+}
+
+// SetBudgetNotify installs a budget-alert hook (D5b, ADR-017): called from
+// Settle, after every team-budget debit, with the post-debit spend and the
+// team's configured limit. Scoped to team budgets only — per-key budgets are
+// not observed here (a key_id must never become a metric/alert label,
+// CLAUDE.md). Like SetTeamLookup, this is a startup-only assignment with no
+// synchronization; passing nil (the default) disables alerting.
+func (g *Governor) SetBudgetNotify(f func(team string, spentMicros, limitMicros int64)) {
+	g.notifyBudget = f
 }
 
 // policyOf resolves a team's policy: a dynamic-lookup hit wins over a config
@@ -181,6 +192,11 @@ func (g *Governor) Settle(team, keyID string, kp KeyPolicy, provider, model stri
 	}
 	if p.BudgetMicrosPerMonth > 0 {
 		g.bud.Debit("budget:"+team, costMicros, 30*24*time.Hour)
+		spent := g.bud.Spent("budget:"+team, 30*24*time.Hour)
+		g.metrics.SetBudgetUtilization(team, float64(spent)/float64(p.BudgetMicrosPerMonth))
+		if g.notifyBudget != nil {
+			g.notifyBudget(team, spent, p.BudgetMicrosPerMonth)
+		}
 	}
 	if kp.BudgetMicrosPerMonth > 0 {
 		g.bud.Debit("budget:key:"+keyID, costMicros, 30*24*time.Hour)
