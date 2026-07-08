@@ -17,15 +17,14 @@ import (
 type SQLiteStore struct{ db *sql.DB }
 
 // schema — TEXT/INTEGER only, no SQLite-specific types, for Postgres portability.
-// Includes the §8 D2 governance columns directly (not just via the ALTER TABLE
-// entries in migrateGovernanceColumns's column list) so a FRESH database gets
-// the canonical shape in one DDL instead of always taking the migration path,
-// and so the two can't silently diverge if a future column is added to one
-// but not the other. migrateGovernanceColumns still runs (idempotent no-op on
-// a fresh DB) to upgrade pre-existing databases that predate this feature.
-// `teams` (D3, ADR-016) is a brand-new table, so CREATE TABLE IF NOT EXISTS
-// alone is sufficient — it never needs the ALTER-TABLE migration path below,
-// since there's no pre-existing `teams` table missing columns to catch up on.
+// Includes every column (keys' §8 D2 governance fields, teams' D6/ADR-019
+// guardrail fields) directly in the CREATE TABLE, not just via ensureSchema's
+// ALTER-if-missing migration list, so a FRESH database gets the canonical
+// shape in one DDL and the two can't silently diverge if a column is added to
+// one but not the other. The migration list still runs (idempotent no-op on a
+// fresh DB) to upgrade a pre-existing database that predates a given column —
+// `teams` needed no ALTER path at all until D6 added guardrail_id/
+// guardrail_version to a table that already existed in the wild (D3/ADR-016).
 const schema = `
 CREATE TABLE IF NOT EXISTS keys (
     key_id             TEXT PRIMARY KEY,
@@ -52,6 +51,8 @@ CREATE TABLE IF NOT EXISTS teams (
     quota_on_exceeded   TEXT NOT NULL DEFAULT '',
     budget_usd_micros   INTEGER NOT NULL DEFAULT 0,
     budget_on_exceeded  TEXT NOT NULL DEFAULT '',
+    guardrail_id        TEXT NOT NULL DEFAULT '',
+    guardrail_version   TEXT NOT NULL DEFAULT '',
     created_at          TEXT NOT NULL,
     updated_at          TEXT NOT NULL
 );
@@ -125,32 +126,12 @@ func ensureSchema(db *sql.DB) error {
 		return err
 	}
 
-	existing := map[string]bool{}
-	rows, err := conn.QueryContext(ctx, `PRAGMA table_info(keys)`)
+	keyColumns, err := existingColumns(ctx, conn, "keys")
 	if err != nil {
 		rollback()
 		return err
 	}
-	for rows.Next() {
-		var cid int
-		var name, colType string
-		var notNull, pk int
-		var dflt any
-		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
-			rows.Close()
-			rollback()
-			return err
-		}
-		existing[name] = true
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		rollback()
-		return err
-	}
-	rows.Close()
-
-	columns := []struct{ name, ddl string }{
+	keyMigrations := []struct{ name, ddl string }{
 		{"budget_usd_micros", `ALTER TABLE keys ADD COLUMN budget_usd_micros INTEGER NOT NULL DEFAULT 0`},
 		{"tpm", `ALTER TABLE keys ADD COLUMN tpm INTEGER NOT NULL DEFAULT 0`},
 		{"rpm", `ALTER TABLE keys ADD COLUMN rpm INTEGER NOT NULL DEFAULT 0`},
@@ -158,18 +139,69 @@ func ensureSchema(db *sql.DB) error {
 		{"owner", `ALTER TABLE keys ADD COLUMN owner TEXT NOT NULL DEFAULT ''`},
 		{"metadata", `ALTER TABLE keys ADD COLUMN metadata TEXT NOT NULL DEFAULT ''`},
 	}
-	for _, c := range columns {
-		if existing[c.name] {
-			continue
-		}
-		if _, err := conn.ExecContext(ctx, c.ddl); err != nil {
-			rollback()
-			return err
-		}
+	if err := applyMigrations(ctx, conn, keyColumns, keyMigrations); err != nil {
+		rollback()
+		return err
 	}
+
+	// teams (D3/ADR-016) shipped as a brand-new table with no ALTER-TABLE path
+	// needed at the time; D6/ADR-019 is the first column addition to it, so
+	// this migration block starts empty-but-idempotent on a fresh DB and
+	// upgrades a pre-existing teams table in place.
+	existingTeamCols, err := existingColumns(ctx, conn, "teams")
+	if err != nil {
+		rollback()
+		return err
+	}
+	teamMigrations := []struct{ name, ddl string }{
+		{"guardrail_id", `ALTER TABLE teams ADD COLUMN guardrail_id TEXT NOT NULL DEFAULT ''`},
+		{"guardrail_version", `ALTER TABLE teams ADD COLUMN guardrail_version TEXT NOT NULL DEFAULT ''`},
+	}
+	if err := applyMigrations(ctx, conn, existingTeamCols, teamMigrations); err != nil {
+		rollback()
+		return err
+	}
+
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		rollback()
 		return err
+	}
+	return nil
+}
+
+// existingColumns returns the set of column names table currently has, via
+// PRAGMA table_info — the shared read-side of the keys/teams ALTER-if-missing
+// migration pattern.
+func existingColumns(ctx context.Context, conn *sql.Conn, table string) (map[string]bool, error) {
+	rows, err := conn.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	existing := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notNull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &dflt, &pk); err != nil {
+			return nil, err
+		}
+		existing[name] = true
+	}
+	return existing, rows.Err()
+}
+
+// applyMigrations runs each migration's ddl unless its column is already
+// present in existing.
+func applyMigrations(ctx context.Context, conn *sql.Conn, existing map[string]bool, migrations []struct{ name, ddl string }) error {
+	for _, m := range migrations {
+		if existing[m.name] {
+			continue
+		}
+		if _, err := conn.ExecContext(ctx, m.ddl); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -312,13 +344,14 @@ var _ Store = (*SQLiteStore)(nil)
 
 var ErrTeamNotFound = errors.New("keystore: team not found")
 
-const teamColumns = `name, allowed_models, rpm, tpm, tokens_per_day, quota_on_exceeded, budget_usd_micros, budget_on_exceeded, created_at, updated_at`
+const teamColumns = `name, allowed_models, rpm, tpm, tokens_per_day, quota_on_exceeded, budget_usd_micros, budget_on_exceeded, guardrail_id, guardrail_version, created_at, updated_at`
 
 func scanTeam(row interface{ Scan(...any) error }) (TeamRecord, error) {
 	var t TeamRecord
 	var models string
 	if err := row.Scan(&t.Name, &models, &t.RPM, &t.TPM, &t.TokensPerDay,
-		&t.QuotaOnExceeded, &t.BudgetUSDMicros, &t.BudgetOnExceeded, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		&t.QuotaOnExceeded, &t.BudgetUSDMicros, &t.BudgetOnExceeded,
+		&t.GuardrailID, &t.GuardrailVersion, &t.CreatedAt, &t.UpdatedAt); err != nil {
 		return TeamRecord{}, err
 	}
 	t.AllowedModels = splitModels(models)
@@ -330,15 +363,17 @@ func scanTeam(row interface{ Scan(...any) error }) (TeamRecord, error) {
 func (s *SQLiteStore) UpsertTeam(ctx context.Context, t TeamRecord) error {
 	now := nowRFC3339()
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO teams (name, allowed_models, rpm, tpm, tokens_per_day, quota_on_exceeded, budget_usd_micros, budget_on_exceeded, created_at, updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?)
+		`INSERT INTO teams (name, allowed_models, rpm, tpm, tokens_per_day, quota_on_exceeded, budget_usd_micros, budget_on_exceeded, guardrail_id, guardrail_version, created_at, updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(name) DO UPDATE SET
 		   allowed_models=excluded.allowed_models, rpm=excluded.rpm, tpm=excluded.tpm,
 		   tokens_per_day=excluded.tokens_per_day, quota_on_exceeded=excluded.quota_on_exceeded,
 		   budget_usd_micros=excluded.budget_usd_micros, budget_on_exceeded=excluded.budget_on_exceeded,
+		   guardrail_id=excluded.guardrail_id, guardrail_version=excluded.guardrail_version,
 		   updated_at=excluded.updated_at`,
 		t.Name, joinModels(t.AllowedModels), t.RPM, t.TPM, t.TokensPerDay,
-		t.QuotaOnExceeded, t.BudgetUSDMicros, t.BudgetOnExceeded, now, now)
+		t.QuotaOnExceeded, t.BudgetUSDMicros, t.BudgetOnExceeded,
+		t.GuardrailID, t.GuardrailVersion, now, now)
 	if err != nil {
 		return fmt.Errorf("keystore: upsert team: %w", err)
 	}

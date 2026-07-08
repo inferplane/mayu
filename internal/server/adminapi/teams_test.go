@@ -68,6 +68,35 @@ func TestTeamsHandler_upsertListDeleteRoundTrip(t *testing.T) {
 	}
 }
 
+// TestTeamsHandler_guardrailRoundTrip proves guardrail_id/guardrail_version
+// round-trip through upsert -> teamView (D6, ADR-019).
+func TestTeamsHandler_guardrailRoundTrip(t *testing.T) {
+	h := NewTeamsHandler(newTestStore(t), nil, nil)
+	rec := doAsTeams(t, h, &adminID, "PUT", "/admin/teams/t", `{"guardrail_id":"gr-abc123","guardrail_version":"3"}`)
+	if rec.Code != 200 {
+		t.Fatalf("upsert: %d %s", rec.Code, rec.Body.String())
+	}
+	var got map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &got)
+	if got["guardrail_id"] != "gr-abc123" || got["guardrail_version"] != "3" {
+		t.Fatalf("guardrail fields not round-tripped: %+v", got)
+	}
+
+	// DRAFT and the unset ("") default are both valid.
+	rec = doAsTeams(t, h, &adminID, "PUT", "/admin/teams/t2", `{"guardrail_id":"gr-x","guardrail_version":"DRAFT"}`)
+	if rec.Code != 200 {
+		t.Fatalf("DRAFT version: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doAsTeams(t, h, &adminID, "PUT", "/admin/teams/t3", `{}`)
+	if rec.Code != 200 {
+		t.Fatalf("no override: %d %s", rec.Code, rec.Body.String())
+	}
+	json.Unmarshal(rec.Body.Bytes(), &got)
+	if got["guardrail_id"] != "" || got["guardrail_version"] != "" {
+		t.Fatalf("no-override team should have empty guardrail fields: %+v", got)
+	}
+}
+
 func TestTeamsHandler_deleteMissingReturns404(t *testing.T) {
 	h := NewTeamsHandler(newTestStore(t), nil, nil)
 	rec := doAsTeams(t, h, &adminID, "DELETE", "/admin/teams/nonexistent", "")
@@ -122,6 +151,10 @@ func TestTeamsHandler_validation(t *testing.T) {
 		{"bad budget_on_exceeded", "/admin/teams/t", `{"budget_on_exceeded":"deny"}`},
 		{"allowed_models too big", "/admin/teams/t", `{"allowed_models":["` + strings.Repeat("m", 5000) + `"]}`},
 		{"malformed json", "/admin/teams/t", `not-json`},
+		{"guardrail_version without guardrail_id", "/admin/teams/t", `{"guardrail_version":"3"}`},
+		{"guardrail_version not numeric or DRAFT", "/admin/teams/t", `{"guardrail_id":"gr-abc","guardrail_version":"latest"}`},
+		{"guardrail_id too long", "/admin/teams/t", `{"guardrail_id":"` + strings.Repeat("g", 2049) + `"}`},
+		{"guardrail_id control char", "/admin/teams/t", `{"guardrail_id":"grabc"}`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

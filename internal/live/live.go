@@ -179,9 +179,11 @@ func BuildState(cfg *config.Config) (*State, map[string]string, error) {
 		}
 		if pc.Type == "bedrock" {
 			settings = map[string]string{
-				"region":    pc.Region,
-				"auth_mode": pc.Auth.Mode,
-				"profile":   pc.Auth.Profile,
+				"region":            pc.Region,
+				"auth_mode":         pc.Auth.Mode,
+				"profile":           pc.Auth.Profile,
+				"guardrail_id":      pc.GuardrailID,
+				"guardrail_version": pc.GuardrailVersion,
 			}
 			if m := modelAPIByProvider[name]; len(m) > 0 {
 				b, _ := json.Marshal(m)

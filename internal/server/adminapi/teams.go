@@ -80,6 +80,8 @@ func teamView(t keystore.TeamRecord, source string) map[string]any {
 	v["quota_on_exceeded"] = t.QuotaOnExceeded
 	v["budget_usd_micros"] = t.BudgetUSDMicros
 	v["budget_on_exceeded"] = t.BudgetOnExceeded
+	v["guardrail_id"] = t.GuardrailID
+	v["guardrail_version"] = t.GuardrailVersion
 	v["created_at"] = t.CreatedAt
 	v["updated_at"] = t.UpdatedAt
 	return v
@@ -120,6 +122,10 @@ type teamWriteBody struct {
 	QuotaOnExceeded  string   `json:"quota_on_exceeded,omitempty"`
 	BudgetUSDMicros  int64    `json:"budget_usd_micros,omitempty"`
 	BudgetOnExceeded string   `json:"budget_on_exceeded,omitempty"`
+	// GuardrailID/GuardrailVersion override the provider's default Bedrock
+	// Guardrail for this team (D6, ADR-019). Empty ID = no override.
+	GuardrailID      string `json:"guardrail_id,omitempty"`
+	GuardrailVersion string `json:"guardrail_version,omitempty"`
 }
 
 // maxAllowedModelsBytes bounds the serialized allowed_models list, mirroring
@@ -160,6 +166,40 @@ func (b teamWriteBody) validate() error {
 	if len(strings.Join(b.AllowedModels, ",")) > maxAllowedModelsBytes {
 		return fmt.Errorf("allowed_models exceeds %d bytes joined", maxAllowedModelsBytes)
 	}
+	if err := validateGuardrailFields(b.GuardrailID, b.GuardrailVersion); err != nil {
+		return err
+	}
+	return nil
+}
+
+// maxGuardrailIDBytes bounds guardrail_id — Bedrock guardrail identifiers are
+// short (ARNs or 12-char IDs); this is a generous cap against an admin
+// pasting something unrelated, not a real-world limit.
+const maxGuardrailIDBytes = 2048
+
+// validateGuardrailFields checks guardrail_id/guardrail_version shape (D6,
+// ADR-019): version must be "" (unset), "DRAFT", or a small positive integer
+// string (Bedrock guardrail versions are numbered "1","2",... plus "DRAFT");
+// a version without an id is rejected — it has nothing to apply to.
+func validateGuardrailFields(id, version string) error {
+	if len(id) > maxGuardrailIDBytes {
+		return fmt.Errorf("guardrail_id exceeds %d bytes", maxGuardrailIDBytes)
+	}
+	for _, r := range id {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("guardrail_id must not contain control characters")
+		}
+	}
+	if version != "" && id == "" {
+		return fmt.Errorf("guardrail_version set without guardrail_id")
+	}
+	if version != "" && version != "DRAFT" {
+		for _, r := range version {
+			if r < '0' || r > '9' {
+				return fmt.Errorf("guardrail_version must be \"DRAFT\" or a numeric version, got %q", version)
+			}
+		}
+	}
 	return nil
 }
 
@@ -182,6 +222,7 @@ func (h *TeamsHandler) upsert(w http.ResponseWriter, r *http.Request, id princip
 		Name: name, AllowedModels: body.AllowedModels, RPM: body.RPM, TPM: body.TPM,
 		TokensPerDay: body.TokensPerDay, QuotaOnExceeded: body.QuotaOnExceeded,
 		BudgetUSDMicros: body.BudgetUSDMicros, BudgetOnExceeded: body.BudgetOnExceeded,
+		GuardrailID: body.GuardrailID, GuardrailVersion: body.GuardrailVersion,
 	}
 	if err := h.store.UpsertTeam(r.Context(), rec); err != nil {
 		http.Error(w, `{"error":"upsert failed"}`, http.StatusInternalServerError)

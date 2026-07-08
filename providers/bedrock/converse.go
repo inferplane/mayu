@@ -218,6 +218,7 @@ func (p *provider) completeConverse(ctx context.Context, req *providers.ProxyReq
 	if err != nil {
 		return nil, fmt.Errorf("bedrock: converse req: %w", err)
 	}
+	cr.Guardrail = p.guardrailFor(req)
 	cresp, err := p.conv.Converse(ctx, req.Upstream, cr)
 	if err != nil {
 		return nil, fmt.Errorf("bedrock: converse: %w", err)
@@ -251,6 +252,7 @@ func (p *provider) streamConverse(ctx context.Context, req *providers.ProxyReque
 	if err != nil {
 		return nil, fmt.Errorf("bedrock: converse req: %w", err)
 	}
+	cr.Guardrail = p.guardrailFor(req)
 	evs, err := p.conv.ConverseStream(ctx, req.Upstream, cr)
 	if err != nil {
 		return nil, fmt.Errorf("bedrock: converse stream: %w", err)

@@ -6,21 +6,24 @@ import (
 )
 
 type fakeInvoker struct {
-	gotModelID string
-	gotBody    []byte
-	respBody   []byte
-	streamRaw  [][]byte
-	err        error
+	gotModelID   string
+	gotBody      []byte
+	gotGuardrail Guardrail
+	respBody     []byte
+	streamRaw    [][]byte
+	err          error
 }
 
-func (f *fakeInvoker) Invoke(_ context.Context, modelID string, body []byte) ([]byte, error) {
+func (f *fakeInvoker) Invoke(_ context.Context, modelID string, body []byte, g Guardrail) ([]byte, error) {
 	f.gotModelID = modelID
 	f.gotBody = append([]byte(nil), body...)
+	f.gotGuardrail = g
 	return f.respBody, f.err
 }
-func (f *fakeInvoker) InvokeStream(_ context.Context, modelID string, body []byte) (iter.Seq2[[]byte, error], error) {
+func (f *fakeInvoker) InvokeStream(_ context.Context, modelID string, body []byte, g Guardrail) (iter.Seq2[[]byte, error], error) {
 	f.gotModelID = modelID
 	f.gotBody = append([]byte(nil), body...)
+	f.gotGuardrail = g
 	if f.err != nil {
 		return nil, f.err
 	}

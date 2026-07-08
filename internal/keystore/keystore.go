@@ -68,6 +68,12 @@ type TeamRecord struct {
 	QuotaOnExceeded  string // "" | "block" | "warn"
 	BudgetUSDMicros  int64
 	BudgetOnExceeded string // "" | "block" | "warn"
+	// GuardrailID/GuardrailVersion override the provider's default Bedrock
+	// Guardrail for this team (D6, ADR-019) — a different guardrail, never
+	// "none" (no per-team opt-out; the anti-bypass fix cannot be disabled by
+	// the team it protects). Empty ID = no override, provider default applies.
+	GuardrailID      string
+	GuardrailVersion string
 	CreatedAt        string
 	UpdatedAt        string
 }

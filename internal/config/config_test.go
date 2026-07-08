@@ -104,6 +104,42 @@ func TestLoadRejectsAuthHeaderOnNonAnthropicProvider(t *testing.T) {
 	}
 }
 
+// --- provider-level guardrail defaults (D6, ADR-019) ---
+
+func TestLoadBedrockGuardrailFields(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "c.json")
+	os.WriteFile(f, []byte(`{"providers":{"bedrock-us":{"type":"bedrock","region":"us-west-2","guardrail_id":"gr-abc","guardrail_version":"3"}}}`), 0o600)
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := cfg.Providers["bedrock-us"]
+	if p.GuardrailID != "gr-abc" || p.GuardrailVersion != "3" {
+		t.Fatalf("guardrail fields: %+v", p)
+	}
+}
+
+func TestLoadRejectsGuardrailIDOnNonBedrockProvider(t *testing.T) {
+	for _, typ := range []string{"anthropic", "openai_compatible"} {
+		dir := t.TempDir()
+		f := filepath.Join(dir, "bad.json")
+		os.WriteFile(f, []byte(`{"providers":{"p":{"type":"`+typ+`","guardrail_id":"gr-abc"}}}`), 0o600)
+		if _, err := Load(f); err == nil {
+			t.Fatalf("type %q: expected rejection of guardrail_id on a non-bedrock provider", typ)
+		}
+	}
+}
+
+func TestLoadRejectsGuardrailVersionWithoutID(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	os.WriteFile(f, []byte(`{"providers":{"p":{"type":"bedrock","guardrail_version":"3"}}}`), 0o600)
+	if _, err := Load(f); err == nil {
+		t.Fatal("expected rejection of guardrail_version without guardrail_id")
+	}
+}
+
 func TestLoadTeamsAndPricing(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "c.json")

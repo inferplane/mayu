@@ -42,17 +42,26 @@ const ingressName = "openai"
 const rejectedModelLabel = "_rejected"
 
 type ChatHandler struct {
-	r       *router.Router
-	aud     *audit.Writer        // nil-safe: unit tests may omit
-	gov     *governance.Governor // nil-safe: governance disabled when nil
-	metrics *metrics.Metrics     // nil-safe: no-op when nil
-	mask    *filter.Masking      // nil-safe: masking off when nil (ADR-009)
+	r          *router.Router
+	aud        *audit.Writer                                 // nil-safe: unit tests may omit
+	gov        *governance.Governor                          // nil-safe: governance disabled when nil
+	metrics    *metrics.Metrics                              // nil-safe: no-op when nil
+	mask       *filter.Masking                               // nil-safe: masking off when nil (ADR-009)
+	teamPolicy func(team string) (keystore.TeamRecord, bool) // nil-safe: no per-team overrides when nil (D6/D7, ADR-016 fresh-read pattern)
 }
 
 // SetMasking wires the masking decision. v1 does NOT mask the OpenAI ingress, so
 // a masked team is REJECTED here (fail closed) — it must not bypass the control
 // by switching protocol (ADR-009 round-2 CRITICAL). nil-safe.
 func (h *ChatHandler) SetMasking(m *filter.Masking) { h.mask = m }
+
+// SetTeamPolicy installs a fresh-per-request team-record lookup (mirrors
+// anthropicapi.MessagesHandler.SetTeamPolicy — same ADR-016 posture) for
+// per-team overrides that live on the team record but are not governance:
+// D6/ADR-019's guardrail override today; D7/ADR-020's region-lock reuses it.
+func (h *ChatHandler) SetTeamPolicy(fn func(team string) (keystore.TeamRecord, bool)) {
+	h.teamPolicy = fn
+}
 
 func NewChatHandler(r *router.Router) *ChatHandler { return &ChatHandler{r: r} }
 
@@ -158,6 +167,15 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	h.audit(p, canonical.Model, chain[0].Upstream, nil, traceID)
 	stream := canonical.Stream != nil && *canonical.Stream
 
+	// Team-record per-team guardrail override (D6, ADR-019) — one fresh
+	// lookup for the whole request, reused across every fallback attempt.
+	var teamGuardrailID, teamGuardrailVersion string
+	if h.teamPolicy != nil {
+		if rec, ok := h.teamPolicy(p.Team); ok {
+			teamGuardrailID, teamGuardrailVersion = rec.GuardrailID, rec.GuardrailVersion
+		}
+	}
+
 	// Priority fallback chain (§4.5): try targets in order. A pre-TTFT failure
 	// falls back to the next target, records the breaker result, and sets
 	// x-inferplane-fallback. Stream fallback is pre-first-event only.
@@ -167,7 +185,9 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		pr := &providers.ProxyRequest{
 			Model: canonical.Model, Upstream: ct.Upstream, Parsed: canonical,
 			RawBody: raw, Headers: upHeaders, Stream: stream,
-			IngressProtocol: "openai",
+			IngressProtocol:  "openai",
+			GuardrailID:      teamGuardrailID,
+			GuardrailVersion: teamGuardrailVersion,
 		}
 		last := i == len(chain)-1
 		if i > 0 {

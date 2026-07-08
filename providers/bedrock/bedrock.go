@@ -33,13 +33,29 @@ func factory(cfg providers.Config) (providers.Provider, error) {
 		_ = json.Unmarshal([]byte(raw), &modelAPI)
 	}
 	// awsClient implements both invoker and converser.
-	return &provider{inv: ac, conv: ac, modelAPI: modelAPI}, nil
+	return &provider{
+		inv: ac, conv: ac, modelAPI: modelAPI,
+		defaultGuardrail: Guardrail{ID: cfg.Settings["guardrail_id"], Version: cfg.Settings["guardrail_version"]},
+	}, nil
 }
 
 type provider struct {
-	inv      invoker
-	conv     converser
-	modelAPI map[string]string // upstream modelId → "invoke_model"|"converse"|"mantle"
+	inv              invoker
+	conv             converser
+	modelAPI         map[string]string // upstream modelId → "invoke_model"|"converse"|"mantle"
+	defaultGuardrail Guardrail         // provider-level default (D6, ADR-019) — the anti-bypass fix
+}
+
+// guardrailFor resolves the effective guardrail for one request: a per-team
+// override (req.GuardrailID, threaded from the team record via
+// providers.ProxyRequest) wins over the provider's configured default. There
+// is deliberately no opt-out — a team can select a DIFFERENT guardrail, never
+// remove the default one (ADR-019).
+func (p *provider) guardrailFor(req *providers.ProxyRequest) Guardrail {
+	if req.GuardrailID != "" {
+		return Guardrail{ID: req.GuardrailID, Version: req.GuardrailVersion}
+	}
+	return p.defaultGuardrail
 }
 
 func (p *provider) Name() string               { return "bedrock" }

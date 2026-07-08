@@ -72,6 +72,12 @@ type ProviderConfig struct {
 	// "x-api-key" (default, api.anthropic.com) or "bearer" (Anthropic-compatible
 	// endpoints such as OpenRouter that expect Authorization: Bearer).
 	AuthHeader string `json:"auth_header,omitempty"`
+	// GuardrailID/GuardrailVersion configure the Bedrock provider's DEFAULT
+	// Guardrail (D6, ADR-019) — applied to every invocation unless a team
+	// record overrides it. Meaningful only for type "bedrock"; empty Version
+	// with a non-empty ID defaults to "DRAFT" at the provider layer.
+	GuardrailID      string `json:"guardrail_id,omitempty"`
+	GuardrailVersion string `json:"guardrail_version,omitempty"`
 }
 
 type Target struct {
@@ -554,6 +560,15 @@ func ResolveProviders(cfg *Config) error {
 			if p.AuthHeader != "x-api-key" && p.AuthHeader != "bearer" {
 				return fmt.Errorf("config: provider %q auth_header must be \"x-api-key\" or \"bearer\", got %q", name, p.AuthHeader)
 			}
+		}
+		if p.GuardrailVersion != "" && p.GuardrailID == "" {
+			return fmt.Errorf("config: provider %q guardrail_version set without guardrail_id", name)
+		}
+		if p.GuardrailID != "" && p.Type != "bedrock" {
+			// Same reasoning as auth_header above: only live.go's bedrock
+			// Settings block reads these — on any other type they would
+			// validate but silently do nothing.
+			return fmt.Errorf("config: provider %q guardrail_id is only meaningful for type \"bedrock\", got type %q", name, p.Type)
 		}
 		cfg.Providers[name] = p
 	}
