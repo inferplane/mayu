@@ -529,7 +529,9 @@ func TestAdminMux_AlertsFullAdminOnly(t *testing.T) {
 	fires := func() []alert.Fire {
 		return []alert.Fire{{Team: "acme", Threshold: 0.8, Delivered: true}}
 	}
-	mux := AdminMux(stubStore{}, []string{"admin-tok"}, nil, adminauth.MappingConfig{},
+	v := &fakeVerifier{claims: adminauth.Claims{Subject: "u-alpha", Groups: []string{"team-alpha"}}}
+	mapping := adminauth.MappingConfig{GroupMappings: []adminauth.GroupMapping{{Group: "team-alpha", Teams: []string{"alpha"}}}}
+	mux := AdminMux(stubStore{}, []string{"admin-tok"}, v, mapping,
 		func() configapi.View { return configapi.View{} }, nil, nil, nil, nil, nil, nil, nil, nil, nil, fires)
 
 	// full admin (static token) → 200 with the fire
@@ -539,6 +541,14 @@ func TestAdminMux_AlertsFullAdminOnly(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"acme"`) {
 		t.Fatalf("full-admin GET /admin/alerts/recent = %d %s, want 200 with acme", rec.Code, rec.Body.String())
+	}
+	// team-mapped OIDC identity (authenticated, not full-admin) → 403
+	req2 := httptest.NewRequest("GET", "/admin/alerts/recent", nil)
+	req2.Header.Set("Authorization", "Bearer "+jwtShaped)
+	rec2b := httptest.NewRecorder()
+	mux.ServeHTTP(rec2b, req2)
+	if rec2b.Code != 403 {
+		t.Fatalf("team-mapped GET /admin/alerts/recent = %d, want 403", rec2b.Code)
 	}
 	// no token → 401
 	rec2 := httptest.NewRecorder()

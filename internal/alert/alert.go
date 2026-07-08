@@ -10,6 +10,7 @@ package alert
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -142,6 +143,7 @@ func (n *Notifier) deliver(fire Fire) {
 			fire.Delivered = true
 		}
 		if resp != nil {
+			io.Copy(io.Discard, resp.Body) // drain so the connection can be reused
 			resp.Body.Close()
 		}
 	} else {

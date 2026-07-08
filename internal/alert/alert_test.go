@@ -76,6 +76,35 @@ func TestObserve_FiresOnThresholdCross(t *testing.T) {
 	}
 }
 
+func TestObserve_JumpOverAllThresholdsFiresOnlyHighest(t *testing.T) {
+	var mu sync.Mutex
+	var thresholds []float64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		json.NewDecoder(r.Body).Decode(&payload)
+		mu.Lock()
+		thresholds = append(thresholds, payload["threshold"].(float64))
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	n := New(srv.URL, []float64{0.8, 1.0}, time.Second)
+	// 0% -> 120% in one request: crosses both 0.8 and 1.0 simultaneously.
+	n.Observe("teamA", 1_200_000, 1_000_000)
+	fires := waitForFires(t, n, 1)
+
+	if len(fires) != 1 || fires[0].Threshold != 1.0 {
+		t.Fatalf("jump-over must fire only the highest threshold, got %+v", fires)
+	}
+	mu.Lock()
+	got := append([]float64{}, thresholds...)
+	mu.Unlock()
+	if len(got) != 1 || got[0] != 1.0 {
+		t.Fatalf("webhook must be POSTed exactly once, for 1.0, got %v", got)
+	}
+}
+
 func TestObserve_RatioDropRearms(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

@@ -104,6 +104,21 @@ No retry — a missed alert is not re-delivered; the next threshold crossing (or
 the next window) will fire again. `http.Client` has a configurable timeout
 (default 5s) so an unreachable destination cannot leak goroutines indefinitely.
 
+**Why this client has no `DialContext` metadata-IP guard, unlike the connection
+probe** (`internal/server/configapi/probe.go`): the probe's guard exists
+because its target is **request-time, admin-API-driven** — any authenticated
+admin session can direct the gateway to dial an arbitrary host on demand,
+repeatedly, which is a classic confused-deputy/SSRF surface. The webhook
+destination is **boot-time, config-file/env-var-driven** — the same trust
+level as the OTel exporter endpoint and the S3 anchor endpoint, neither of
+which carries this guard either. Whoever can set the gateway's config/env
+already controls the process. Additionally, unlike the probe (whose result is
+returned to the caller), the webhook's delivery outcome exposed via
+`GET /admin/alerts/recent` is a **fixed classification string**
+(`Fire.Error`, e.g. `"webhook delivery failed"`) — never the raw response
+body or error text — so even a misdirected request cannot exfiltrate a
+metadata-endpoint response through the admin API.
+
 ### 6. The webhook URL is a secret reference, never inline
 
 A Slack incoming-webhook URL and an SNS HTTPS-subscription URL both embed a
