@@ -306,3 +306,50 @@ func TestAdminUI_teamsRecordsWired(t *testing.T) {
 		t.Error("app.js does not gate the team write form on admin identity")
 	}
 }
+
+func TestAdminUI_bodyLoggingWired(t *testing.T) {
+	_, html := get(t, "/index.html")
+	for _, id := range []string{
+		`id="logs-content"`, `id="logs-table"`, `id="logs-load-more"`,
+		`id="body-drawer"`, `id="body-drawer-content"`, `id="body-drawer-close"`,
+		`data-cap="logs_bodies"`,
+	} {
+		if !strings.Contains(html, id) {
+			t.Errorf("index.html missing logs/body element %s", id)
+		}
+	}
+	for _, banned := range []string{"onclick=", "onsubmit=", "onchange=", "style=", "onload="} {
+		if strings.Contains(html, banned) {
+			t.Errorf("index.html contains inline %q in the logs section (CSP)", banned)
+		}
+	}
+	// Retention/privacy honesty (§6.3): outside-the-chain, best-effort masking,
+	// and the streaming-response capture limitation are stated verbatim.
+	for _, want := range []string{"OUTSIDE the audit chain", "best-effort", "streaming", "body_accessed"} {
+		if !strings.Contains(html, want) {
+			t.Errorf("index.html missing honesty hint %q", want)
+		}
+	}
+
+	_, js := get(t, "/app.js")
+	for _, call := range []string{
+		`api("GET", "/admin/logs"`, `api("GET", "/admin/bodies/"`, `api("DELETE", "/admin/bodies/"`,
+	} {
+		if !strings.Contains(js, call) {
+			t.Errorf("app.js missing token-gated call %q", call)
+		}
+	}
+	for _, bad := range []string{
+		`fetch("/admin/logs`, "fetch(`/admin/logs", `fetch("/admin/bodies`, "fetch(`/admin/bodies",
+	} {
+		if strings.Contains(js, bad) {
+			t.Errorf("app.js bare-fetches a logs/bodies endpoint %q (must use api())", bad)
+		}
+	}
+	if !strings.Contains(js, "refreshLogsView") {
+		t.Error("app.js missing refreshLogsView()")
+	}
+	if !strings.Contains(js, `if (name === "logs") refreshLogsView();`) {
+		t.Error("showView does not call refreshLogsView() for the logs section")
+	}
+}

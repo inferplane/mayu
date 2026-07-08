@@ -41,7 +41,9 @@ CREATE TABLE IF NOT EXISTS rollup_day (
   PRIMARY KEY (day, team, model)
 );
 ALTER TABLE rollup_day ADD COLUMN IF NOT EXISTS cache_read BIGINT NOT NULL DEFAULT 0;
-ALTER TABLE rollup_day ADD COLUMN IF NOT EXISTS cache_creation BIGINT NOT NULL DEFAULT 0;`
+ALTER TABLE rollup_day ADD COLUMN IF NOT EXISTS cache_creation BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE events ADD COLUMN IF NOT EXISTS ts TEXT NOT NULL DEFAULT '';
+ALTER TABLE events ADD COLUMN IF NOT EXISTS body_ref TEXT NOT NULL DEFAULT '';`
 
 // Store implements analytics.Store against a shared Postgres database.
 type Store struct {
@@ -280,6 +282,40 @@ func (s *Store) Health() (analytics.Health, error) {
 	return h, nil
 }
 
+// Recent lists the most recent events for the console's Logs list (D4,
+// ADR-018), mirroring analytics.Index.Recent's id-keyset pagination (ULIDs
+// are lexicographically time-ordered, so an id DESC sort/compare is correct).
+func (s *Store) Recent(limit int, before string) ([]analytics.Event, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 200
+	}
+	ctx := context.Background()
+	query := `SELECT id, ts, team, model, provider, status, input_tokens, output_tokens, cost_micros, body_ref FROM events`
+	args := []any{}
+	if before != "" {
+		query += ` WHERE id < $1`
+		args = append(args, before)
+	}
+	query += fmt.Sprintf(` ORDER BY id DESC LIMIT $%d`, len(args)+1)
+	args = append(args, limit)
+
+	rows, err := s.db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query analytics recent events: %w", err)
+	}
+	defer rows.Close()
+	out := []analytics.Event{}
+	for rows.Next() {
+		var e analytics.Event
+		if err := rows.Scan(&e.ID, &e.TS, &e.Team, &e.Model, &e.Provider, &e.Status,
+			&e.InputTokens, &e.OutputTokens, &e.CostMicros, &e.BodyRef); err != nil {
+			return nil, fmt.Errorf("scan analytics recent event: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // Rebuild truncates derived analytics state and bumps the lease epoch when a
 // lease row exists, invalidating any tick that captured a pre-rebuild epoch.
 func (s *Store) Rebuild(ctx context.Context) error {
@@ -404,13 +440,18 @@ func upsertEvent(ctx context.Context, tx pgx.Tx, r audit.Record, key rollupKey) 
 	if r.Outcome != nil {
 		status = r.Outcome.Status
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO events(id,day,team,model,provider,status,input_tokens,output_tokens,cache_read,cache_creation,cost_micros)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+	var bodyRef string
+	if r.BodyRef != nil {
+		bodyRef = *r.BodyRef
+	}
+	_, err := tx.Exec(ctx, `INSERT INTO events(id,day,team,model,provider,status,input_tokens,output_tokens,cache_read,cache_creation,cost_micros,ts,body_ref)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		ON CONFLICT(id) DO UPDATE SET
 			day=excluded.day, team=excluded.team, model=excluded.model, provider=excluded.provider,
 			status=excluded.status, input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens,
-			cache_read=excluded.cache_read, cache_creation=excluded.cache_creation, cost_micros=excluded.cost_micros`,
-		r.ID, key.day, key.team, key.model, r.Request.Provider, status, in, out, cacheRead, cacheCreate, r.Cost.AmountUSDMicros)
+			cache_read=excluded.cache_read, cache_creation=excluded.cache_creation, cost_micros=excluded.cost_micros,
+			ts=excluded.ts, body_ref=excluded.body_ref`,
+		r.ID, key.day, key.team, key.model, r.Request.Provider, status, in, out, cacheRead, cacheCreate, r.Cost.AmountUSDMicros, r.TS, bodyRef)
 	return err
 }
 

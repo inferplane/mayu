@@ -68,7 +68,7 @@ type CostRef struct {
 // for hashing (encoding/json marshals struct fields in declaration order).
 type Record struct {
 	SchemaVersion int          `json:"schema_version"`
-	Event         string       `json:"event"` // request_started | request_completed | admin_key_created | admin_key_revoked | admin_denied
+	Event         string       `json:"event"` // request_started | request_completed | admin_key_created | admin_key_revoked | admin_denied | body_accessed | body_deleted
 	ID            string       `json:"id"`    // ULID
 	TS            string       `json:"ts"`
 	Instance      string       `json:"instance"`
@@ -80,6 +80,19 @@ type Record struct {
 	Latency       *LatencyRef  `json:"latency,omitempty"`
 	TraceID       *string      `json:"trace_id"` // reserved (v0.2 OTel)
 	PrevHash      string       `json:"prev_hash"`
+	// BodyRef and RecordRef are appended at the END (D4, ADR-018) — an
+	// omitempty pointer keeps pre-change records byte-identical, so mixed-
+	// version chains still verify (AuthMethod precedent above).
+	//
+	// BodyRef is the opaque body-store reference, set only on a
+	// request_completed record whose body was captured (audit.log_bodies
+	// on). BodyRef is NEVER set on body_accessed/body_deleted — those events
+	// are metadata-only BY SCHEMA (§4.7 anti-recursion: a body view can never
+	// itself be body-logged), enforced by the emitting code path and tested.
+	BodyRef *string `json:"body_ref,omitempty"`
+	// RecordRef is the request_completed record's ULID that a body_accessed
+	// or body_deleted event refers to (access accountability, §6.3).
+	RecordRef *string `json:"record_ref,omitempty"`
 }
 
 // Canonical returns the deterministic JSON used both for the on-disk record and
