@@ -40,6 +40,13 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Single-writer serialization for this SQLite-backed store (keystore's
+	// sqlite.go sets this identically) — WAL mode allows concurrent readers,
+	// but pinning to one connection avoids SQLITE_BUSY under concurrent
+	// writers (the recorder and purge-worker goroutines) without a
+	// hand-rolled mutex. The recorder/purge call paths here do short,
+	// single-statement operations (no nested acquire while a connection is
+	// already checked out), so this cannot deadlock.
 	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(sqliteSchema); err != nil {
 		db.Close()

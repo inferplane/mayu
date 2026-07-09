@@ -471,7 +471,7 @@ func TestAdminUI_logsViewDegradesWhenIndexOffButBodiesOn(t *testing.T) {
 // notice, not the primary mitigation).
 func TestAdminUI_regionsSaveWarningWired(t *testing.T) {
 	_, html := get(t, "/index.html")
-	if !strings.Contains(html, "replaces") || !strings.Contains(html, "region") {
+	if !strings.Contains(html, "Submitting this team form replaces any config-declared region policy") {
 		t.Error("index.html missing a hint that saving the team form replaces any config-declared region policy")
 	}
 }
