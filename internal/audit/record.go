@@ -93,6 +93,11 @@ type Record struct {
 	// RecordRef is the request_completed record's ULID that a body_accessed
 	// or body_deleted event refers to (access accountability, §6.3).
 	RecordRef *string `json:"record_ref,omitempty"`
+	// GuardrailID and GuardrailVersion record the Bedrock guardrail actually
+	// applied (team override else provider default). They are appended at the
+	// END like BodyRef/RecordRef so old records stay byte-identical.
+	GuardrailID      *string `json:"guardrail_id,omitempty"`
+	GuardrailVersion *string `json:"guardrail_version,omitempty"`
 }
 
 // Canonical returns the deterministic JSON used both for the on-disk record and

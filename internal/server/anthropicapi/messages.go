@@ -267,7 +267,7 @@ func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request
 			return true // transport error → fall back
 		}
 		writeErr(w, 502, "api_error", "upstream error")
-		h.auditCompleted(ulid.New(), p, model, upstream, 502, nil, nil, tracing.TraceID(req.Context()), "")
+		h.auditCompleted(ulid.New(), p, model, upstream, 502, nil, nil, tracing.TraceID(req.Context()), "", pr.GuardrailID, pr.GuardrailVersion)
 		recordSpanResponse(req, prov.Name(), upstream, nil, false) // terminal
 		h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 502, time.Since(start).Seconds(), 0)
 		return false
@@ -306,7 +306,7 @@ func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request
 	if h.bodies != nil && resp.StatusCode < 400 {
 		bodyRef = h.bodies.Capture(recID, p.Team, pr.RawBody, resp.RawBody)
 	}
-	h.auditCompleted(recID, p, model, upstream, resp.StatusCode, usage, cost, tracing.TraceID(req.Context()), bodyRef)
+	h.auditCompleted(recID, p, model, upstream, resp.StatusCode, usage, cost, tracing.TraceID(req.Context()), bodyRef, pr.GuardrailID, pr.GuardrailVersion)
 	recordSpanResponse(req, prov.Name(), upstream, usage, resp.StatusCode < 400)
 	h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, resp.StatusCode, time.Since(start).Seconds(), 0)
 	return false
@@ -333,13 +333,13 @@ func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, 
 			}
 			w.WriteHeader(ue.StatusCode)
 			w.Write(ue.Body)
-			h.auditCompleted(ulid.New(), p, model, upstream, ue.StatusCode, nil, nil, tracing.TraceID(req.Context()), "")
+			h.auditCompleted(ulid.New(), p, model, upstream, ue.StatusCode, nil, nil, tracing.TraceID(req.Context()), "", pr.GuardrailID, pr.GuardrailVersion)
 			recordSpanResponse(req, prov.Name(), upstream, nil, false) // terminal
 			h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, ue.StatusCode, time.Since(start).Seconds(), 0)
 			return false
 		}
 		writeErr(w, 502, "api_error", "upstream stream error")
-		h.auditCompleted(ulid.New(), p, model, upstream, 502, nil, nil, tracing.TraceID(req.Context()), "")
+		h.auditCompleted(ulid.New(), p, model, upstream, 502, nil, nil, tracing.TraceID(req.Context()), "", pr.GuardrailID, pr.GuardrailVersion)
 		recordSpanResponse(req, prov.Name(), upstream, nil, false) // terminal
 		h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 502, time.Since(start).Seconds(), 0)
 		return false
@@ -347,7 +347,7 @@ func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeErr(w, 500, "api_error", "streaming unsupported")
-		h.auditCompleted(ulid.New(), p, model, upstream, 500, nil, nil, tracing.TraceID(req.Context()), "")
+		h.auditCompleted(ulid.New(), p, model, upstream, 500, nil, nil, tracing.TraceID(req.Context()), "", pr.GuardrailID, pr.GuardrailVersion)
 		recordSpanResponse(req, prov.Name(), upstream, nil, false) // terminal
 		h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 500, time.Since(start).Seconds(), 0)
 		return false
@@ -390,7 +390,7 @@ func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, 
 	if h.bodies != nil {
 		bodyRef = h.bodies.Capture(recID, p.Team, pr.RawBody, nil)
 	}
-	h.auditCompleted(recID, p, model, upstream, 200, usage, cost, tracing.TraceID(req.Context()), bodyRef)
+	h.auditCompleted(recID, p, model, upstream, 200, usage, cost, tracing.TraceID(req.Context()), bodyRef, pr.GuardrailID, pr.GuardrailVersion)
 	recordSpanResponse(req, prov.Name(), upstream, usage, true) // committed stream success
 	h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 200, time.Since(start).Seconds(), ttft)
 	return false
@@ -486,7 +486,7 @@ func (h *MessagesHandler) audit(p keystore.Principal, model, upstream string, ou
 // ID, can happen BEFORE the record is built. bodyRef is "" when body logging
 // is off or nothing was captured for this request. No-op without an audit
 // writer.
-func (h *MessagesHandler) auditCompleted(id string, p keystore.Principal, model, upstream string, status int, usage *audit.UsageRef, cost *audit.CostRef, traceID, bodyRef string) {
+func (h *MessagesHandler) auditCompleted(id string, p keystore.Principal, model, upstream string, status int, usage *audit.UsageRef, cost *audit.CostRef, traceID, bodyRef, guardrailID, guardrailVersion string) {
 	if h.aud == nil {
 		return
 	}
@@ -506,6 +506,12 @@ func (h *MessagesHandler) auditCompleted(id string, p keystore.Principal, model,
 	}
 	if bodyRef != "" {
 		rec.BodyRef = &bodyRef
+	}
+	if guardrailID != "" {
+		rec.GuardrailID = &guardrailID
+	}
+	if guardrailVersion != "" {
+		rec.GuardrailVersion = &guardrailVersion
 	}
 	h.aud.Append(rec)
 }
