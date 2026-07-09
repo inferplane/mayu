@@ -113,6 +113,13 @@ func (s *State) Identity(name string) (string, bool) {
 	return id, ok
 }
 
+// Region returns the configured region label for a provider (D7, ADR-020), or
+// "" if unlabeled. Any provider type may carry a region label, not just
+// bedrock — it is a generic topology attribute.
+func (s *State) Region(name string) string {
+	return s.providerConfigs[name].Region
+}
+
 // ProviderConfigs returns a copy of the source provider configs, for deriving
 // the secret-free admin view (live never imports the view package). The
 // returned configs still carry the resolved APIKey — the view layer drops it.

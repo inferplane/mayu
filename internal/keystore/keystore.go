@@ -74,8 +74,13 @@ type TeamRecord struct {
 	// the team it protects). Empty ID = no override, provider default applies.
 	GuardrailID      string
 	GuardrailVersion string
-	CreatedAt        string
-	UpdatedAt        string
+	// AllowedRegions restricts this team's traffic to providers labeled with
+	// one of these regions (D7, ADR-020). Empty = unrestricted (current
+	// behavior). Fail-closed: an unlabeled provider is treated as NOT in any
+	// allowed region, so a restricted team can never reach it.
+	AllowedRegions []string
+	CreatedAt      string
+	UpdatedAt      string
 }
 
 // TeamStore is a separate interface (not folded into Store) so the existing

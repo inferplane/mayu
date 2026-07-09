@@ -155,6 +155,27 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 404, "not_found_error", "unknown model: "+canonical.Model)
 		return
 	}
+	// Team-record fresh lookup (D6/D7, ADR-016 pattern): one call reused below
+	// both for the region filter and the guardrail override.
+	var teamRec keystore.TeamRecord
+	if h.teamPolicy != nil {
+		teamRec, _ = h.teamPolicy(p.Team)
+	}
+	// Per-team region lock (D7, ADR-020): drop targets outside the team's
+	// allowed regions BEFORE governance/billing. An unlabeled target is always
+	// dropped for a restricted team (fail-closed). Empty result → hard deny.
+	if len(teamRec.AllowedRegions) > 0 {
+		if filtered := router.FilterRegions(chain, teamRec.AllowedRegions); len(filtered) == 0 {
+			errMsg := "region_blocked"
+			h.audit(p, canonical.Model, "", &audit.OutcomeRef{Status: 403, Error: &errMsg}, traceID)
+			h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 403, time.Since(start).Seconds(), 0)
+			tracing.SetStatus(span, false, "region blocked")
+			writeErr(w, 403, "permission_error", "no allowed-region target for model: "+canonical.Model)
+			return
+		} else {
+			chain = filtered
+		}
+	}
 	// Governance pre-check (rate/quota/budget) BEFORE the upstream call.
 	// Pricing table from the SAME generation we resolved on (ADR-006).
 	table := st.Pricing()
@@ -173,15 +194,6 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	h.audit(p, canonical.Model, chain[0].Upstream, nil, traceID)
 	stream := canonical.Stream != nil && *canonical.Stream
 
-	// Team-record per-team guardrail override (D6, ADR-019) — one fresh
-	// lookup for the whole request, reused across every fallback attempt.
-	var teamGuardrailID, teamGuardrailVersion string
-	if h.teamPolicy != nil {
-		if rec, ok := h.teamPolicy(p.Team); ok {
-			teamGuardrailID, teamGuardrailVersion = rec.GuardrailID, rec.GuardrailVersion
-		}
-	}
-
 	// Priority fallback chain (§4.5): try targets in order. A pre-TTFT failure
 	// falls back to the next target, records the breaker result, and sets
 	// x-inferplane-fallback. Stream fallback is pre-first-event only.
@@ -192,8 +204,8 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			Model: canonical.Model, Upstream: ct.Upstream, Parsed: canonical,
 			RawBody: raw, Headers: upHeaders, Stream: stream,
 			IngressProtocol:  "openai",
-			GuardrailID:      teamGuardrailID,
-			GuardrailVersion: teamGuardrailVersion,
+			GuardrailID:      teamRec.GuardrailID,
+			GuardrailVersion: teamRec.GuardrailVersion,
 		}
 		last := i == len(chain)-1
 		if i > 0 {

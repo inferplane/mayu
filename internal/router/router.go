@@ -40,6 +40,9 @@ type ChainTarget struct {
 	ProviderName string
 	Identity     string
 	Upstream     string
+	// Region is the target provider's configured region label (D7, ADR-020),
+	// captured from the generation this was resolved on. Empty = unlabeled.
+	Region string
 }
 
 // ResolveChain returns every configured target for a model in priority order,
@@ -59,7 +62,7 @@ func (r *Router) ResolveChain(model string) ([]ChainTarget, *live.State, error) 
 			continue // config drift: target points at unknown provider
 		}
 		id, _ := st.Identity(t.Provider)
-		ct := ChainTarget{Provider: p, ProviderName: t.Provider, Identity: id, Upstream: t.Model}
+		ct := ChainTarget{Provider: p, ProviderName: t.Provider, Identity: id, Upstream: t.Model, Region: st.Region(t.Provider)}
 		all = append(all, ct)
 		if r.brk.Allow(id) {
 			allowed = append(allowed, ct)
@@ -72,6 +75,29 @@ func (r *Router) ResolveChain(model string) ([]ChainTarget, *live.State, error) 
 		return all, st, nil // all breakers open → try anyway
 	}
 	return allowed, st, nil
+}
+
+// FilterRegions drops every target whose Region is not in allowed (D7,
+// ADR-020). A target with an EMPTY Region is always dropped when allowed is
+// non-empty — an unlabeled provider cannot prove residency, so a
+// region-restricted team fails closed rather than silently reaching it. An
+// empty allowed means unrestricted: the chain passes through unchanged (and is
+// not even copied, so a no-policy team pays no allocation cost).
+func FilterRegions(chain []ChainTarget, allowed []string) []ChainTarget {
+	if len(allowed) == 0 {
+		return chain
+	}
+	set := make(map[string]bool, len(allowed))
+	for _, r := range allowed {
+		set[r] = true
+	}
+	var out []ChainTarget
+	for _, ct := range chain {
+		if ct.Region != "" && set[ct.Region] {
+			out = append(out, ct)
+		}
+	}
+	return out
 }
 
 // RecordResult feeds a per-provider call outcome to the circuit breaker, keyed

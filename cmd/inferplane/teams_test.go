@@ -216,3 +216,150 @@ func TestE2ETeamGuardrailFieldsRoundTrip(t *testing.T) {
 		t.Fatalf("request for a guardrail-configured team: status %d: %s", resp.StatusCode, body)
 	}
 }
+
+// withRegionedProviders configures three routes to model "claude-test", in
+// PRIORITY order: an unlabeled provider (no region), then "us", then "eu" —
+// so a region filter changes which one actually gets reached without needing
+// the breaker or an upstream failure to force fallback.
+func withRegionedProviders(unlabeledURL, usURL, euURL string) func(cfg map[string]any, dir string) {
+	return func(cfg map[string]any, dir string) {
+		cfg["providers"] = map[string]any{
+			"unlabeled-provider": map[string]any{
+				"type": "anthropic", "base_url": unlabeledURL,
+				"api_key_ref": map[string]any{"env": "E2E_UPSTREAM_KEY"},
+			},
+			"us-provider": map[string]any{
+				"type": "anthropic", "base_url": usURL, "region": "us",
+				"api_key_ref": map[string]any{"env": "E2E_UPSTREAM_KEY"},
+			},
+			"eu-provider": map[string]any{
+				"type": "anthropic", "base_url": euURL, "region": "eu",
+				"api_key_ref": map[string]any{"env": "E2E_UPSTREAM_KEY"},
+			},
+		}
+		cfg["models"] = map[string]any{
+			"claude-test": map[string]any{
+				"targets": []any{
+					map[string]any{"provider": "unlabeled-provider", "model": "claude-test"},
+					map[string]any{"provider": "us-provider", "model": "claude-test"},
+					map[string]any{"provider": "eu-provider", "model": "claude-test"},
+				},
+			},
+		}
+	}
+}
+
+// TestE2ERegionLock (D7, ADR-020) drives the five scenarios from the design
+// plan against a real running gateway: no-policy passthrough, a dynamic
+// PUT-triggered region switch with no restart, a mismatched-region 403, an
+// unlabeled-target skip, and a config-declared team enforced then overridden
+// by a DB record.
+func TestE2ERegionLock(t *testing.T) {
+	unlabeled := newAnthropicUpstream(t)
+	us := newAnthropicUpstream(t)
+	eu := newAnthropicUpstream(t)
+	dataURL, adminURL, _ := bootGateway(t, func(cfg map[string]any, dir string) {
+		withRegionedProviders(unlabeled.srv.URL, us.srv.URL, eu.srv.URL)(cfg, dir)
+		// A config-only team (no DB record) with its own region policy — scenario 5.
+		cfg["teams"] = map[string]any{
+			"config-us": map[string]any{"allowed_regions": []any{"us"}},
+		}
+	})
+
+	// 1. No policy: unaffected passthrough to the priority-1 target
+	// (unlabeled-provider) — D7 changes nothing for a team with no record.
+	_, key1 := createKey(t, adminURL, "no-policy", []string{"claude-test"})
+	r1 := postMessages(t, dataURL, key1, "claude-test")
+	io.Copy(io.Discard, r1.Body)
+	r1.Body.Close()
+	if r1.StatusCode != http.StatusOK {
+		t.Fatalf("no-policy request: status %d, want 200", r1.StatusCode)
+	}
+	if unlabeled.apiKey() == "" {
+		t.Fatal("no-policy team should reach the priority-1 (unlabeled) target unchanged")
+	}
+	unlabeled.reset()
+
+	// 4. Unlabeled-target skip: restricting to "us" drops the priority-1
+	// unlabeled target (fail-closed) and falls through to us-provider.
+	_, key2 := createKey(t, adminURL, "restricted", []string{"claude-test"})
+	putResp := putTeam(t, adminURL, "restricted", `{"allowed_regions":["us"]}`)
+	putResp.Body.Close()
+	r2 := postMessages(t, dataURL, key2, "claude-test")
+	io.Copy(io.Discard, r2.Body)
+	r2.Body.Close()
+	if r2.StatusCode != http.StatusOK {
+		t.Fatalf("us-restricted request: status %d, want 200", r2.StatusCode)
+	}
+	if unlabeled.apiKey() != "" {
+		t.Fatal("us-restricted team must not reach the unlabeled target (fail-closed)")
+	}
+	if us.apiKey() == "" {
+		t.Fatal("us-restricted team should have reached us-provider after skipping the unlabeled target")
+	}
+	us.reset()
+
+	// 2. Dynamic switch, no restart: the SAME running gateway process, on the
+	// very next request after a PUT, now reaches eu-provider instead.
+	putResp2 := putTeam(t, adminURL, "restricted", `{"allowed_regions":["eu"]}`)
+	putResp2.Body.Close()
+	r3 := postMessages(t, dataURL, key2, "claude-test")
+	io.Copy(io.Discard, r3.Body)
+	r3.Body.Close()
+	if r3.StatusCode != http.StatusOK {
+		t.Fatalf("eu-restricted request: status %d, want 200", r3.StatusCode)
+	}
+	if us.apiKey() != "" {
+		t.Fatal("eu-restricted team must not reach us-provider after the dynamic switch")
+	}
+	if eu.apiKey() == "" {
+		t.Fatal("eu-restricted team should have reached eu-provider after the dynamic PUT switch, no restart")
+	}
+	eu.reset()
+
+	// 3. Mismatched region: nothing in the chain satisfies "apac" → the chain
+	// is fully filtered out → 403, no upstream call at all.
+	_, key3 := createKey(t, adminURL, "mismatched", []string{"claude-test"})
+	putResp3 := putTeam(t, adminURL, "mismatched", `{"allowed_regions":["apac"]}`)
+	putResp3.Body.Close()
+	r4 := postMessages(t, dataURL, key3, "claude-test")
+	body4, _ := io.ReadAll(r4.Body)
+	r4.Body.Close()
+	if r4.StatusCode != http.StatusForbidden {
+		t.Fatalf("mismatched-region request: status %d, want 403: %s", r4.StatusCode, body4)
+	}
+	if unlabeled.apiKey() != "" || us.apiKey() != "" || eu.apiKey() != "" {
+		t.Fatal("mismatched-region team must not reach any upstream")
+	}
+
+	// 5. Config-declared team enforcement, then DB-record override: "config-us"
+	// has no team record yet, so its config policy (allowed_regions: ["us"])
+	// applies — reaches us-provider (skipping the unlabeled target, same as
+	// scenario 4). A DB record then wins WHOLESALE (ADR-016 precedence).
+	_, key4 := createKey(t, adminURL, "config-us", []string{"claude-test"})
+	r5 := postMessages(t, dataURL, key4, "claude-test")
+	io.Copy(io.Discard, r5.Body)
+	r5.Body.Close()
+	if r5.StatusCode != http.StatusOK {
+		t.Fatalf("config-team request: status %d, want 200", r5.StatusCode)
+	}
+	if us.apiKey() == "" {
+		t.Fatal("config-declared team's allowed_regions should have applied with no DB record present")
+	}
+	us.reset()
+
+	putResp5 := putTeam(t, adminURL, "config-us", `{"allowed_regions":["eu"]}`)
+	putResp5.Body.Close()
+	r6 := postMessages(t, dataURL, key4, "claude-test")
+	io.Copy(io.Discard, r6.Body)
+	r6.Body.Close()
+	if r6.StatusCode != http.StatusOK {
+		t.Fatalf("config-team-overridden request: status %d, want 200", r6.StatusCode)
+	}
+	if us.apiKey() != "" {
+		t.Fatal("a DB record must win WHOLESALE over the config team's region policy")
+	}
+	if eu.apiKey() == "" {
+		t.Fatal("config-declared team should reach eu-provider once a DB record overrides its region policy")
+	}
+}

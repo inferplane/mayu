@@ -135,6 +135,15 @@ func (u *anthropicUpstream) apiKey() string {
 	return u.lastAPIKey
 }
 
+// reset clears the recorded request so a later assertion can tell whether
+// THIS round's request hit this upstream, not merely whether it ever did
+// across a multi-scenario test (D7 region-lock e2e).
+func (u *anthropicUpstream) reset() {
+	u.mu.Lock()
+	u.lastAPIKey = ""
+	u.mu.Unlock()
+}
+
 // withAnthropicProvider routes model "claude-test" to an anthropic-type
 // provider pointed at the fake upstream (gateway credential via env ref).
 func withAnthropicProvider(upstreamURL string) func(cfg map[string]any, dir string) {

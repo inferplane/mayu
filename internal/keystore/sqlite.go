@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS teams (
     budget_on_exceeded  TEXT NOT NULL DEFAULT '',
     guardrail_id        TEXT NOT NULL DEFAULT '',
     guardrail_version   TEXT NOT NULL DEFAULT '',
+    allowed_regions     TEXT NOT NULL DEFAULT '',
     created_at          TEXT NOT NULL,
     updated_at          TEXT NOT NULL
 );
@@ -156,6 +157,7 @@ func ensureSchema(db *sql.DB) error {
 	teamMigrations := []struct{ name, ddl string }{
 		{"guardrail_id", `ALTER TABLE teams ADD COLUMN guardrail_id TEXT NOT NULL DEFAULT ''`},
 		{"guardrail_version", `ALTER TABLE teams ADD COLUMN guardrail_version TEXT NOT NULL DEFAULT ''`},
+		{"allowed_regions", `ALTER TABLE teams ADD COLUMN allowed_regions TEXT NOT NULL DEFAULT ''`},
 	}
 	if err := applyMigrations(ctx, conn, existingTeamCols, teamMigrations); err != nil {
 		rollback()
@@ -344,17 +346,18 @@ var _ Store = (*SQLiteStore)(nil)
 
 var ErrTeamNotFound = errors.New("keystore: team not found")
 
-const teamColumns = `name, allowed_models, rpm, tpm, tokens_per_day, quota_on_exceeded, budget_usd_micros, budget_on_exceeded, guardrail_id, guardrail_version, created_at, updated_at`
+const teamColumns = `name, allowed_models, rpm, tpm, tokens_per_day, quota_on_exceeded, budget_usd_micros, budget_on_exceeded, guardrail_id, guardrail_version, allowed_regions, created_at, updated_at`
 
 func scanTeam(row interface{ Scan(...any) error }) (TeamRecord, error) {
 	var t TeamRecord
-	var models string
+	var models, regions string
 	if err := row.Scan(&t.Name, &models, &t.RPM, &t.TPM, &t.TokensPerDay,
 		&t.QuotaOnExceeded, &t.BudgetUSDMicros, &t.BudgetOnExceeded,
-		&t.GuardrailID, &t.GuardrailVersion, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		&t.GuardrailID, &t.GuardrailVersion, &regions, &t.CreatedAt, &t.UpdatedAt); err != nil {
 		return TeamRecord{}, err
 	}
 	t.AllowedModels = splitModels(models)
+	t.AllowedRegions = splitModels(regions)
 	return t, nil
 }
 
@@ -363,17 +366,18 @@ func scanTeam(row interface{ Scan(...any) error }) (TeamRecord, error) {
 func (s *SQLiteStore) UpsertTeam(ctx context.Context, t TeamRecord) error {
 	now := nowRFC3339()
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO teams (name, allowed_models, rpm, tpm, tokens_per_day, quota_on_exceeded, budget_usd_micros, budget_on_exceeded, guardrail_id, guardrail_version, created_at, updated_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+		`INSERT INTO teams (name, allowed_models, rpm, tpm, tokens_per_day, quota_on_exceeded, budget_usd_micros, budget_on_exceeded, guardrail_id, guardrail_version, allowed_regions, created_at, updated_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(name) DO UPDATE SET
 		   allowed_models=excluded.allowed_models, rpm=excluded.rpm, tpm=excluded.tpm,
 		   tokens_per_day=excluded.tokens_per_day, quota_on_exceeded=excluded.quota_on_exceeded,
 		   budget_usd_micros=excluded.budget_usd_micros, budget_on_exceeded=excluded.budget_on_exceeded,
 		   guardrail_id=excluded.guardrail_id, guardrail_version=excluded.guardrail_version,
+		   allowed_regions=excluded.allowed_regions,
 		   updated_at=excluded.updated_at`,
 		t.Name, joinModels(t.AllowedModels), t.RPM, t.TPM, t.TokensPerDay,
 		t.QuotaOnExceeded, t.BudgetUSDMicros, t.BudgetOnExceeded,
-		t.GuardrailID, t.GuardrailVersion, now, now)
+		t.GuardrailID, t.GuardrailVersion, joinModels(t.AllowedRegions), now, now)
 	if err != nil {
 		return fmt.Errorf("keystore: upsert team: %w", err)
 	}

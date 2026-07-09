@@ -232,6 +232,9 @@ type TeamConfig struct {
 	RateLimit     RateLimitConfig `json:"rate_limit"`
 	Quota         QuotaConfig     `json:"quota"`
 	Budget        BudgetConfig    `json:"budget"`
+	// AllowedRegions restricts this team to providers labeled with one of
+	// these regions (D7, ADR-020). Empty = unrestricted.
+	AllowedRegions []string `json:"allowed_regions,omitempty"`
 }
 
 // RateConfig holds per-MTok rates as human USD floats in config, converted to

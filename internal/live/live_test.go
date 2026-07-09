@@ -52,6 +52,26 @@ func TestBuildStateValidatesRoutes(t *testing.T) {
 	}
 }
 
+// TestState_Region (D7, ADR-020): Region reads the provider's config label,
+// any provider type — not just bedrock — and returns "" for an unlabeled or
+// unknown provider (the fail-closed default for a restricted team).
+func TestState_Region(t *testing.T) {
+	cfg := sampleConfig()
+	pc := cfg.Providers["anthropic-direct"]
+	pc.Region = "eu"
+	cfg.Providers["anthropic-direct"] = pc
+	st, _, err := BuildState(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Region("anthropic-direct"); got != "eu" {
+		t.Fatalf("Region(anthropic-direct) = %q, want %q", got, "eu")
+	}
+	if got := st.Region("unknown"); got != "" {
+		t.Fatalf("Region(unknown) = %q, want \"\"", got)
+	}
+}
+
 func TestNewStateDeepCopies(t *testing.T) {
 	cfg := sampleConfig()
 	st, _, err := BuildState(cfg)

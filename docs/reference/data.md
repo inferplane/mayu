@@ -15,7 +15,7 @@ backends are a swap, not a rewrite.
 ### 2. Components
 | Component | Path | Purpose |
 |---|---|---|
-| Key store | `internal/keystore/sqlite.go` | SHA-256-hashed virtual keys, Postgres-portable schema; also owns the `teams` table (D3, ADR-016): `name` (PK), `allowed_models`, `rpm`, `tpm`, `tokens_per_day`, `quota_on_exceeded`, `budget_usd_micros`, `budget_on_exceeded`, `guardrail_id`, `guardrail_version` (D6, ADR-019 — per-team Bedrock Guardrail override), `created_at`, `updated_at`. `guardrail_id`/`guardrail_version` are `teams`' first ALTER-TABLE migration (it shipped as a brand-new table under D3, so no pre-existing rows needed catching up until D6); `ensureSchema` now shares a small `existingColumns`/`applyMigrations` helper pair between `keys` and `teams` instead of duplicating the PRAGMA-scan loop. |
+| Key store | `internal/keystore/sqlite.go` | SHA-256-hashed virtual keys, Postgres-portable schema; also owns the `teams` table (D3, ADR-016): `name` (PK), `allowed_models`, `rpm`, `tpm`, `tokens_per_day`, `quota_on_exceeded`, `budget_usd_micros`, `budget_on_exceeded`, `guardrail_id`, `guardrail_version` (D6, ADR-019 — per-team Bedrock Guardrail override), `allowed_regions` (D7, ADR-020 — per-team region lock), `created_at`, `updated_at`. `guardrail_id`/`guardrail_version`/`allowed_regions` are `teams`' ALTER-TABLE migrations (it shipped as a brand-new table under D3, so no pre-existing rows needed catching up until D6); `ensureSchema` shares a small `existingColumns`/`applyMigrations` helper pair between `keys` and `teams` instead of duplicating the PRAGMA-scan loop. |
 | Store interface | `internal/keystore/keystore.go` | `Store`, `Principal`, `Allows()` (RBAC); `TeamStore` (`UpsertTeam`/`GetTeam`/`ListTeams`/`DeleteTeam`, D3) is a separate interface so the existing `Store` fakes in `internal/server`'s tests are unaffected |
 | Provider store | `internal/providerstore/sqlite.go` | opt-in DB topology (ADR-008): `providers` (refs only — no secret column), `model_targets` (ordered routes), `meta` (durable `seeded` marker); Postgres-portable TEXT-only DDL |
 | Audit writer | `internal/audit/writer.go` | single-writer hash chain, WAL truncation |
@@ -43,6 +43,13 @@ backends are a swap, not a rewrite.
   ADR-016); `internal/governance.Governor` resolves this via a per-request
   keystore lookup (`SetTeamLookup`), not a cache, so a console edit enforces
   on the very next request with no restart.
+- Per-team region lock (D7, ADR-020): `TeamRecord.AllowedRegions` restricts a
+  team to providers labeled with one of these regions; an UNLABELED provider
+  is always dropped for a restricted team (fail-closed). A config-declared
+  team with no DB record still gets its config `allowed_regions` enforced (the
+  one case `TeamRecord` is synthesized from config rather than read from a
+  row) — but a DB record, once it exists, wins wholesale over that config
+  policy, same ADR-016 precedence as every other team field.
 
 ### 4. Code Pointers
 - `internal/keystore/sqlite.go` — schema + SHA-256 lookup
@@ -65,7 +72,7 @@ backends are a swap, not a rewrite.
 ### 2. 구성요소
 | 구성요소 | 경로 | 목적 |
 |---|---|---|
-| 키 스토어 | `internal/keystore/sqlite.go` | SHA-256 해시 가상 키, Postgres 이식 스키마; `teams` 테이블도 소유(D3, ADR-016): `name`(PK), `allowed_models`, `rpm`, `tpm`, `tokens_per_day`, `quota_on_exceeded`, `budget_usd_micros`, `budget_on_exceeded`, `guardrail_id`, `guardrail_version`(D6, ADR-019 — 팀별 Bedrock Guardrail 오버라이드), `created_at`, `updated_at`. `guardrail_id`/`guardrail_version`은 `teams`의 첫 ALTER-TABLE 마이그레이션(D3 때는 신규 테이블이라 불필요했으나 D6에서 처음 필요해짐); `ensureSchema`는 `keys`/`teams`가 `existingColumns`/`applyMigrations` 헬퍼를 공유하도록 정리됨 |
+| 키 스토어 | `internal/keystore/sqlite.go` | SHA-256 해시 가상 키, Postgres 이식 스키마; `teams` 테이블도 소유(D3, ADR-016): `name`(PK), `allowed_models`, `rpm`, `tpm`, `tokens_per_day`, `quota_on_exceeded`, `budget_usd_micros`, `budget_on_exceeded`, `guardrail_id`, `guardrail_version`(D6, ADR-019 — 팀별 Bedrock Guardrail 오버라이드), `allowed_regions`(D7, ADR-020 — 팀별 region 제한), `created_at`, `updated_at`. `guardrail_id`/`guardrail_version`/`allowed_regions`은 `teams`의 ALTER-TABLE 마이그레이션들(D3 때는 신규 테이블이라 불필요했으나 D6부터 필요해짐); `ensureSchema`는 `keys`/`teams`가 `existingColumns`/`applyMigrations` 헬퍼를 공유하도록 정리됨 |
 | Store 인터페이스 | `internal/keystore/keystore.go` | `Store`, `Principal`, `Allows()` (RBAC); `TeamStore`(`UpsertTeam`/`GetTeam`/`ListTeams`/`DeleteTeam`, D3)는 별도 인터페이스로 분리되어 `internal/server` 테스트의 기존 `Store` fake들에 영향 없음 |
 | Provider 스토어 | `internal/providerstore/sqlite.go` | 옵트인 DB 토폴로지 (ADR-008): `providers`(ref만·시크릿 컬럼 없음), `model_targets`(순서 라우트), `meta`(durable `seeded` 마커); Postgres 이식 TEXT 전용 DDL |
 | 감사 writer | `internal/audit/writer.go` | 단일 writer 해시 체인, WAL 절단 |
@@ -91,6 +98,12 @@ backends are a swap, not a rewrite.
   `internal/governance.Governor`는 캐시가 아니라 요청당 keystore 조회
   (`SetTeamLookup`)로 이를 해결하므로, 콘솔에서의 수정이 재시작 없이 바로 다음
   요청부터 적용됩니다.
+- 팀별 region 제한(D7, ADR-020): `TeamRecord.AllowedRegions`는 팀을 지정된
+  region으로 라벨링된 provider로만 제한합니다; region 라벨이 없는 provider는
+  제한된 팀에서 항상 제외됩니다(fail-closed). DB 레코드가 없는 config 선언
+  팀도 config의 `allowed_regions`가 적용됩니다(`TeamRecord`가 config로부터
+  합성되는 유일한 경우) — 다만 DB 레코드가 생성되는 순간 그 config 정책을
+  전체적으로 대체합니다(다른 모든 팀 필드와 동일한 ADR-016 우선순위).
 
 ### 4. 코드 포인터
 - `internal/keystore/sqlite.go` — 스키마 + SHA-256 조회
