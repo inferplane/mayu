@@ -1,4 +1,5 @@
 /bin/
+/inferplane
 *.db
 *.db-wal
 *.db-shm
