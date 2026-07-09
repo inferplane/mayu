@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -675,6 +676,12 @@ func ResolveProviders(cfg *Config) error {
 		}
 		if p.GuardrailVersion != "" && p.GuardrailID == "" {
 			return fmt.Errorf("config: provider %q guardrail_version set without guardrail_id", name)
+		}
+		if p.GuardrailVersion != "" && p.GuardrailVersion != "DRAFT" {
+			n, err := strconv.Atoi(p.GuardrailVersion)
+			if err != nil || n < 1 || strconv.Itoa(n) != p.GuardrailVersion {
+				return fmt.Errorf("config: provider %q guardrail_version must be \"\", \"DRAFT\", or a positive integer with no leading zero/sign, got %q", name, p.GuardrailVersion)
+			}
 		}
 		if p.GuardrailID != "" && p.Type != "bedrock" {
 			// Same reasoning as auth_header above: only live.go's bedrock
