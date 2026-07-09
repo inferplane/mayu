@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -191,6 +192,9 @@ func validateAllowedRegions(regions []string) error {
 		return fmt.Errorf("allowed_regions exceeds %d bytes joined", maxAllowedRegionsBytes)
 	}
 	for _, region := range regions {
+		if strings.TrimSpace(region) == "" {
+			return fmt.Errorf("allowed_regions entries must not be empty")
+		}
 		if strings.Contains(region, ",") {
 			return fmt.Errorf("allowed_regions entries must not contain ','")
 		}
@@ -221,14 +225,16 @@ func validateGuardrailFields(id, version string) error {
 			return fmt.Errorf("guardrail_id must not contain control characters")
 		}
 	}
+	if id != "" && strings.TrimSpace(id) == "" {
+		return fmt.Errorf("guardrail_id must not be whitespace-only")
+	}
 	if version != "" && id == "" {
 		return fmt.Errorf("guardrail_version set without guardrail_id")
 	}
 	if version != "" && version != "DRAFT" {
-		for _, r := range version {
-			if r < '0' || r > '9' {
-				return fmt.Errorf("guardrail_version must be \"DRAFT\" or a numeric version, got %q", version)
-			}
+		n, err := strconv.Atoi(version)
+		if err != nil || n < 1 || strconv.Itoa(n) != version {
+			return fmt.Errorf("guardrail_version must be \"DRAFT\" or a numeric version, got %q", version)
 		}
 	}
 	return nil
