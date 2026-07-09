@@ -260,20 +260,21 @@ func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, pr
 		h.r.RecordResult(providerName, identity, true)
 	}
 	w.Header().Set("Content-Type", "application/json")
+	var clientBody []byte
 	if providerWire(prov.Name()) == "openai" {
 		// openai-wire provider: tee its OpenAI bytes verbatim (lossless, §3.3).
-		w.WriteHeader(resp.StatusCode)
-		w.Write(resp.RawBody)
+		clientBody = resp.RawBody
 	} else {
 		// anthropic-wire provider: CONVERT the canonical response → OpenAI shape.
-		w.WriteHeader(resp.StatusCode)
 		if resp.Parsed != nil {
-			w.Write(openai.ResponseFromCanonical(resp.Parsed))
+			clientBody = openai.ResponseFromCanonical(resp.Parsed)
 		} else {
 			// No parsed canonical (e.g. non-2xx): tee whatever bytes we have.
-			w.Write(resp.RawBody)
+			clientBody = resp.RawBody
 		}
 	}
+	w.WriteHeader(resp.StatusCode)
+	w.Write(clientBody)
 	var usage *audit.UsageRef
 	var cost *audit.CostRef
 	if resp.Parsed != nil {
@@ -287,7 +288,7 @@ func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, pr
 	recID := ulid.New()
 	var bodyRef string
 	if h.bodies != nil && resp.StatusCode < 400 {
-		bodyRef = h.bodies.Capture(recID, p.Team, pr.RawBody, resp.RawBody)
+		bodyRef = h.bodies.Capture(recID, p.Team, pr.RawBody, clientBody)
 	}
 	h.auditCompleted(recID, p, model, upstream, resp.StatusCode, usage, cost, tracing.TraceID(req.Context()), bodyRef)
 	recordSpanResponse(req, prov.Name(), upstream, usage, resp.StatusCode < 400)
