@@ -7,6 +7,7 @@ import (
 	"github.com/inferplane/inferplane/internal/adminauth"
 	"github.com/inferplane/inferplane/internal/alert"
 	"github.com/inferplane/inferplane/internal/audit"
+	"github.com/inferplane/inferplane/internal/bodystore"
 	"github.com/inferplane/inferplane/internal/filter"
 	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
@@ -31,12 +32,14 @@ import (
 // /v1/messages handler enforces it, when nil governance is bypassed. m is the
 // Prometheus metrics sink threaded into the ingress handlers (nil → no-op).
 // teamPolicy is a fresh-per-request team-record lookup (D6/D7, ADR-016
-// posture — no caching); nil disables per-team overrides entirely.
-func DataMux(r *router.Router, store keystore.Store, aud *audit.Writer, gov *governance.Governor, m *metrics.Metrics, mask *filter.Masking, teamPolicy func(team string) (keystore.TeamRecord, bool)) http.Handler {
+// posture — no caching); nil disables per-team overrides entirely. bodies is
+// the opt-in body-capture recorder (D4, ADR-018); nil disables it.
+func DataMux(r *router.Router, store keystore.Store, aud *audit.Writer, gov *governance.Governor, m *metrics.Metrics, mask *filter.Masking, teamPolicy func(team string) (keystore.TeamRecord, bool), bodies *bodystore.Recorder) http.Handler {
 	mux := http.NewServeMux()
 	msgs := anthropicapi.NewMessagesHandlerMetrics(r, aud, gov, m)
 	msgs.SetMasking(mask) // PII masking for configured teams (ADR-009); nil = off
 	msgs.SetTeamPolicy(teamPolicy)
+	msgs.SetBodyRecorder(bodies)
 	mux.Handle("POST /v1/messages", msgs)
 	ct := anthropicapi.NewCountTokensHandler(r)
 	ct.SetMasking(mask)          // mask the count body too (T6); never 500
@@ -45,6 +48,7 @@ func DataMux(r *router.Router, store keystore.Store, aud *audit.Writer, gov *gov
 	chat := openaiapi.NewChatHandlerMetrics(r, aud, gov, m)
 	chat.SetMasking(mask) // masked teams rejected on the OpenAI ingress (T6b)
 	chat.SetTeamPolicy(teamPolicy)
+	chat.SetBodyRecorder(bodies)
 	mux.Handle("POST /v1/chat/completions", chat)
 	// Both the Anthropic (Claude Code) and OpenAI (OpenCode) clients hit the
 	// same GET /v1/models path but expect different response shapes, so we
@@ -76,7 +80,7 @@ func negotiateModels(anthropicH, openaiH http.Handler) http.Handler {
 // receives admin-action audit records (key create/revoke + denials, §5.5
 // "admin API calls are audit events"); nil skips. When m is nil the /metrics
 // endpoint is omitted.
-func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier, mapping adminauth.MappingConfig, configView func() configapi.View, auditFileSinks []string, aud *audit.Writer, m *metrics.Metrics, writer configapi.Writer, configExport func() configapi.ExportDoc, capabilities func() configapi.Capabilities, analyticsQ analyticsapi.Querier, teamStore keystore.TeamStore, configTeams func() []string, alertFires func() []alert.Fire, probeAllowedHosts ...string) http.Handler {
+func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier, mapping adminauth.MappingConfig, configView func() configapi.View, auditFileSinks []string, aud *audit.Writer, m *metrics.Metrics, writer configapi.Writer, configExport func() configapi.ExportDoc, capabilities func() configapi.Capabilities, analyticsQ analyticsapi.Querier, teamStore keystore.TeamStore, configTeams func() []string, alertFires func() []alert.Fire, bodiesRec *bodystore.Recorder, probeAllowedHosts ...string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
@@ -119,6 +123,18 @@ func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier,
 			requireAdmin(analyticsapi.HealthHandler(analyticsQ), emit)))
 		mux.Handle("POST /admin/analytics/rebuild", AdminAuth(adminTokens, verifier, mapping, denied,
 			requireAdmin(analyticsapi.RebuildHandler(analyticsQ), emit)))
+		// Logs list (D4, ADR-018): recent request events, id-keyset paginated.
+		// Metadata only — bodies are fetched separately via /admin/bodies/{ref},
+		// gated on the bodiesRec dependency below (may be off even when
+		// analyticsQ is on: logs metadata does not require body capture).
+		mux.Handle("GET /admin/logs", AdminAuth(adminTokens, verifier, mapping, denied,
+			requireAdmin(analyticsapi.LogsHandler(analyticsQ), emit)))
+	}
+	// Body fetch/erase (D4, ADR-018): full-admin only — resolves a decrypted
+	// captured body server-side. nil bodiesRec omits the mount (log_bodies off).
+	if bodiesRec != nil {
+		bodiesH := adminapi.NewBodiesHandler(bodiesRec, emit)
+		mux.Handle("/admin/bodies/", AdminAuth(adminTokens, verifier, mapping, denied, requireAdmin(bodiesH, emit)))
 	}
 	// Team governance records (D3, ADR-016): teams as first-class keystore rows.
 	// Reads are available to any AdminAuth identity; writes are full-admin only

@@ -1,41 +1,13 @@
 package openaiapi
 
 import (
-	"context"
-	"iter"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/inferplane/inferplane/internal/config"
 	"github.com/inferplane/inferplane/internal/keystore"
 	"github.com/inferplane/inferplane/internal/principal"
-	"github.com/inferplane/inferplane/internal/router"
-	"github.com/inferplane/inferplane/pkg/schema"
-	"github.com/inferplane/inferplane/providers"
 )
-
-// recProvider records the last ProxyRequest it received (mirrors
-// anthropicapi's mask_wire_test.go recProvider).
-type recProvider struct {
-	last *providers.ProxyRequest
-}
-
-func (p *recProvider) Name() string               { return "rec" }
-func (p *recProvider) Models() []schema.ModelInfo { return nil }
-func (p *recProvider) Complete(_ context.Context, req *providers.ProxyRequest) (*providers.ProxyResponse, error) {
-	p.last = req
-	return &providers.ProxyResponse{StatusCode: 200, RawBody: []byte(`{"id":"x","object":"chat.completion","choices":[],"usage":{}}`)}, nil
-}
-func (p *recProvider) Stream(context.Context, *providers.ProxyRequest) (iter.Seq2[*providers.StreamEvent, error], error) {
-	return nil, nil
-}
-
-func recRouter(p providers.Provider) *router.Router {
-	provs := map[string]providers.Provider{"p": p}
-	models := map[string]config.ModelConfig{"m": {Targets: []config.Target{{Provider: "p", Model: "up"}}}}
-	return router.New(holderFor(provs, models))
-}
 
 func TestChatTeamPolicy_GuardrailOverrideReachesProxyRequest(t *testing.T) {
 	rec := &recProvider{}

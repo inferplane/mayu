@@ -19,6 +19,7 @@ import (
 	"github.com/inferplane/inferplane/internal/analytics/pgstore"
 	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/audit/s3anchor"
+	"github.com/inferplane/inferplane/internal/bodystore"
 	"github.com/inferplane/inferplane/internal/budget"
 	"github.com/inferplane/inferplane/internal/config"
 	"github.com/inferplane/inferplane/internal/filter"
@@ -57,6 +58,9 @@ type gateway struct {
 	anchorEvery   time.Duration               // anchor interval
 	anchorLast    atomic.Int64                // highest record count successfully anchored (shared: worker + finalAnchor)
 	metrics       *metrics.Metrics            // for the anchor-failure counter
+	bodyStore     bodystore.Store             // nil unless audit.log_bodies is configured (D4, ADR-018)
+	bodyRec       *bodystore.Recorder         // nil unless audit.log_bodies is configured
+	bodyMaxBytes  int64                       // total body-store size cap, for the purge worker
 	notifier      *alert.Notifier             // nil unless budget_alerts is configured (D5b, ADR-017)
 	reloadMu      sync.Mutex                  // serializes reloads AND UI writes (concurrent SIGHUPs/triggers)
 	dataLn        net.Listener
@@ -309,6 +313,41 @@ func newGateway(cfgPath string) (*gateway, error) {
 		return nil, err
 	}
 
+	// Opt-in request/response body capture (D4, ADR-018). Boot-FATAL on open
+	// failure — an operator who explicitly configured audit.log_bodies must
+	// not silently run without it (unlike the analytics index, which degrades
+	// to disabled on open failure: body logging is a compliance feature the
+	// operator opted into on purpose).
+	var bodyStore bodystore.Store
+	var bodyRec *bodystore.Recorder
+	var bodyMaxBytes int64
+	if bl := cfg.Audit.LogBodies; bl != nil {
+		masterKey, kerr := bodystore.ParseMasterKey(bl.Key)
+		if kerr != nil {
+			closeAll(pstore, pgstoreQ, store, aud)
+			return nil, fmt.Errorf("body store: %w", kerr)
+		}
+		ttl, _ := time.ParseDuration(bl.TTL) // shape already validated at config load
+		if bl.Type == "postgres" {
+			pgBody, perr := bodystore.NewPostgres(context.Background(), bl.DSN)
+			if perr != nil {
+				closeAll(pstore, pgstoreQ, store, aud)
+				return nil, fmt.Errorf("body store: %w", perr)
+			}
+			bodyStore = pgBody
+		} else {
+			sqliteBody, serr := bodystore.OpenSQLite(config.ResolveBodyPath(cfg))
+			if serr != nil {
+				closeAll(pstore, pgstoreQ, store, aud)
+				return nil, fmt.Errorf("body store: %w", serr)
+			}
+			bodyStore = sqliteBody
+		}
+		bodyRec = bodystore.NewRecorder(bodyStore, masterKey, ttl, bl.MaxBodyBytes)
+		bodyMaxBytes = bl.MaxBytes
+		fmt.Println("inferplane: body logging enabled")
+	}
+
 	// OpenTelemetry tracing (ADR-011): opt-in. Init failure is NON-FATAL — tracing
 	// is best-effort observability and must never block boot; the exporter
 	// connects lazily so an unreachable collector at boot is fine.
@@ -362,6 +401,9 @@ func newGateway(cfgPath string) (*gateway, error) {
 		anchorer:      anchorer,
 		anchorEvery:   anchorEvery,
 		metrics:       m,
+		bodyStore:     bodyStore,
+		bodyRec:       bodyRec,
+		bodyMaxBytes:  bodyMaxBytes,
 		dataLn:        dataLn,
 		adminLn:       adminLn,
 	}
@@ -371,7 +413,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 	if pstore != nil {
 		writer = g
 	}
-	g.dataSrv = &http.Server{Handler: server.DataMux(r, store, aud, gov, m, masking, teamPolicy)}
+	g.dataSrv = &http.Server{Handler: server.DataMux(r, store, aud, gov, m, masking, teamPolicy, bodyRec)}
 	// Capability map the console reads on bootstrap (spec §4.4). Phase 0a:
 	// analytics index not built yet; provider_store + guardrails reflect what
 	// this assembly already knows. Later phases flip the rest on as they land.
@@ -389,6 +431,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 			KeyGovernanceFields: true, // keystore always has budget/TPM/RPM/expiry/owner (Phase 2)
 			TeamsRecords:        true, // keystore always supports TeamStore (D3, ADR-016)
 			RegionPolicy:        true, // enforcement path always present (D7, ADR-020) — same rationale as TeamsRecords
+			LogsBodies:          bodyRec != nil,
 			BudgetAlerts:        notifier != nil,
 		}
 	}
@@ -412,7 +455,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 		}
 		return names
 	}
-	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, m, writer, liveExport(holder), capabilities, analyticsQ, store, configTeams, alertFires, cfg.Probe.AllowedHosts...)}
+	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, m, writer, liveExport(holder), capabilities, analyticsQ, store, configTeams, alertFires, bodyRec, cfg.Probe.AllowedHosts...)}
 	return g, nil
 }
 
@@ -665,6 +708,26 @@ func (g *gateway) anchorWorker(ctx context.Context, done chan<- struct{}) {
 	}
 }
 
+// bodyPurgeWorker periodically deletes expired/over-cap body rows (D4,
+// ADR-018): TTL first, then oldest-first size-cap eviction (Store.Purge's
+// contract). Best-effort — failures are logged, never fatal.
+func (g *gateway) bodyPurgeWorker(ctx context.Context, done chan<- struct{}) {
+	defer close(done)
+	const bodyPurgeEvery = 5 * time.Minute
+	t := time.NewTicker(bodyPurgeEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if _, err := g.bodyStore.Purge(ctx, time.Now(), g.bodyMaxBytes); err != nil {
+				fmt.Fprintln(os.Stderr, "inferplane: body store purge failed (will retry):", err)
+			}
+		}
+	}
+}
+
 // anchorOnce anchors the current head if the durable count advanced beyond the
 // last SUCCESSFUL anchor (so a failed anchor is retried, never skipped). Failures
 // are logged + counted, never propagated (best-effort).
@@ -756,6 +819,17 @@ func (g *gateway) serve(ctx context.Context) error {
 	if g.pgstoreQ != nil {
 		defer g.pgstoreQ.Close()
 	}
+	// Body-store shutdown order (D4, ADR-018): bodyStore.Close() is registered
+	// FIRST so it runs LAST — bodyRec.Close() (registered second, runs first)
+	// drains the encrypt+write queue before the underlying store connection
+	// closes (same recorder-drains-before-store-closes shape as the analytics
+	// sink/index pair above).
+	if g.bodyStore != nil {
+		defer g.bodyStore.Close()
+	}
+	if g.bodyRec != nil {
+		defer g.bodyRec.Close()
+	}
 	if g.otelDown != nil {
 		// Flush spans on teardown under a bounded timeout; errors are logged, never
 		// fatal (ADR-011 — tracing is best-effort, off the critical path).
@@ -788,6 +862,14 @@ func (g *gateway) serve(ctx context.Context) error {
 		pgstoreDone = make(chan struct{})
 		go g.pgstoreAggregatorWorker(workerCtx, pgstoreDone)
 	}
+	// Body-store TTL/size-cap purge (D4, ADR-018): same clean-lifecycle
+	// pattern as the anchor worker. Best-effort — failures are logged, never
+	// fatal (purge is housekeeping, not on the request path).
+	var bodyPurgeDone chan struct{}
+	if g.bodyStore != nil {
+		bodyPurgeDone = make(chan struct{})
+		go g.bodyPurgeWorker(workerCtx, bodyPurgeDone)
+	}
 	defer func() {
 		cancelWorker()
 		<-workerDone
@@ -796,6 +878,9 @@ func (g *gateway) serve(ctx context.Context) error {
 		}
 		if pgstoreDone != nil {
 			<-pgstoreDone
+		}
+		if bodyPurgeDone != nil {
+			<-bodyPurgeDone
 		}
 	}()
 

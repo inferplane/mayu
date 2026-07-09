@@ -19,6 +19,9 @@ type Querier interface {
 	Summary(analytics.SummaryQuery) (analytics.Summary, error)
 	TimeSeries(analytics.TimeSeriesQuery) ([]analytics.DayPoint, error)
 	Health() (analytics.Health, error)
+	// Recent lists the most recent events for the console's Logs list (D4,
+	// ADR-018), newest first, id-keyset paginated.
+	Recent(limit int, before string) ([]analytics.Event, error)
 }
 
 const dayLayout = "2006-01-02"

@@ -54,6 +54,7 @@ function showView(name) {
   $("view-title").textContent = VIEWS[name];
   if (name === "overview") refreshOverview();
   if (name === "usage") refreshUsageView();
+  if (name === "logs") refreshLogsView();
   if (name === "teams") refreshTeamsView();
   if (name === "providers") refreshProviders();
   if (name === "governance") refreshGovernance();
@@ -1039,6 +1040,125 @@ $("verify-audit").addEventListener("click", async () => {
     box.textContent = String(err.message || err);
   }
 });
+
+/* ---------- logs + body drawer (D4, ADR-018) ---------- */
+
+let logsCursor = null; // last-seen event id, for "load more" keyset pagination
+
+async function refreshLogsView() {
+  const content = $("logs-content");
+  if (!capOn("analytics_index")) { content.hidden = true; return; }
+  content.hidden = false;
+  logsCursor = null;
+  $("body-drawer").hidden = true;
+  await loadLogsPage(null, true);
+}
+
+async function loadLogsPage(before, reset) {
+  const tbody = $("logs-table").querySelector("tbody");
+  let out;
+  try {
+    const qs = before ? ("?before=" + encodeURIComponent(before)) : "";
+    out = await api("GET", "/admin/logs" + qs, null, true);
+  } catch {
+    return;
+  }
+  if (!out || out === DISABLED) return;
+  const events = out.events || [];
+  if (reset) tbody.textContent = "";
+  if (!events.length) {
+    if (reset) tbody.appendChild(emptyRow(8, "no requests logged yet"));
+    $("logs-load-more").hidden = true;
+    return;
+  }
+  for (const e of events) {
+    const tr = document.createElement("tr");
+    tr.appendChild(td(e.ts || ""));
+    tr.appendChild(td(e.team || ""));
+    tr.appendChild(td(e.model || ""));
+    tr.appendChild(td(e.provider || ""));
+    tr.appendChild(td(String(e.status || "")));
+    tr.appendChild(td(String((e.input_tokens || 0) + (e.output_tokens || 0))));
+    tr.appendChild(td(usd(e.cost_micros || 0)));
+    const cell = document.createElement("td");
+    if (e.body_ref) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "ghost";
+      btn.textContent = "📄";
+      btn.title = "view captured body";
+      btn.addEventListener("click", () => openBodyDrawer(e.body_ref));
+      cell.appendChild(btn);
+    }
+    tr.appendChild(cell);
+    tbody.appendChild(tr);
+  }
+  logsCursor = events[events.length - 1].id;
+  $("logs-load-more").hidden = false;
+}
+
+$("logs-load-more").addEventListener("click", () => loadLogsPage(logsCursor, false));
+
+async function openBodyDrawer(ref) {
+  const drawer = $("body-drawer");
+  const box = $("body-drawer-content");
+  box.textContent = "loading…";
+  drawer.hidden = false;
+  if (!capOn("logs_bodies")) {
+    box.textContent = "body store not enabled";
+    return;
+  }
+  try {
+    const body = await api("GET", "/admin/bodies/" + encodeURIComponent(ref), null, true);
+    if (body === DISABLED) { box.textContent = "body store not enabled"; return; }
+    renderBodyDrawer(box, ref, body);
+  } catch (err) {
+    // A purged/erased/absent ref surfaces the server's tombstone message
+    // (410, never a 500) — rendered here as plain text, no special-casing.
+    box.textContent = String(err.message || err);
+  }
+}
+
+function renderBodyDrawer(box, ref, body) {
+  box.textContent = "";
+  const meta = document.createElement("p");
+  meta.className = "hint";
+  meta.textContent = "record " + (body.record_id || "") + " · expires " + (body.expires_ts || "");
+  box.appendChild(meta);
+
+  const req = document.createElement("pre");
+  req.textContent = "REQUEST:\n" + JSON.stringify(body.request, null, 2);
+  box.appendChild(req);
+
+  const resp = document.createElement("pre");
+  resp.textContent = "RESPONSE:\n" + (body.response == null
+    ? "(not captured — streaming responses are request-only)"
+    : JSON.stringify(body.response, null, 2));
+  box.appendChild(resp);
+
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "ghost";
+  del.textContent = "DELETE BODY";
+  del.addEventListener("click", async () => {
+    if (!confirm("Permanently delete this body? This cannot be undone.")) return;
+    try {
+      await api("DELETE", "/admin/bodies/" + encodeURIComponent(ref));
+      box.textContent = "";
+      const done = document.createElement("p");
+      done.textContent = "body deleted.";
+      box.appendChild(done);
+    } catch (err) {
+      const errLine = document.createElement("p");
+      errLine.className = "status err";
+      errLine.textContent = "delete failed: " + (err.message || err);
+      box.appendChild(errLine);
+    }
+  });
+  box.appendChild(del);
+}
+
+$("body-drawer-close").addEventListener("click", () => { $("body-drawer").hidden = true; });
 
 /* ---------- session ---------- */
 

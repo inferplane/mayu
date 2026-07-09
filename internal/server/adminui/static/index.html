@@ -136,6 +136,40 @@
             (metadata). Prompt/response bodies require the opt-in body store.
             <span class="ko">분석 스토어를 켜면 개별 요청(메타데이터)을 볼 수 있습니다.</span></p>
         </div>
+        <div id="logs-content" hidden>
+          <div class="card">
+            <div class="microlabel">recent requests</div>
+            <p class="hint">📄 marks a request whose body was captured (opt-in
+              <code>audit.log_bodies</code>, D4/ADR-018). A streaming response is
+              never captured — request only.
+              <span class="ko">📄는 본문이 저장된 요청입니다(옵트인 <code>audit.log_bodies</code>).
+              스트리밍 응답은 저장되지 않습니다 — 요청만 저장됩니다.</span></p>
+            <table class="data" id="logs-table">
+              <thead><tr><th>time</th><th>team</th><th>model</th><th>provider</th><th>status</th><th class="num">tokens</th><th class="num">cost</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+            <button id="logs-load-more" type="button" class="ghost" hidden>LOAD MORE</button>
+          </div>
+          <div class="card affordance" data-cap="logs_bodies">
+            <div class="microlabel">body store</div>
+            <p class="hint">Enable <code>audit.log_bodies</code> to view/delete captured
+              request &amp; response bodies from the table above.
+              <span class="ko"><code>audit.log_bodies</code>를 켜면 위 표에서 저장된
+              요청·응답 본문을 보고 삭제할 수 있습니다.</span></p>
+          </div>
+          <div class="card" id="body-drawer" hidden>
+            <div class="microlabel">body — retention &amp; privacy</div>
+            <p class="hint">Bodies live in a separate, deletable, encrypted store
+              OUTSIDE the audit chain. PII masking (if enabled) is best-effort — it
+              does not guarantee removal of secrets, credentials, or other
+              sensitive content. Viewing a body is itself logged (<code>body_accessed</code>).
+              <span class="ko">본문은 감사 체인과 분리된, 삭제 가능하고 암호화된 별도 저장소에
+              있습니다. PII 마스킹(활성화된 경우)은 최선 노력이며 시크릿·자격증명 등의 제거를
+              보장하지 않습니다. 본문 조회 자체도 기록됩니다(<code>body_accessed</code>).</span></p>
+            <div id="body-drawer-content"></div>
+            <button id="body-drawer-close" type="button" class="ghost">CLOSE</button>
+          </div>
+        </div>
       </section>
 
       <!-- ===== keys ===== -->

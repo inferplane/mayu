@@ -18,6 +18,9 @@ type Store interface {
 	Summary(SummaryQuery) (Summary, error)
 	TimeSeries(TimeSeriesQuery) ([]DayPoint, error)
 	Health() (Health, error)
+	// Recent lists the most recent events for the console's Logs list (D4,
+	// ADR-018), newest first, id-keyset paginated via before.
+	Recent(limit int, before string) ([]Event, error)
 }
 
 // Rebuilder is implemented only by stores that support an operator-triggered
