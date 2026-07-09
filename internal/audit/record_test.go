@@ -117,6 +117,72 @@ func TestMixedVersionChainVerifies(t *testing.T) {
 	}
 }
 
+// TestMixedVersionChainVerifies_BodyRef pins hash-chain compatibility across
+// the BodyRef/RecordRef addition (D4, ADR-018): pre-change records (the SAME
+// pre-existing fixture bytes used above — they also predate body_ref) coexist
+// with new records carrying body_ref (request_completed) and record_ref
+// (body_accessed), and the chain verifies.
+func TestMixedVersionChainVerifies_BodyRef(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "audit.jsonl")
+	if err := os.WriteFile(out, []byte(preAuthMethodFixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	fs, err := NewFileSink(out, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := NewWriter("new-instance", filepath.Join(dir, "wal"), []Sink{fs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := "01BODYREF0000000000000000"
+	w.Append(Record{
+		SchemaVersion: 1, Event: "request_completed",
+		ID: ref, TS: "2026-07-08T01:00:00Z",
+		Principal: PrincipalRef{KeyID: "ik_new", Team: "alpha"},
+		Request:   RequestRef{Ingress: "anthropic"},
+		BodyRef:   &ref,
+	})
+	sub, method := "viewer-1", "oidc"
+	w.Append(Record{
+		SchemaVersion: 1, Event: "body_accessed",
+		ID: "01BODYACCESSED000000000001", TS: "2026-07-08T01:00:01Z",
+		Principal: PrincipalRef{User: &sub, AuthMethod: &method},
+		Request:   RequestRef{Ingress: "admin"},
+		RecordRef: &ref,
+	})
+	w.Close()
+
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := Verify(bytesReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.OK || res.Records != 5 {
+		t.Fatalf("mixed-version chain: %+v, want OK with 5 records", res)
+	}
+	if !containsBytes(raw, []byte(`"body_ref":"01BODYREF0000000000000000"`)) {
+		t.Fatal("new request_completed record missing body_ref")
+	}
+	if !containsBytes(raw, []byte(`"event":"body_accessed"`)) || !containsBytes(raw, []byte(`"record_ref":"01BODYREF0000000000000000"`)) {
+		t.Fatal("body_accessed record missing event/record_ref")
+	}
+
+	// The body_accessed record itself must never carry a body_ref (§4.7
+	// anti-recursion — enforced by the emitting code path, pinned here at the
+	// record layer: grep the accessed line specifically, not the whole file).
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		if bytes.Contains(line, []byte(`"event":"body_accessed"`)) && bytes.Contains(line, []byte(`"body_ref"`)) {
+			t.Fatalf("body_accessed record must never carry body_ref: %s", line)
+		}
+	}
+}
+
 func bytesReader(b []byte) *bytes.Reader { return bytes.NewReader(b) }
 func containsBytes(h, n []byte) bool     { return bytes.Contains(h, n) }
 func replaceOnce(b, old, new []byte) []byte {

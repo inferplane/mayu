@@ -587,6 +587,177 @@ func TestAnalyticsModeBRejectsMalshapedDSNRef(t *testing.T) {
 	}
 }
 
+// --- audit.log_bodies block (D4, ADR-018) ---
+
+func TestBodyLogParsesAndValidates(t *testing.T) {
+	dir := t.TempDir()
+	write := func(n, b string) string { p := filepath.Join(dir, n); os.WriteFile(p, []byte(b), 0o600); return p }
+	hexKey := strings.Repeat("ab", 32)
+	t.Setenv("INFERPLANE_BODY_KEY", hexKey)
+
+	cfg, err := Load(write("ok.json", `{"audit":{"log_bodies":{
+		"key_ref":{"env":"INFERPLANE_BODY_KEY"},
+		"ttl":"24h",
+		"max_bytes":2000000,
+		"max_body_bytes":50000
+	}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bl := cfg.Audit.LogBodies
+	if bl == nil {
+		t.Fatal("audit.log_bodies not parsed")
+	}
+	if bl.Key != hexKey {
+		t.Fatalf("key_ref not resolved: %q", bl.Key)
+	}
+	if bl.TTL != "24h" || bl.MaxBytes != 2000000 || bl.MaxBodyBytes != 50000 {
+		t.Fatalf("fields not preserved: %+v", bl)
+	}
+
+	// absent → nil, body logging off.
+	cfgA, err := Load(write("a.json", `{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfgA.Audit.LogBodies != nil {
+		t.Fatal("audit.log_bodies should be nil when absent")
+	}
+}
+
+func TestBodyLogDefaultsTTLAndCaps(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "ok.json")
+	t.Setenv("INFERPLANE_BODY_KEY_OK", strings.Repeat("cd", 32))
+	os.WriteFile(f, []byte(`{"audit":{"log_bodies":{"key_ref":{"env":"INFERPLANE_BODY_KEY_OK"}}}}`), 0o600)
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bl := cfg.Audit.LogBodies
+	if bl.TTL != "168h" {
+		t.Fatalf("default ttl = %q, want 168h", bl.TTL)
+	}
+	if bl.MaxBytes != 1<<30 {
+		t.Fatalf("default max_bytes = %d, want 1GiB", bl.MaxBytes)
+	}
+	if bl.MaxBodyBytes != 1<<20 {
+		t.Fatalf("default max_body_bytes = %d, want 1MiB", bl.MaxBodyBytes)
+	}
+}
+
+func TestBodyLogRejectsInlineKeyOrDSN(t *testing.T) {
+	dir := t.TempDir()
+	f1 := filepath.Join(dir, "bad-key.json")
+	os.WriteFile(f1, []byte(`{"audit":{"log_bodies":{"key":"`+strings.Repeat("ab", 32)+`"}}}`), 0o600)
+	if _, err := Load(f1); err == nil {
+		t.Fatal("inline key (not key_ref) must be rejected")
+	}
+
+	f2 := filepath.Join(dir, "bad-dsn.json")
+	os.WriteFile(f2, []byte(`{"audit":{"log_bodies":{"dsn":"postgres://u:p@host/db"}}}`), 0o600)
+	if _, err := Load(f2); err == nil {
+		t.Fatal("inline dsn (not dsn_ref) must be rejected")
+	}
+}
+
+func TestBodyLogRejectsMissingKeyRef(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	os.WriteFile(f, []byte(`{"audit":{"log_bodies":{}}}`), 0o600)
+	_, err := Load(f)
+	if err == nil {
+		t.Fatal("log_bodies without key_ref must be rejected")
+	}
+	if !strings.Contains(err.Error(), "key_ref is required") {
+		t.Fatalf("error should name the missing field, got: %v", err)
+	}
+}
+
+func TestBodyLogRejectsMalshapedKey(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	t.Setenv("INFERPLANE_BODY_KEY_SHORT", "not-64-hex-chars")
+	os.WriteFile(f, []byte(`{"audit":{"log_bodies":{"key_ref":{"env":"INFERPLANE_BODY_KEY_SHORT"}}}}`), 0o600)
+	if _, err := Load(f); err == nil {
+		t.Fatal("a key_ref not resolving to 64 hex chars must be rejected")
+	}
+}
+
+func TestBodyLogRejectsMalshapedKeyRef(t *testing.T) {
+	dir := t.TempDir()
+	secret := "this-looks-like-a-real-secret-value"
+	f := filepath.Join(dir, "bad.json")
+	os.WriteFile(f, []byte(`{"audit":{"log_bodies":{"key_ref":{"env":"`+secret+`"}}}}`), 0o600)
+	_, err := Load(f)
+	if err == nil {
+		t.Fatal("a secret-shaped env ref (not a valid env var name) must be rejected")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("error must never echo the ref value: %v", err)
+	}
+}
+
+func TestBodyLogRejectsBadType(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	t.Setenv("INFERPLANE_BODY_KEY_TYPE", strings.Repeat("ef", 32))
+	os.WriteFile(f, []byte(`{"audit":{"log_bodies":{"key_ref":{"env":"INFERPLANE_BODY_KEY_TYPE"},"type":"dynamodb"}}}`), 0o600)
+	if _, err := Load(f); err == nil {
+		t.Fatal("an unknown backend type must be rejected")
+	}
+}
+
+func TestBodyLogPostgresRequiresDSNRef(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	t.Setenv("INFERPLANE_BODY_KEY_PG", strings.Repeat("11", 32))
+	os.WriteFile(f, []byte(`{"audit":{"log_bodies":{"key_ref":{"env":"INFERPLANE_BODY_KEY_PG"},"type":"postgres"}}}`), 0o600)
+	if _, err := Load(f); err == nil {
+		t.Fatal("type=postgres without dsn_ref must be rejected")
+	}
+}
+
+func TestBodyLogPostgresResolvesDSN(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "ok.json")
+	t.Setenv("INFERPLANE_BODY_KEY_PG2", strings.Repeat("22", 32))
+	t.Setenv("INFERPLANE_BODY_PG_DSN", "postgres://u:p@host/bodies")
+	os.WriteFile(f, []byte(`{"audit":{"log_bodies":{
+		"key_ref":{"env":"INFERPLANE_BODY_KEY_PG2"},
+		"type":"postgres",
+		"dsn_ref":{"env":"INFERPLANE_BODY_PG_DSN"}
+	}}}`), 0o600)
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Audit.LogBodies.DSN != "postgres://u:p@host/bodies" {
+		t.Fatalf("dsn_ref not resolved: %q", cfg.Audit.LogBodies.DSN)
+	}
+}
+
+func TestResolveBodyPath(t *testing.T) {
+	// Explicit Path always wins.
+	c := &Config{Audit: AuditConfig{LogBodies: &BodyLogConfig{Path: "/custom/bodies.db"}}}
+	if got := ResolveBodyPath(c); got != "/custom/bodies.db" {
+		t.Fatalf("got %q, want explicit path", got)
+	}
+	// Derived from the first file audit sink's directory.
+	c2 := &Config{Audit: AuditConfig{
+		LogBodies: &BodyLogConfig{},
+		Sinks:     []AuditSink{{Type: "stdout"}, {Type: "file", Path: "/var/log/audit.jsonl"}},
+	}}
+	if got := ResolveBodyPath(c2); got != filepath.Join("/var/log", "bodies.db") {
+		t.Fatalf("got %q, want derived from file sink dir", got)
+	}
+	// No file sink, no explicit path → fallback.
+	c3 := &Config{Audit: AuditConfig{LogBodies: &BodyLogConfig{}}}
+	if got := ResolveBodyPath(c3); got != "bodies.db" {
+		t.Fatalf("got %q, want fallback \"bodies.db\"", got)
+	}
+}
+
 // --- budget_alerts block (D5b, ADR-017) ---
 
 func TestBudgetAlertsParsesAndValidates(t *testing.T) {

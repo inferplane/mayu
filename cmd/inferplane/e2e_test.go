@@ -570,3 +570,118 @@ func TestE2EBudgetAlertFires(t *testing.T) {
 		t.Fatalf("/admin/alerts/recent missing the fire: %s", body)
 	}
 }
+
+// TestE2EBodyLoggingRoundTrip (D4, ADR-018): a full-stack body-logging flow —
+// a request is captured, /admin/logs lists it with a body_ref, the body is
+// fetchable, viewing it emits a body_accessed record (carrying record_ref, no
+// body_ref), deletion tombstones it (410), and `audit verify` passes over the
+// whole mixed-event chain.
+func TestE2EBodyLoggingRoundTrip(t *testing.T) {
+	up := newAnthropicUpstream(t)
+	// A 32-byte AES key as 64 hex chars (the shape key_ref must resolve to).
+	t.Setenv("E2E_BODY_KEY", strings.Repeat("ab", 32))
+	var auditPath string
+	dataURL, adminURL, shutdown := bootGateway(t, func(cfg map[string]any, dir string) {
+		withAnthropicProvider(up.srv.URL)(cfg, dir)
+		cfg["audit"].(map[string]any)["log_bodies"] = map[string]any{
+			"key_ref": map[string]any{"env": "E2E_BODY_KEY"},
+		}
+		auditPath = cfg["audit"].(map[string]any)["sinks"].([]any)[0].(map[string]any)["path"].(string)
+	})
+
+	adminGET := func(path string) (int, []byte) {
+		req, _ := http.NewRequest(http.MethodGet, adminURL+path, nil)
+		req.Header.Set("Authorization", "Bearer "+e2eAdminToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, b
+	}
+
+	_, key := createKey(t, adminURL, "demo", []string{"claude-test"})
+	r := postMessages(t, dataURL, key, "claude-test")
+	io.Copy(io.Discard, r.Body)
+	r.Body.Close()
+	if r.StatusCode != http.StatusOK {
+		t.Fatalf("request: status %d", r.StatusCode)
+	}
+
+	// /admin/logs lists the request with a body_ref (poll briefly — the body
+	// capture + analytics ingest are async through the audit sink).
+	var ref string
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		code, body := adminGET("/admin/logs")
+		if code == http.StatusOK {
+			var out struct {
+				Events []struct {
+					BodyRef string `json:"body_ref"`
+				} `json:"events"`
+			}
+			json.Unmarshal(body, &out)
+			if len(out.Events) > 0 && out.Events[0].BodyRef != "" {
+				ref = out.Events[0].BodyRef
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if ref == "" {
+		t.Fatal("/admin/logs never surfaced a body_ref")
+	}
+
+	// The body is fetchable and carries the captured request.
+	code, body := adminGET("/admin/bodies/" + ref)
+	if code != http.StatusOK {
+		t.Fatalf("GET /admin/bodies/%s = %d: %s", ref, code, body)
+	}
+	if !bytes.Contains(body, []byte("hello")) {
+		t.Fatalf("fetched body missing the request content: %s", body)
+	}
+
+	// DELETE, then a second GET must be the 410 tombstone (never 500).
+	delReq, _ := http.NewRequest(http.MethodDelete, adminURL+"/admin/bodies/"+ref, nil)
+	delReq.Header.Set("Authorization", "Bearer "+e2eAdminToken)
+	delResp, err := http.DefaultClient.Do(delReq)
+	if err != nil {
+		t.Fatalf("DELETE /admin/bodies/%s: %v", ref, err)
+	}
+	delResp.Body.Close()
+	if delResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE = %d, want 204", delResp.StatusCode)
+	}
+	if code, _ := adminGET("/admin/bodies/" + ref); code != http.StatusGone {
+		t.Fatalf("GET after DELETE = %d, want 410 (tombstone)", code)
+	}
+
+	shutdown() // drain the audit writer before reading the file sink
+
+	raw, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("read audit sink: %v", err)
+	}
+	// body_accessed (from the successful GET) and body_deleted are in the
+	// chain, carry record_ref, and NEVER a body_ref (§4.7 anti-recursion).
+	for _, event := range []string{`"event":"body_accessed"`, `"event":"body_deleted"`} {
+		if !bytes.Contains(raw, []byte(event)) {
+			t.Fatalf("audit chain missing %s:\n%s", event, raw)
+		}
+	}
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		if (bytes.Contains(line, []byte(`"event":"body_accessed"`)) || bytes.Contains(line, []byte(`"event":"body_deleted"`))) &&
+			bytes.Contains(line, []byte(`"body_ref"`)) {
+			t.Fatalf("body_accessed/body_deleted must never carry body_ref: %s", line)
+		}
+	}
+	// The whole mixed-event chain still verifies.
+	res, err := audit.Verify(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("mixed-event chain not valid: %+v", res)
+	}
+}

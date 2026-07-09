@@ -24,6 +24,8 @@ backends are a swap, not a rewrite.
 | Audit anchoring | `internal/audit/s3anchor/` | opt-in WORM (S3 Object Lock) chain-head anchoring → tamper-resistant (ADR-012); refs/PII-free anchor objects |
 | Limiter store | `internal/limiter/limiter.go` | in-memory token bucket (TPM/RPM), two-phase |
 | Budget store | `internal/budget/budget.go` | in-memory microUSD budget, two-phase |
+| Body store | `internal/bodystore/` | opt-in captured-body store (D4, ADR-018), OUTSIDE the audit chain: `bodies` table (`ref` PK, `record_id`, `team`, `created_ts`, `expires_ts`, `size`, `wrapped_key_nonce`/`wrapped_key_ct`, `req_nonce`/`req_ct`, `resp_nonce`/`resp_ct` — BLOB/BYTEA ciphertext; `resp_*` nullable = streaming request-only). Envelope AEAD (per-record data key wrapped by a config-ref master key). Two backends (`sqlite.go`/`postgres.go`), TTL + size-cap `Purge`, hard-deletable per-row (GDPR erasure) |
+| Analytics index | `internal/analytics/` | derived usage read-model; `events` table gained `ts` + `body_ref` columns (D4, ADR-018) via ALTER-if-missing (SQLite) / `ADD COLUMN IF NOT EXISTS` (Postgres); backs `GET /admin/logs` |
 | ULID | `pkg/ulid/ulid.go` | monotonic record IDs (Crockford base32) |
 
 ### 3. Key Decisions
@@ -31,6 +33,11 @@ backends are a swap, not a rewrite.
 - Per-instance audit hash chain so restarts segment cleanly instead of reading as tampering.
 - Admin-plane events (`admin_key_created` / `admin_key_revoked` / `admin_denied`, ADR-004) carry `principal.user` (opaque OIDC `sub` — never email) and `principal.auth_method` (`oidc` | `break_glass`); `auth_method` is appended at the END of `PrincipalRef` so pre-change chains still verify byte-exactly (mixed-version fixture test).
 - Two-phase stores (check then debit) so a denied request never charges the team.
+- Prompt/response bodies are NEVER in the audit chain (ADR-003 content-free
+  invariant preserved): opt-in `audit.log_bodies` (D4, ADR-018) captures them
+  into a separate, encrypted, deletable body store; the chain carries only an
+  opaque `body_ref`. `Record.body_ref`/`record_ref` are appended at the END of
+  the struct (omitempty pointers), so mixed-version chains verify byte-exactly.
 - Team governance policy has two sources — the config file and a `teams` DB
   record — with the DB record winning when both name the same team (D3,
   ADR-016); `internal/governance.Governor` resolves this via a per-request
@@ -66,12 +73,19 @@ backends are a swap, not a rewrite.
 | 감사 verify | `internal/audit/verify.go` | 인스턴스별 분절 체인 검증 |
 | Limiter 스토어 | `internal/limiter/limiter.go` | 인메모리 토큰 버킷(TPM/RPM), 2단계 |
 | Budget 스토어 | `internal/budget/budget.go` | 인메모리 microUSD budget, 2단계 |
+| Body 스토어 | `internal/bodystore/` | 옵트인 본문 저장소(D4, ADR-018), 감사 체인 바깥: `bodies` 테이블(`ref` PK, `record_id`, `team`, `created_ts`, `expires_ts`, `size`, `wrapped_key_*`, `req_*`, `resp_*` — BLOB/BYTEA 암호문; `resp_*` nullable = 스트리밍 요청만). 엔벨로프 AEAD(레코드별 데이터키를 config-ref 마스터키로 wrap). 두 백엔드(`sqlite.go`/`postgres.go`), TTL+사이즈캡 `Purge`, 행별 하드 삭제(GDPR 소거) |
+| 분석 인덱스 | `internal/analytics/` | 파생 사용량 read-model; `events` 테이블에 `ts`+`body_ref` 컬럼 추가(D4, ADR-018) — ALTER-if-missing(SQLite)/`ADD COLUMN IF NOT EXISTS`(Postgres); `GET /admin/logs` 백엔드 |
 | ULID | `pkg/ulid/ulid.go` | 단조 증가 레코드 ID(Crockford base32) |
 
 ### 3. 주요 결정
 - SQLite(`modernc.org/sqlite`, cgo 없음) 기본 → 정적 바이너리, 5분 기동.
 - 인스턴스별 감사 해시 체인으로 재시작이 변조로 읽히지 않고 깔끔히 분절.
 - 2단계 스토어(검사 후 차감)로 거부된 요청은 팀에 과금하지 않음.
+- 프롬프트/응답 본문은 감사 체인에 절대 들어가지 않음(ADR-003 content-free 불변
+  유지): 옵트인 `audit.log_bodies`(D4, ADR-018)가 별도 암호화·삭제 가능 body
+  스토어에 캡처하고, 체인은 opaque `body_ref`만 보유. `Record.body_ref`/
+  `record_ref`는 구조체 끝에 append(omitempty 포인터)되어 혼합 버전 체인도
+  byte-exact 검증됨.
 - 팀 거버넌스 정책은 config 파일과 `teams` DB 레코드 두 소스를 가지며, 같은 팀
   이름이 양쪽에 있으면 DB 레코드가 승리합니다(D3, ADR-016).
   `internal/governance.Governor`는 캐시가 아니라 요청당 keystore 조회

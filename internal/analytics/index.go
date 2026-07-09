@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,7 +21,10 @@ import (
 	_ "modernc.org/sqlite" // pure-Go driver (CGO_ENABLED=0), registered as "sqlite"
 )
 
-// TEXT/INTEGER only, Postgres-portable (mirrors internal/providerstore).
+// TEXT/INTEGER only, Postgres-portable (mirrors internal/providerstore). ts
+// and body_ref (D4, ADR-018) are included here for a FRESH database; an
+// existing database gets them via the ALTER-if-missing migration below
+// (SQLite has no "ADD COLUMN IF NOT EXISTS").
 const schema = `
 CREATE TABLE IF NOT EXISTS events (
   id             TEXT PRIMARY KEY,
@@ -33,10 +37,61 @@ CREATE TABLE IF NOT EXISTS events (
   output_tokens  INTEGER NOT NULL DEFAULT 0,
   cache_read     INTEGER NOT NULL DEFAULT 0,
   cache_creation INTEGER NOT NULL DEFAULT 0,
-  cost_micros    INTEGER NOT NULL DEFAULT 0
+  cost_micros    INTEGER NOT NULL DEFAULT 0,
+  ts             TEXT NOT NULL DEFAULT '',
+  body_ref       TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS events_day ON events(day);
 CREATE INDEX IF NOT EXISTS events_team ON events(team);`
+
+// eventsMigrationColumns are added to a pre-existing "events" table that
+// predates them (D4, ADR-018's ts/body_ref) — mirrors keystore.sqlite.go's
+// ALTER-if-missing pattern for the "keys" table, at 1/10th the size since
+// there's no legacy-column-name mapping to worry about here.
+var eventsMigrationColumns = []string{
+	`ALTER TABLE events ADD COLUMN ts TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE events ADD COLUMN body_ref TEXT NOT NULL DEFAULT ''`,
+}
+
+// migrateEventsColumns adds any of eventsMigrationColumns not already
+// present, so a pre-D4 database (created before ts/body_ref existed) gets
+// them without losing its rows. A fresh database already has them from the
+// CREATE TABLE above, so this is a no-op there.
+func migrateEventsColumns(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(events)`)
+	if err != nil {
+		return err
+	}
+	existing := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		existing[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+	for _, stmt := range eventsMigrationColumns {
+		// Each ALTER statement's target column name is token index 5:
+		// "ALTER(0) TABLE(1) events(2) ADD(3) COLUMN(4) <name>(5) ...".
+		fields := strings.Fields(stmt)
+		col := fields[5]
+		if existing[col] {
+			continue
+		}
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("migrate events.%s: %w", col, err)
+		}
+	}
+	return nil
+}
 
 type Index struct {
 	db *sql.DB
@@ -56,6 +111,10 @@ func OpenSQLite(path string) (*Index, error) {
 	// Ingest() on the audit-writer goroutine and stall the fan-out. WAL mode
 	// (DSN above) supports concurrent readers + one writer safely.
 	if _, err := db.Exec(schema); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := migrateEventsColumns(db); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -108,11 +167,15 @@ func ingest(e execer, r audit.Record) error {
 	if r.Outcome != nil {
 		status = r.Outcome.Status
 	}
+	var bodyRef string
+	if r.BodyRef != nil {
+		bodyRef = *r.BodyRef
+	}
 	_, err := e.Exec(
-		`INSERT OR IGNORE INTO events(id,day,team,model,provider,status,input_tokens,output_tokens,cache_read,cache_creation,cost_micros)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		`INSERT OR IGNORE INTO events(id,day,team,model,provider,status,input_tokens,output_tokens,cache_read,cache_creation,cost_micros,ts,body_ref)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		r.ID, DayOf(r.TS), r.Principal.Team, ModelOf(r), r.Request.Provider, status,
-		in, out, cacheRead, cacheCreate, r.Cost.AmountUSDMicros)
+		in, out, cacheRead, cacheCreate, r.Cost.AmountUSDMicros, r.TS, bodyRef)
 	return err
 }
 
@@ -228,6 +291,61 @@ type DayPoint struct {
 	CostMicros   int64  `json:"cost_micros"`
 	InputTokens  int64  `json:"input_tokens"`
 	OutputTokens int64  `json:"output_tokens"`
+}
+
+// Event is one row from Recent — the console's Logs list (D4, ADR-018).
+// BodyRef is "" when the request wasn't captured (log_bodies off, an error
+// response, or a streaming response — request-only capture there).
+type Event struct {
+	ID           string `json:"id"`
+	TS           string `json:"ts"`
+	Team         string `json:"team"`
+	Model        string `json:"model"`
+	Provider     string `json:"provider"`
+	Status       int    `json:"status"`
+	InputTokens  int64  `json:"input_tokens"`
+	OutputTokens int64  `json:"output_tokens"`
+	CostMicros   int64  `json:"cost_micros"`
+	BodyRef      string `json:"body_ref,omitempty"`
+}
+
+// recentEventsLimit bounds a single Recent page — the console paginates via
+// `before` (id keyset) rather than requesting unbounded history in one call.
+const recentEventsLimit = 200
+
+// Recent returns the most recent events, newest first (ULIDs are
+// lexicographically time-ordered, so an id DESC sort is correct). limit is
+// clamped to (0, recentEventsLimit]; before, when set, keyset-paginates
+// strictly older than that event's ID (id-based, not offset-based, so a
+// concurrent insert can't shift or duplicate a page).
+func (ix *Index) Recent(limit int, before string) ([]Event, error) {
+	if limit <= 0 || limit > recentEventsLimit {
+		limit = recentEventsLimit
+	}
+	query := `SELECT id, ts, team, model, provider, status, input_tokens, output_tokens, cost_micros, body_ref FROM events`
+	args := []any{}
+	if before != "" {
+		query += ` WHERE id < ?`
+		args = append(args, before)
+	}
+	query += ` ORDER BY id DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := ix.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Event{}
+	for rows.Next() {
+		var e Event
+		if err := rows.Scan(&e.ID, &e.TS, &e.Team, &e.Model, &e.Provider, &e.Status,
+			&e.InputTokens, &e.OutputTokens, &e.CostMicros, &e.BodyRef); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 func dayWhere(since, until string) (string, []any) {
