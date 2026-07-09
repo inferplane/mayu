@@ -744,6 +744,7 @@ function teamLimitsSummary(t) {
   if (t.rpm) parts.push(t.rpm + " rpm");
   if (t.tpm) parts.push(t.tpm + " tpm");
   if (t.tokens_per_day) parts.push(t.tokens_per_day + " tok/day (" + (t.quota_on_exceeded || "block") + ")");
+  if (t.guardrail_id) parts.push("guardrail " + t.guardrail_id + (t.guardrail_version ? ":" + t.guardrail_version : ""));
   return parts.length ? parts.join(" · ") : "—";
 }
 
@@ -756,6 +757,8 @@ function fillTeamForm(t) {
   $("tf-quota-exceeded").value = t.quota_on_exceeded || "";
   $("tf-budget-exceeded").value = t.budget_on_exceeded || "";
   $("tf-models").value = (t.allowed_models || []).join(", ");
+  $("tf-guardrail-id").value = t.guardrail_id || "";
+  $("tf-guardrail-version").value = t.guardrail_version || "";
 }
 
 // refreshTeamsView renders the team table (joined with spend when the
@@ -847,6 +850,8 @@ $("team-form").addEventListener("submit", async (e) => {
     if ($("tf-budget-exceeded").value) body.budget_on_exceeded = $("tf-budget-exceeded").value;
     const models = $("tf-models").value.split(",").map((s) => s.trim()).filter(Boolean);
     if (models.length) body.allowed_models = models;
+    if ($("tf-guardrail-id").value.trim()) body.guardrail_id = $("tf-guardrail-id").value.trim();
+    if ($("tf-guardrail-version").value.trim()) body.guardrail_version = $("tf-guardrail-version").value.trim();
     await api("PUT", "/admin/teams/" + encodeURIComponent(name), body);
     status.textContent = "saved ✓ " + name;
     $("team-form").reset();

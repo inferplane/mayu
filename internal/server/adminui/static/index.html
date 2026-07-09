@@ -237,6 +237,8 @@
                 <option value="warn">budget exceeded: warn</option>
               </select>
               <input id="tf-models" type="text" placeholder="default allowed models — comma-separated (optional)">
+              <input id="tf-guardrail-id" type="text" placeholder="guardrail ID override (optional, bedrock)">
+              <input id="tf-guardrail-version" type="text" placeholder="guardrail version (optional, default DRAFT)">
               <button type="submit">SAVE TEAM</button>
             </form>
             <p id="team-form-status" class="status"></p>
@@ -248,6 +250,12 @@
               — with N replicas a team may consume up to N× before blocking.
               <span class="ko">카운터는 <b>인스턴스별</b>로 집계됩니다(ADR-013) —
               레플리카가 N개면 차단 전까지 최대 N배까지 소비될 수 있습니다.</span></p>
+            <p class="hint">Guardrail override selects a DIFFERENT Bedrock Guardrail for
+              this team — it cannot remove the provider's configured default
+              (no per-team opt-out, D6/ADR-019).
+              <span class="ko">가드레일 오버라이드는 이 팀에 <b>다른</b> Bedrock
+              Guardrail을 지정할 뿐, provider에 설정된 기본 가드레일을 끌 수는 없습니다
+              (팀별 opt-out 없음, D6/ADR-019).</span></p>
           </div>
           <div class="card">
             <div class="microlabel">teams</div>

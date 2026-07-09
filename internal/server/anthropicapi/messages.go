@@ -36,17 +36,27 @@ const ingressName = "anthropic"
 const rejectedModelLabel = "_rejected"
 
 type MessagesHandler struct {
-	r       *router.Router
-	aud     *audit.Writer        // nil-safe: unit tests may omit
-	gov     *governance.Governor // nil-safe: governance disabled when nil
-	metrics *metrics.Metrics     // nil-safe: no-op when nil
-	mask    *filter.Masking      // nil-safe: masking off when nil (ADR-009)
-	bodies  *bodystore.Recorder  // nil-safe: body capture off when nil (D4, ADR-018)
+	r          *router.Router
+	aud        *audit.Writer                                 // nil-safe: unit tests may omit
+	gov        *governance.Governor                          // nil-safe: governance disabled when nil
+	metrics    *metrics.Metrics                              // nil-safe: no-op when nil
+	mask       *filter.Masking                               // nil-safe: masking off when nil (ADR-009)
+	teamPolicy func(team string) (keystore.TeamRecord, bool) // nil-safe: no per-team overrides when nil (D6/D7, ADR-016 fresh-read pattern)
+	bodies     *bodystore.Recorder                           // nil-safe: body capture off when nil (D4, ADR-018)
 }
 
 // SetMasking enables the PII masking filter for the configured teams (ADR-009).
 // nil-safe: leaving it unset keeps the verbatim fast path with zero overhead.
 func (h *MessagesHandler) SetMasking(m *filter.Masking) { h.mask = m }
+
+// SetTeamPolicy installs a fresh-per-request team-record lookup (same
+// ADR-016 posture as Governor.SetTeamLookup — no caching, no hot-reload
+// trigger) used for per-team overrides that live on the team record but are
+// NOT governance: today, the D6/ADR-019 guardrail override. D7/ADR-020's
+// region-lock reuses this same setter rather than adding a second one.
+func (h *MessagesHandler) SetTeamPolicy(fn func(team string) (keystore.TeamRecord, bool)) {
+	h.teamPolicy = fn
+}
 
 // SetBodyRecorder enables opt-in request/response body capture (D4, ADR-018).
 // nil-safe: leaving it unset keeps the zero-overhead fast path.
@@ -173,6 +183,17 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	h.audit(p, parsed.Model, chain[0].Upstream, nil, piiMasked, traceID)
 	stream := parsed.Stream != nil && *parsed.Stream
 
+	// Team-record per-team guardrail override (D6, ADR-019): one fresh lookup
+	// for the whole request (reused across every fallback attempt below) — a
+	// record with no override (empty GuardrailID) is indistinguishable from
+	// no record at all, so the provider's own default applies either way.
+	var teamGuardrailID, teamGuardrailVersion string
+	if h.teamPolicy != nil {
+		if rec, ok := h.teamPolicy(p.Team); ok {
+			teamGuardrailID, teamGuardrailVersion = rec.GuardrailID, rec.GuardrailVersion
+		}
+	}
+
 	// Priority fallback chain (§4.5): try targets in order. A pre-TTFT failure
 	// (Complete error, or Stream() error before the first event) falls back to
 	// the next target, records the breaker result, and sets x-inferplane-fallback.
@@ -186,7 +207,9 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		pr := &providers.ProxyRequest{
 			Model: parsed.Model, Upstream: ct.Upstream, Parsed: &parsed,
 			RawBody: raw, Headers: upHeaders, Stream: stream,
-			IngressProtocol: "anthropic",
+			IngressProtocol:  "anthropic",
+			GuardrailID:      teamGuardrailID,
+			GuardrailVersion: teamGuardrailVersion,
 		}
 		last := i == len(chain)-1
 		if i > 0 {

@@ -24,8 +24,8 @@ import (
 // invariant is preserved end to end. Implemented by awsClient (real SDK) and by
 // fakes in tests.
 type invoker interface {
-	Invoke(ctx context.Context, modelID string, body []byte) ([]byte, error)
-	InvokeStream(ctx context.Context, modelID string, body []byte) (iter.Seq2[[]byte, error], error)
+	Invoke(ctx context.Context, modelID string, body []byte, g Guardrail) ([]byte, error)
+	InvokeStream(ctx context.Context, modelID string, body []byte, g Guardrail) (iter.Seq2[[]byte, error], error)
 }
 
 // converser is the narrow interface the provider logic depends on for the
@@ -36,6 +36,24 @@ type converser interface {
 	ConverseStream(ctx context.Context, modelID string, req ConverseRequest) (iter.Seq2[ConverseStreamEvent, error], error)
 }
 
+// Guardrail selects a Bedrock Guardrail to apply to a request (D6, ADR-019):
+// the data-plane anti-bypass fix — inferplane, not the client, attaches the
+// guardrail to every InvokeModel/Converse call. A zero value means "no
+// guardrail" and every SDK guardrail field is left unset (nil).
+type Guardrail struct {
+	ID, Version string
+}
+
+// versionOrDraft defaults an empty Version to "DRAFT" — the SDK rejects a
+// GuardrailIdentifier with no version, and "DRAFT" is Bedrock's own default
+// working version.
+func (g Guardrail) versionOrDraft() string {
+	if g.Version == "" {
+		return "DRAFT"
+	}
+	return g.Version
+}
+
 type ConverseRequest struct {
 	System      string
 	Messages    []ConverseMessage
@@ -43,6 +61,7 @@ type ConverseRequest struct {
 	ToolChoice  ConverseToolChoice
 	Inference   map[string]any
 	ModelFields map[string]any
+	Guardrail   Guardrail
 }
 
 // ConverseMessage carries the canonical Anthropic content-block vocabulary
@@ -122,26 +141,36 @@ func newAWSClient(ctx context.Context, region, authMode, profile string) (*awsCl
 	return &awsClient{rt: bedrockruntime.NewFromConfig(cfg)}, nil
 }
 
-func (c *awsClient) Invoke(ctx context.Context, modelID string, body []byte) ([]byte, error) {
-	out, err := c.rt.InvokeModel(ctx, &bedrockruntime.InvokeModelInput{
+func (c *awsClient) Invoke(ctx context.Context, modelID string, body []byte, g Guardrail) ([]byte, error) {
+	in := &bedrockruntime.InvokeModelInput{
 		ModelId:     aws.String(modelID),
 		Body:        body,
 		ContentType: aws.String("application/json"),
 		Accept:      aws.String("application/json"),
-	})
+	}
+	if g.ID != "" {
+		in.GuardrailIdentifier = aws.String(g.ID)
+		in.GuardrailVersion = aws.String(g.versionOrDraft())
+	}
+	out, err := c.rt.InvokeModel(ctx, in)
 	if err != nil {
 		return nil, fmt.Errorf("bedrock: invoke model %q: %w", modelID, err)
 	}
 	return out.Body, nil
 }
 
-func (c *awsClient) InvokeStream(ctx context.Context, modelID string, body []byte) (iter.Seq2[[]byte, error], error) {
-	out, err := c.rt.InvokeModelWithResponseStream(ctx, &bedrockruntime.InvokeModelWithResponseStreamInput{
+func (c *awsClient) InvokeStream(ctx context.Context, modelID string, body []byte, g Guardrail) (iter.Seq2[[]byte, error], error) {
+	in := &bedrockruntime.InvokeModelWithResponseStreamInput{
 		ModelId:     aws.String(modelID),
 		Body:        body,
 		ContentType: aws.String("application/json"),
 		Accept:      aws.String("application/json"),
-	})
+	}
+	if g.ID != "" {
+		in.GuardrailIdentifier = aws.String(g.ID)
+		in.GuardrailVersion = aws.String(g.versionOrDraft())
+	}
+	out, err := c.rt.InvokeModelWithResponseStream(ctx, in)
 	if err != nil {
 		return nil, fmt.Errorf("bedrock: invoke model stream %q: %w", modelID, err)
 	}
@@ -169,6 +198,7 @@ func (c *awsClient) Converse(ctx context.Context, modelID string, req ConverseRe
 		ToolConfig:                   buildToolConfig(req.Tools, req.ToolChoice),
 		InferenceConfig:              buildInference(req.Inference),
 		AdditionalModelRequestFields: buildModelFields(req.ModelFields),
+		GuardrailConfig:              buildGuardrailConfig(req.Guardrail),
 	})
 	if err != nil {
 		return ConverseResponse{}, fmt.Errorf("bedrock: converse %q: %w", modelID, err)
@@ -192,6 +222,7 @@ func (c *awsClient) ConverseStream(ctx context.Context, modelID string, req Conv
 		ToolConfig:                   buildToolConfig(req.Tools, req.ToolChoice),
 		InferenceConfig:              buildInference(req.Inference),
 		AdditionalModelRequestFields: buildModelFields(req.ModelFields),
+		GuardrailConfig:              buildGuardrailStreamConfig(req.Guardrail),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("bedrock: converse stream %q: %w", modelID, err)
@@ -421,6 +452,29 @@ func buildModelFields(fields map[string]any) document.Interface {
 		return nil
 	}
 	return document.NewLazyDocument(fields)
+}
+
+// buildGuardrailConfig/buildGuardrailStreamConfig return nil for a zero-value
+// Guardrail (no guardrail applied) — Trace/StreamProcessingMode are left at
+// their zero value (deferred, D6/ADR-019 "Deferred").
+func buildGuardrailConfig(g Guardrail) *brtypes.GuardrailConfiguration {
+	if g.ID == "" {
+		return nil
+	}
+	return &brtypes.GuardrailConfiguration{
+		GuardrailIdentifier: aws.String(g.ID),
+		GuardrailVersion:    aws.String(g.versionOrDraft()),
+	}
+}
+
+func buildGuardrailStreamConfig(g Guardrail) *brtypes.GuardrailStreamConfiguration {
+	if g.ID == "" {
+		return nil
+	}
+	return &brtypes.GuardrailStreamConfiguration{
+		GuardrailIdentifier: aws.String(g.ID),
+		GuardrailVersion:    aws.String(g.versionOrDraft()),
+	}
 }
 
 // rawJSONToAny decodes a JSON value into a Go value suitable for

@@ -31,11 +31,14 @@ import (
 // gov is the governance pipeline (rate/quota/budget + cost); when non-nil the
 // /v1/messages handler enforces it, when nil governance is bypassed. m is the
 // Prometheus metrics sink threaded into the ingress handlers (nil → no-op).
-// bodies is the opt-in body-capture recorder (D4, ADR-018); nil disables it.
-func DataMux(r *router.Router, store keystore.Store, aud *audit.Writer, gov *governance.Governor, m *metrics.Metrics, mask *filter.Masking, bodies *bodystore.Recorder) http.Handler {
+// teamPolicy is a fresh-per-request team-record lookup (D6/D7, ADR-016
+// posture — no caching); nil disables per-team overrides entirely. bodies is
+// the opt-in body-capture recorder (D4, ADR-018); nil disables it.
+func DataMux(r *router.Router, store keystore.Store, aud *audit.Writer, gov *governance.Governor, m *metrics.Metrics, mask *filter.Masking, teamPolicy func(team string) (keystore.TeamRecord, bool), bodies *bodystore.Recorder) http.Handler {
 	mux := http.NewServeMux()
 	msgs := anthropicapi.NewMessagesHandlerMetrics(r, aud, gov, m)
 	msgs.SetMasking(mask) // PII masking for configured teams (ADR-009); nil = off
+	msgs.SetTeamPolicy(teamPolicy)
 	msgs.SetBodyRecorder(bodies)
 	mux.Handle("POST /v1/messages", msgs)
 	ct := anthropicapi.NewCountTokensHandler(r)
@@ -43,6 +46,7 @@ func DataMux(r *router.Router, store keystore.Store, aud *audit.Writer, gov *gov
 	mux.Handle("POST /v1/messages/count_tokens", ct)
 	chat := openaiapi.NewChatHandlerMetrics(r, aud, gov, m)
 	chat.SetMasking(mask) // masked teams rejected on the OpenAI ingress (T6b)
+	chat.SetTeamPolicy(teamPolicy)
 	chat.SetBodyRecorder(bodies)
 	mux.Handle("POST /v1/chat/completions", chat)
 	// Both the Anthropic (Claude Code) and OpenAI (OpenCode) clients hit the

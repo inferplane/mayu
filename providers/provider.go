@@ -29,6 +29,13 @@ type ProxyRequest struct {
 	// forwards RawBody verbatim (lossless, cache-safe §3.3); a mismatch goes
 	// through canonical conversion (best-effort).
 	IngressProtocol string
+	// GuardrailID/GuardrailVersion select a provider-level guardrail for THIS
+	// request (per-team override, D6/ADR-019). Empty = the provider's
+	// configured default. A deliberate, narrow exception to provider
+	// isolation (§8): a transport field any provider may ignore — only
+	// providers/bedrock reads it today.
+	GuardrailID      string
+	GuardrailVersion string
 }
 
 // ProxyResponse is a non-streaming upstream response. RawBody is teed to the

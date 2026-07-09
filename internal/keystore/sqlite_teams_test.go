@@ -23,6 +23,8 @@ func TestTeamCRUD_roundTrip(t *testing.T) {
 		QuotaOnExceeded:  "block",
 		BudgetUSDMicros:  5_000_000,
 		BudgetOnExceeded: "warn",
+		GuardrailID:      "gr-abc123",
+		GuardrailVersion: "3",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -34,6 +36,9 @@ func TestTeamCRUD_roundTrip(t *testing.T) {
 	if got.RPM != 60 || got.TPM != 10000 || got.TokensPerDay != 1_000_000 ||
 		got.QuotaOnExceeded != "block" || got.BudgetUSDMicros != 5_000_000 || got.BudgetOnExceeded != "warn" {
 		t.Fatalf("fields not round-tripped: %+v", got)
+	}
+	if got.GuardrailID != "gr-abc123" || got.GuardrailVersion != "3" {
+		t.Fatalf("guardrail fields not round-tripped: %+v", got)
 	}
 	if len(got.AllowedModels) != 2 || got.AllowedModels[0] != "claude-sonnet-4-6" {
 		t.Fatalf("allowed_models not round-tripped: %+v", got.AllowedModels)
@@ -135,5 +140,53 @@ func TestTeamsTable_appearsOnPreExistingKeysOnlyDatabase(t *testing.T) {
 	defer s.Close()
 	if err := s.UpsertTeam(context.Background(), TeamRecord{Name: "t"}); err != nil {
 		t.Fatalf("teams table missing after migration: %v", err)
+	}
+}
+
+// TestTeamsTable_migratesGuardrailColumns proves a teams table that predates
+// D6 (guardrail_id/guardrail_version) gets those columns added in place,
+// without losing existing rows.
+func TestTeamsTable_migratesGuardrailColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pre-d6.db")
+	old, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`CREATE TABLE teams (
+		name TEXT PRIMARY KEY, allowed_models TEXT NOT NULL DEFAULT '',
+		rpm INTEGER NOT NULL DEFAULT 0, tpm INTEGER NOT NULL DEFAULT 0,
+		tokens_per_day INTEGER NOT NULL DEFAULT 0, quota_on_exceeded TEXT NOT NULL DEFAULT '',
+		budget_usd_micros INTEGER NOT NULL DEFAULT 0, budget_on_exceeded TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`INSERT INTO teams (name, created_at, updated_at) VALUES ('pre-existing', 't1', 't1')`); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+
+	s, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("OpenSQLite on pre-D6 teams table: %v", err)
+	}
+	defer s.Close()
+
+	// The pre-existing row survives the migration, with guardrail fields
+	// defaulting to empty (no override).
+	got, ok, err := s.GetTeam(context.Background(), "pre-existing")
+	if err != nil || !ok {
+		t.Fatalf("pre-existing row lost during migration: ok=%v err=%v", ok, err)
+	}
+	if got.GuardrailID != "" || got.GuardrailVersion != "" {
+		t.Fatalf("migrated columns should default empty: %+v", got)
+	}
+
+	// New writes with guardrail fields work post-migration.
+	if err := s.UpsertTeam(context.Background(), TeamRecord{Name: "new", GuardrailID: "gr-x", GuardrailVersion: "1"}); err != nil {
+		t.Fatalf("upsert after migration: %v", err)
+	}
+	got2, ok, err := s.GetTeam(context.Background(), "new")
+	if err != nil || !ok || got2.GuardrailID != "gr-x" || got2.GuardrailVersion != "1" {
+		t.Fatalf("post-migration guardrail write/read: ok=%v err=%v got=%+v", ok, err, got2)
 	}
 }

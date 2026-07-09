@@ -168,3 +168,51 @@ func TestE2ETeamRecordWinsOverConfig(t *testing.T) {
 		t.Fatalf("record must win over an unlimited config policy for the same team: status %d: %s", r2.StatusCode, body)
 	}
 }
+
+// TestE2ETeamGuardrailFieldsRoundTrip (D6, ADR-019): a team's guardrail
+// override round-trips through PUT -> GET, and the same team record can still
+// serve ordinary (non-bedrock) traffic unaffected — GuardrailID/Version are
+// silently ignored by every provider except bedrock (§8 provider isolation).
+func TestE2ETeamGuardrailFieldsRoundTrip(t *testing.T) {
+	up := newAnthropicUpstream(t)
+	dataURL, adminURL, _ := bootGateway(t, teamsAPIConfig(up.srv.URL))
+
+	putResp := putTeam(t, adminURL, "guarded", `{"guardrail_id":"gr-abc123","guardrail_version":"3"}`)
+	putBody, _ := io.ReadAll(putResp.Body)
+	putResp.Body.Close()
+	if putResp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT team with guardrail fields: status %d: %s", putResp.StatusCode, putBody)
+	}
+	var putOut map[string]any
+	json.Unmarshal(putBody, &putOut)
+	if putOut["guardrail_id"] != "gr-abc123" || putOut["guardrail_version"] != "3" {
+		t.Fatalf("PUT response missing guardrail fields: %+v", putOut)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, adminURL+"/admin/teams", nil)
+	req.Header.Set("Authorization", "Bearer "+e2eAdminToken)
+	getResp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /admin/teams: %v", err)
+	}
+	getBody, _ := io.ReadAll(getResp.Body)
+	getResp.Body.Close()
+	var list struct {
+		Data []map[string]any `json:"data"`
+	}
+	json.Unmarshal(getBody, &list)
+	if len(list.Data) != 1 || list.Data[0]["guardrail_id"] != "gr-abc123" || list.Data[0]["guardrail_version"] != "3" {
+		t.Fatalf("GET /admin/teams did not reflect guardrail fields: %+v", list.Data)
+	}
+
+	// The team's ordinary (anthropic, non-bedrock) traffic is unaffected —
+	// GuardrailID/Version reach the ProxyRequest but every non-bedrock
+	// provider ignores them.
+	_, key := createKey(t, adminURL, "guarded", []string{"claude-test"})
+	resp := postMessages(t, dataURL, key, "claude-test")
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("request for a guardrail-configured team: status %d: %s", resp.StatusCode, body)
+	}
+}

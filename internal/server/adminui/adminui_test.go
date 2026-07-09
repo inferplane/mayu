@@ -379,3 +379,32 @@ func TestAdminUI_budgetAlertsWired(t *testing.T) {
 		t.Error("app.js bare-fetches /admin/alerts (must use api())")
 	}
 }
+
+// TestAdminUI_guardrailFieldsWired (D6, ADR-019): the team form carries the
+// guardrail override inputs, submits them through the existing token-gated
+// PUT /admin/teams/{name} call (no new endpoint), and states the no-opt-out
+// anti-bypass invariant.
+func TestAdminUI_guardrailFieldsWired(t *testing.T) {
+	_, html := get(t, "/index.html")
+	for _, id := range []string{`id="tf-guardrail-id"`, `id="tf-guardrail-version"`} {
+		if !strings.Contains(html, id) {
+			t.Errorf("index.html missing guardrail element %s", id)
+		}
+	}
+	for _, banned := range []string{"onclick=", "onsubmit=", "onchange=", "style=", "onload="} {
+		if strings.Contains(html, banned) {
+			t.Errorf("index.html contains inline %q in the team-form guardrail fields (CSP)", banned)
+		}
+	}
+	if !strings.Contains(html, "no per-team opt-out") {
+		t.Error("index.html missing the no-opt-out anti-bypass honesty hint for guardrails")
+	}
+
+	_, js := get(t, "/app.js")
+	if !strings.Contains(js, `body.guardrail_id = $("tf-guardrail-id").value.trim();`) {
+		t.Error("app.js does not submit guardrail_id in the team-form handler")
+	}
+	if !strings.Contains(js, `$("tf-guardrail-id").value = t.guardrail_id`) {
+		t.Error("app.js does not prefill guardrail_id when editing a team")
+	}
+}

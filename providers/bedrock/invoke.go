@@ -38,7 +38,7 @@ func (p *provider) completeInvoke(ctx context.Context, req *providers.ProxyReque
 	if err != nil {
 		return nil, fmt.Errorf("bedrock: invoke body: %w", err)
 	}
-	respBody, err := p.inv.Invoke(ctx, req.Upstream, body)
+	respBody, err := p.inv.Invoke(ctx, req.Upstream, body, p.guardrailFor(req))
 	if err != nil {
 		return nil, fmt.Errorf("bedrock: invoke: %w", err)
 	}
@@ -55,7 +55,7 @@ func (p *provider) streamInvoke(ctx context.Context, req *providers.ProxyRequest
 	if err != nil {
 		return nil, fmt.Errorf("bedrock: invoke body: %w", err)
 	}
-	payloads, err := p.inv.InvokeStream(ctx, req.Upstream, body)
+	payloads, err := p.inv.InvokeStream(ctx, req.Upstream, body, p.guardrailFor(req))
 	if err != nil {
 		return nil, fmt.Errorf("bedrock: invoke stream: %w", err)
 	}

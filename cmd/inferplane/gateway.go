@@ -241,6 +241,18 @@ func newGateway(cfgPath string) (*gateway, error) {
 		return governance.PolicyFromLimits(rec.RPM, rec.TPM, rec.TokensPerDay,
 			rec.QuotaOnExceeded, rec.BudgetUSDMicros, rec.BudgetOnExceeded), true
 	})
+	// Per-team record lookup for NON-governance overrides (D6/ADR-019 today —
+	// the guardrail override; D7/ADR-020's region-lock reuses this same
+	// closure shape). Same fresh-per-request posture as SetTeamLookup above; a
+	// lookup error falls back to "no override" rather than blocking traffic.
+	teamPolicy := func(team string) (keystore.TeamRecord, bool) {
+		rec, ok, err := store.GetTeam(context.Background(), team)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "inferplane: team policy lookup:", err)
+			return keystore.TeamRecord{}, false
+		}
+		return rec, ok
+	}
 
 	// Budget-alert webhook (D5b, ADR-017): opt-in, off unless configured. The
 	// webhook URL is never logged (it may embed a Slack/SNS capability token).
@@ -392,7 +404,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 	if pstore != nil {
 		writer = g
 	}
-	g.dataSrv = &http.Server{Handler: server.DataMux(r, store, aud, gov, m, masking, bodyRec)}
+	g.dataSrv = &http.Server{Handler: server.DataMux(r, store, aud, gov, m, masking, teamPolicy, bodyRec)}
 	// Capability map the console reads on bootstrap (spec §4.4). Phase 0a:
 	// analytics index not built yet; provider_store + guardrails reflect what
 	// this assembly already knows. Later phases flip the rest on as they land.
