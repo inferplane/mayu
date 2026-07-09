@@ -25,14 +25,14 @@ import (
 // (ADR-016 precedence: a DB record wins over config only while it exists).
 type TeamsHandler struct {
 	store       keystore.TeamStore
-	configTeams func() []string // names declared in config, for the "source":"config" rows list() adds
+	configTeams func() []keystore.TeamRecord // teams declared in config, for the "source":"config" rows list() adds
 	emit        func(audit.Record)
 }
 
 // NewTeamsHandler builds the handler. configTeams may be nil (no config-only
-// names to surface). emit (nil-safe) receives admin_team_upserted /
+// teams to surface). emit (nil-safe) receives admin_team_upserted /
 // admin_team_deleted / admin_denied audit records.
-func NewTeamsHandler(store keystore.TeamStore, configTeams func() []string, emit func(audit.Record)) *TeamsHandler {
+func NewTeamsHandler(store keystore.TeamStore, configTeams func() []keystore.TeamRecord, emit func(audit.Record)) *TeamsHandler {
 	return &TeamsHandler{store: store, configTeams: configTeams, emit: emit}
 }
 
@@ -72,7 +72,8 @@ func (h *TeamsHandler) adminEvent(event string, id principal.AdminIdentity, team
 func teamView(t keystore.TeamRecord, source string) map[string]any {
 	v := map[string]any{"name": t.Name, "source": source}
 	if source != "record" {
-		return v // config-only row: name + source only, values live in the file
+		v["allowed_regions"] = t.AllowedRegions
+		return v
 	}
 	v["allowed_models"] = t.AllowedModels
 	v["rpm"] = t.RPM
@@ -102,11 +103,11 @@ func (h *TeamsHandler) list(w http.ResponseWriter, r *http.Request) {
 		out = append(out, teamView(t, "record"))
 	}
 	if h.configTeams != nil {
-		for _, name := range h.configTeams() {
-			if haveRecord[name] {
+		for _, rec := range h.configTeams() {
+			if haveRecord[rec.Name] {
 				continue // a DB record for this name replaces the config row (ADR-016 precedence)
 			}
-			out = append(out, teamView(keystore.TeamRecord{Name: name}, "config"))
+			out = append(out, teamView(rec, "config"))
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")

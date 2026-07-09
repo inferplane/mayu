@@ -215,7 +215,9 @@ func TestTeamsHandler_zeroValueMeansUnlimited(t *testing.T) {
 }
 
 func TestTeamsHandler_listIncludesConfigOnlyNamesNotShadowedByRecord(t *testing.T) {
-	h := NewTeamsHandler(newTestStore(t), func() []string { return []string{"config-only", "both"} }, nil)
+	h := NewTeamsHandler(newTestStore(t), func() []keystore.TeamRecord {
+		return []keystore.TeamRecord{{Name: "config-only"}, {Name: "both"}}
+	}, nil)
 	doAsTeams(t, h, &adminID, "PUT", "/admin/teams/both", `{"rpm":5}`)
 
 	rec := doAsTeams(t, h, &adminID, "GET", "/admin/teams", "")
@@ -236,6 +238,37 @@ func TestTeamsHandler_listIncludesConfigOnlyNamesNotShadowedByRecord(t *testing.
 	}
 	if len(list.Data) != 2 {
 		t.Fatalf("expected exactly 2 rows (no duplicate for 'both'): %+v", list.Data)
+	}
+}
+
+// TestTeamsHandler_configOnlyRowSurfacesAllowedRegions proves a config-only
+// team's allowed_regions round-trips into the list response (ADR-020's
+// documented sharp edge: the console can only pre-fill a field it can see).
+// A config-sourced row must gain exactly this one extra key — no other field.
+func TestTeamsHandler_configOnlyRowSurfacesAllowedRegions(t *testing.T) {
+	h := NewTeamsHandler(newTestStore(t), func() []keystore.TeamRecord {
+		return []keystore.TeamRecord{{Name: "eu-team", AllowedRegions: []string{"eu"}}}
+	}, nil)
+
+	rec := doAsTeams(t, h, &adminID, "GET", "/admin/teams", "")
+	var list struct {
+		Data []map[string]any `json:"data"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &list)
+
+	if len(list.Data) != 1 {
+		t.Fatalf("expected exactly 1 row: %+v", list.Data)
+	}
+	row := list.Data[0]
+	if row["source"] != "config" {
+		t.Fatalf("row source = %v, want config: %+v", row["source"], row)
+	}
+	regions, _ := row["allowed_regions"].([]any)
+	if len(regions) != 1 || regions[0] != "eu" {
+		t.Fatalf("config-only row missing allowed_regions: %+v", row)
+	}
+	if _, has := row["rpm"]; has {
+		t.Fatalf("config-only row must not gain any field beyond name/source/allowed_regions: %+v", row)
 	}
 }
 

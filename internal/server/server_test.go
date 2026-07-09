@@ -488,7 +488,7 @@ func TestAdminMux_TeamsWriteRequiresFullAdmin(t *testing.T) {
 
 	v := &fakeVerifier{claims: adminauth.Claims{Subject: "u-alpha", Groups: []string{"team-alpha"}}}
 	mapping := adminauth.MappingConfig{GroupMappings: []adminauth.GroupMapping{{Group: "team-alpha", Teams: []string{"alpha"}}}}
-	configTeams := func() []string { return nil }
+	configTeams := func() []keystore.TeamRecord { return nil }
 	mux := AdminMux(store, []string{"admin-tok"}, v, mapping, func() configapi.View { return configapi.View{} },
 		nil, nil, nil, nil, nil, nil, nil, store, configTeams, nil, nil)
 
@@ -538,7 +538,7 @@ func TestAdminMux_UsersEndpointAnyAdminIdentity(t *testing.T) {
 	v := &fakeVerifier{claims: adminauth.Claims{Subject: "u-alpha", Groups: []string{"team-alpha"}}}
 	mapping := adminauth.MappingConfig{GroupMappings: []adminauth.GroupMapping{{Group: "team-alpha", Teams: []string{"alpha"}}}}
 	mux := AdminMux(store, []string{"admin-tok"}, v, mapping, func() configapi.View { return configapi.View{} },
-		nil, nil, nil, nil, nil, nil, nil, store, func() []string { return nil }, nil, nil)
+		nil, nil, nil, nil, nil, nil, nil, store, func() []keystore.TeamRecord { return nil }, nil, nil)
 
 	req := httptest.NewRequest("GET", "/admin/users", nil)
 	req.Header.Set("Authorization", "Bearer "+jwtShaped)

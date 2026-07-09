@@ -434,3 +434,15 @@ func TestAdminUI_regionFieldsWired(t *testing.T) {
 		t.Error("app.js does not prefill allowed_regions when editing a team")
 	}
 }
+
+// TestAdminUI_regionsSaveWarningWired proves the team form warns that saving
+// replaces any config-declared region policy for that team unless the
+// allowed-regions field is filled in (ADR-020's documented sharp edge — the
+// console now pre-fills the field automatically, so this is a backstop
+// notice, not the primary mitigation).
+func TestAdminUI_regionsSaveWarningWired(t *testing.T) {
+	_, html := get(t, "/index.html")
+	if !strings.Contains(html, "replaces") || !strings.Contains(html, "region") {
+		t.Error("index.html missing a hint that saving the team form replaces any config-declared region policy")
+	}
+}
