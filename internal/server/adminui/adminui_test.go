@@ -435,6 +435,35 @@ func TestAdminUI_regionFieldsWired(t *testing.T) {
 	}
 }
 
+// TestAdminUI_logsViewDegradesWhenIndexOffButBodiesOn proves refreshLogsView
+// no longer unconditionally hides the whole Logs view when analytics_index
+// is off — an operator who enabled logs_bodies independently must see a
+// degraded explanatory message instead of nothing.
+func TestAdminUI_logsViewDegradesWhenIndexOffButBodiesOn(t *testing.T) {
+	_, js := get(t, "/app.js")
+	start := strings.Index(js, "async function refreshLogsView()")
+	if start < 0 {
+		t.Fatal("app.js missing refreshLogsView")
+	}
+	end := strings.Index(js[start:], "\nasync function ")
+	if end < 0 {
+		t.Fatal("could not isolate refreshLogsView body (no following async function marker)")
+	}
+	fn := js[start : start+end]
+
+	// The old unconditional hide-and-return must no longer be the ONLY path:
+	// this exact line must be gone from the function.
+	if strings.Contains(fn, `if (!capOn("analytics_index")) { content.hidden = true; return; }`) {
+		t.Fatal("refreshLogsView still unconditionally hides the view when analytics_index is off, ignoring logs_bodies")
+	}
+	if !strings.Contains(fn, `capOn("logs_bodies")`) {
+		t.Fatal("refreshLogsView must check logs_bodies before hiding the view on analytics_index=off")
+	}
+	if !strings.Contains(strings.ToLower(fn), "analytics index") {
+		t.Fatal("refreshLogsView missing an explanatory degraded-state message mentioning the analytics index")
+	}
+}
+
 // TestAdminUI_regionsSaveWarningWired proves the team form warns that saving
 // replaces any config-declared region policy for that team unless the
 // allowed-regions field is filled in (ADR-020's documented sharp edge — the
