@@ -41,7 +41,7 @@ func NewBodiesHandler(rec *bodystore.Recorder, emit func(audit.Record)) *BodiesH
 
 func (h *BodiesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	id, ok := principal.AdminFrom(r.Context())
-	if !ok {
+	if !ok || !id.IsAdmin {
 		http.Error(w, `{"error":"no admin identity"}`, http.StatusForbidden)
 		return
 	}

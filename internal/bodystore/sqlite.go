@@ -40,6 +40,7 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 	if err != nil {
 		return nil, err
 	}
+	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(sqliteSchema); err != nil {
 		db.Close()
 		return nil, err
