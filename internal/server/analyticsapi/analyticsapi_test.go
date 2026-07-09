@@ -24,6 +24,9 @@ func (f *fakeQ) TimeSeries(analytics.TimeSeriesQuery) ([]analytics.DayPoint, err
 func (f *fakeQ) Health() (analytics.Health, error) {
 	return analytics.Health{Mode: "A", IsLeader: true}, nil
 }
+func (f *fakeQ) Recent(limit int, before string) ([]analytics.Event, error) {
+	return []analytics.Event{{ID: "01FAKE", Team: "demo"}}, nil
+}
 
 // fakeRebuildableQ additionally implements analytics.Rebuilder (Mode B shape) —
 // Mode A's *analytics.Index does not, and fakeQ above deliberately doesn't

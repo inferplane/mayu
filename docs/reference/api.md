@@ -27,6 +27,7 @@ contract is in [docs/api-reference.md](../api-reference.md).
 | Provider store | `internal/providerstore/` | opt-in DB-authoritative provider/model topology (ADR-008); refs only (no secret column), durable seed marker, Postgres-portable DDL |
 | Audit verify API | `internal/server/auditapi/` | `GET /admin/audit/verify` per-sink hash-chain check (ADR-003 #2); complete-prefix, 16 MiB cap |
 | Budget alerts API | `internal/server/adminapi/alerts.go` | `GET /admin/alerts/recent` (**full-admin only**, D5b/ADR-017) — recent-fires ring (last 50) of the budget-alert webhook emitter (`internal/alert.Notifier`); per-instance state |
+| Logs + body API | `internal/server/analyticsapi/logs.go`, `internal/server/adminapi/bodies.go` | `GET /admin/logs` (**full-admin only**, D4/ADR-018) recent request events (id-keyset paginated, `body_ref` marks a captured body); `GET`/`DELETE /admin/bodies/{ref}` (**full-admin only**) fetch/erase a captured body — GET emits `body_accessed` (deduped 5m/viewer), DELETE emits `body_deleted`, both carry `record_ref` never `body_ref`; purged/erased/undecryptable → **410 tombstone**, never 500 |
 | Metrics endpoint | `internal/server/metricsapi.go` | unauthenticated Prometheus `/metrics` |
 | OpenAI conversion | `internal/openai/convert.go` | OpenAI ⇄ canonical request/response/chunk |
 
@@ -41,8 +42,8 @@ contract is in [docs/api-reference.md](../api-reference.md).
 - `internal/server/auth.go` — `KeyAuth` virtual-key resolution
 
 ### 5. Cross-references
-- Related modules: `internal/router`, `internal/governance`, `internal/alert`, `providers/`
-- Related ADRs: docs/decisions/ADR-016-teams-as-keystore-records.md, docs/decisions/ADR-017-budget-alert-webhooks.md
+- Related modules: `internal/router`, `internal/governance`, `internal/alert`, `internal/bodystore`, `providers/`
+- Related ADRs: docs/decisions/ADR-016-teams-as-keystore-records.md, docs/decisions/ADR-017-budget-alert-webhooks.md, docs/decisions/ADR-018-opt-in-body-logging.md
 - Related runbooks: docs/runbooks/
 
 <a id="korean"></a>
@@ -69,6 +70,7 @@ HTTP 표면입니다. 두 인그레스(Anthropic Messages, OpenAI Chat Completio
 | Provider 스토어 | `internal/providerstore/` | 옵트인 DB 권위 프로바이더/모델 토폴로지 (ADR-008); ref만 저장(시크릿 컬럼 없음), durable seed 마커, Postgres 이식 가능 DDL |
 | Audit verify API | `internal/server/auditapi/` | `GET /admin/audit/verify` sink별 해시체인 검증 (ADR-003 #2); 완전 prefix, 16 MiB 캡 |
 | 예산 알림 API | `internal/server/adminapi/alerts.go` | `GET /admin/alerts/recent` (**풀 어드민 전용**, D5b/ADR-017) — 예산 알림 웹훅 발신기(`internal/alert.Notifier`)의 최근 발화(최대 50건) 링; 인스턴스별 상태 |
+| 로그 + 본문 API | `internal/server/analyticsapi/logs.go`, `internal/server/adminapi/bodies.go` | `GET /admin/logs` (**풀 어드민 전용**, D4/ADR-018) 최근 요청 이벤트(id keyset 페이지네이션, `body_ref`는 본문 저장 표시); `GET`/`DELETE /admin/bodies/{ref}` (**풀 어드민 전용**) 저장 본문 조회/삭제 — GET은 `body_accessed`(뷰어별 5분 dedupe), DELETE는 `body_deleted` 발행, 둘 다 `record_ref`만 가지며 `body_ref`는 절대 없음; purge/삭제/복호불가 → **410 톰스톤**, 500 아님 |
 | 메트릭 엔드포인트 | `internal/server/metricsapi.go` | 무인증 Prometheus `/metrics` |
 | OpenAI 변환 | `internal/openai/convert.go` | OpenAI ⇄ canonical 요청/응답/청크 |
 
@@ -83,6 +85,6 @@ HTTP 표면입니다. 두 인그레스(Anthropic Messages, OpenAI Chat Completio
 - `internal/server/auth.go` — `KeyAuth` 가상 키 해석
 
 ### 5. 상호 참조
-- 관련 모듈: `internal/router`, `internal/governance`, `internal/alert`, `providers/`
-- 관련 ADR: docs/decisions/ADR-016-teams-as-keystore-records.md, docs/decisions/ADR-017-budget-alert-webhooks.md
+- 관련 모듈: `internal/router`, `internal/governance`, `internal/alert`, `internal/bodystore`, `providers/`
+- 관련 ADR: docs/decisions/ADR-016-teams-as-keystore-records.md, docs/decisions/ADR-017-budget-alert-webhooks.md, docs/decisions/ADR-018-opt-in-body-logging.md
 - 관련 런북: docs/runbooks/

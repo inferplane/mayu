@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/inferplane/inferplane/internal/audit"
+	"github.com/inferplane/inferplane/internal/bodystore"
 	"github.com/inferplane/inferplane/internal/filter"
 	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
@@ -47,12 +48,17 @@ type ChatHandler struct {
 	gov     *governance.Governor // nil-safe: governance disabled when nil
 	metrics *metrics.Metrics     // nil-safe: no-op when nil
 	mask    *filter.Masking      // nil-safe: masking off when nil (ADR-009)
+	bodies  *bodystore.Recorder  // nil-safe: body capture off when nil (D4, ADR-018)
 }
 
 // SetMasking wires the masking decision. v1 does NOT mask the OpenAI ingress, so
 // a masked team is REJECTED here (fail closed) — it must not bypass the control
 // by switching protocol (ADR-009 round-2 CRITICAL). nil-safe.
 func (h *ChatHandler) SetMasking(m *filter.Masking) { h.mask = m }
+
+// SetBodyRecorder enables opt-in request/response body capture (D4, ADR-018).
+// nil-safe: leaving it unset keeps the zero-overhead fast path.
+func (h *ChatHandler) SetBodyRecorder(r *bodystore.Recorder) { h.bodies = r }
 
 func NewChatHandler(r *router.Router) *ChatHandler { return &ChatHandler{r: r} }
 
@@ -204,13 +210,13 @@ func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, pr
 			}
 			w.WriteHeader(ue.StatusCode)
 			w.Write(ue.Body)
-			h.auditCompleted(p, model, upstream, ue.StatusCode, nil, nil, tracing.TraceID(req.Context()))
+			h.auditCompleted(ulid.New(), p, model, upstream, ue.StatusCode, nil, nil, tracing.TraceID(req.Context()), "")
 			recordSpanResponse(req, prov.Name(), upstream, nil, false)
 			h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, ue.StatusCode, time.Since(start).Seconds(), 0)
 			return false
 		}
 		writeErr(w, 502, "api_error", "upstream error")
-		h.auditCompleted(p, model, upstream, 502, nil, nil, tracing.TraceID(req.Context()))
+		h.auditCompleted(ulid.New(), p, model, upstream, 502, nil, nil, tracing.TraceID(req.Context()), "")
 		recordSpanResponse(req, prov.Name(), upstream, nil, false)
 		h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 502, time.Since(start).Seconds(), 0)
 		return false
@@ -243,7 +249,15 @@ func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, pr
 		cost = h.settle(p, providerName, upstream, resp.Parsed.Usage, table)
 		h.observeTokens(model, providerName, p.Team, resp.Parsed.Usage)
 	}
-	h.auditCompleted(p, model, upstream, resp.StatusCode, usage, cost, tracing.TraceID(req.Context()))
+	// Body capture (D4, ADR-018): copy-only, AFTER the response was already
+	// written to the client above. recID is minted here (not inside
+	// auditCompleted) so the body row and the audit record share the same ID.
+	recID := ulid.New()
+	var bodyRef string
+	if h.bodies != nil && resp.StatusCode < 400 {
+		bodyRef = h.bodies.Capture(recID, p.Team, pr.RawBody, resp.RawBody)
+	}
+	h.auditCompleted(recID, p, model, upstream, resp.StatusCode, usage, cost, tracing.TraceID(req.Context()), bodyRef)
 	recordSpanResponse(req, prov.Name(), upstream, usage, resp.StatusCode < 400)
 	h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, resp.StatusCode, time.Since(start).Seconds(), 0)
 	return false
@@ -265,13 +279,13 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 			}
 			w.WriteHeader(ue.StatusCode)
 			w.Write(ue.Body)
-			h.auditCompleted(p, model, upstream, ue.StatusCode, nil, nil, tracing.TraceID(req.Context()))
+			h.auditCompleted(ulid.New(), p, model, upstream, ue.StatusCode, nil, nil, tracing.TraceID(req.Context()), "")
 			recordSpanResponse(req, prov.Name(), upstream, nil, false)
 			h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, ue.StatusCode, time.Since(start).Seconds(), 0)
 			return false
 		}
 		writeErr(w, 502, "api_error", "upstream stream error")
-		h.auditCompleted(p, model, upstream, 502, nil, nil, tracing.TraceID(req.Context()))
+		h.auditCompleted(ulid.New(), p, model, upstream, 502, nil, nil, tracing.TraceID(req.Context()), "")
 		recordSpanResponse(req, prov.Name(), upstream, nil, false)
 		h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 502, time.Since(start).Seconds(), 0)
 		return false
@@ -279,7 +293,7 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeErr(w, 500, "api_error", "streaming unsupported")
-		h.auditCompleted(p, model, upstream, 500, nil, nil, tracing.TraceID(req.Context()))
+		h.auditCompleted(ulid.New(), p, model, upstream, 500, nil, nil, tracing.TraceID(req.Context()), "")
 		recordSpanResponse(req, prov.Name(), upstream, nil, false)
 		h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 500, time.Since(start).Seconds(), 0)
 		return false
@@ -331,7 +345,14 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 	}
 	cost := h.settle(p, providerName, upstream, lastUsage, table)
 	h.observeTokens(model, providerName, p.Team, lastUsage)
-	h.auditCompleted(p, model, upstream, 200, usage, cost, tracing.TraceID(req.Context()))
+	// Body capture (D4, ADR-018): REQUEST ONLY for streams (no buffered
+	// response bytes exist to capture — see messages.go's serveStream).
+	recID := ulid.New()
+	var bodyRef string
+	if h.bodies != nil {
+		bodyRef = h.bodies.Capture(recID, p.Team, pr.RawBody, nil)
+	}
+	h.auditCompleted(recID, p, model, upstream, 200, usage, cost, tracing.TraceID(req.Context()), bodyRef)
 	recordSpanResponse(req, prov.Name(), upstream, usage, true)
 	h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 200, time.Since(start).Seconds(), ttft)
 	return false
@@ -433,14 +454,18 @@ func (h *ChatHandler) audit(p keystore.Principal, model, upstream string, outcom
 	h.aud.Append(rec)
 }
 
-func (h *ChatHandler) auditCompleted(p keystore.Principal, model, upstream string, status int, usage *audit.UsageRef, cost *audit.CostRef, traceID string) {
+// auditCompleted emits a request_completed record. id is the record's ULID —
+// minted by the caller so a body capture (D4, ADR-018) tagged with this exact
+// ID can happen BEFORE the record is built. bodyRef is "" when body logging
+// is off or nothing was captured. No-op without an audit writer.
+func (h *ChatHandler) auditCompleted(id string, p keystore.Principal, model, upstream string, status int, usage *audit.UsageRef, cost *audit.CostRef, traceID, bodyRef string) {
 	if h.aud == nil {
 		return
 	}
 	rec := audit.Record{
 		SchemaVersion: 1,
 		Event:         "request_completed",
-		ID:            ulid.New(),
+		ID:            id,
 		TS:            time.Now().UTC().Format(time.RFC3339Nano),
 		Principal:     audit.PrincipalRef{KeyID: p.KeyID, Team: p.Team},
 		Request:       audit.RequestRef{Ingress: "openai", ModelRequested: model, ModelResolved: upstream},
@@ -450,6 +475,9 @@ func (h *ChatHandler) auditCompleted(p keystore.Principal, model, upstream strin
 	}
 	if traceID != "" {
 		rec.TraceID = &traceID
+	}
+	if bodyRef != "" {
+		rec.BodyRef = &bodyRef
 	}
 	h.aud.Append(rec)
 }

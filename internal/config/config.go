@@ -4,6 +4,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -173,10 +174,29 @@ type AnchorConfig struct {
 }
 
 type AuditConfig struct {
-	FailureMode string        `json:"failure_mode"` // buffer_then_block (default)
-	Buffer      AuditBuffer   `json:"buffer"`
-	Sinks       []AuditSink   `json:"sinks"`
-	Anchor      *AnchorConfig `json:"anchor,omitempty"`
+	FailureMode string         `json:"failure_mode"` // buffer_then_block (default)
+	Buffer      AuditBuffer    `json:"buffer"`
+	Sinks       []AuditSink    `json:"sinks"`
+	Anchor      *AnchorConfig  `json:"anchor,omitempty"`
+	LogBodies   *BodyLogConfig `json:"log_bodies,omitempty"`
+}
+
+// BodyLogConfig enables opt-in request/response body capture (D4, ADR-018).
+// Presence of this block (non-nil) enables capture — bodies live in a
+// separate mutable/deletable/encrypted store, never the audit chain. Type
+// selects the backend: "sqlite" (default, single-instance) or "postgres"
+// (HA, requires DSNRef). KeyRef is always required and resolves to 64 hex
+// chars (a 32-byte AES-256 master key) — never inline.
+type BodyLogConfig struct {
+	Type         string     `json:"type,omitempty"` // "sqlite" (default) | "postgres"
+	Path         string     `json:"path,omitempty"` // sqlite path; default derived (bodies.db beside the file audit sink)
+	DSNRef       *SecretRef `json:"dsn_ref,omitempty"`
+	DSN          string     `json:"-"` // resolved at load (postgres only)
+	KeyRef       *SecretRef `json:"key_ref"`
+	Key          string     `json:"-"`                        // resolved 64-hex-char master key
+	TTL          string     `json:"ttl,omitempty"`            // Go duration; default "168h" (7 days)
+	MaxBytes     int64      `json:"max_bytes,omitempty"`      // total store size cap; default 1 GiB
+	MaxBodyBytes int64      `json:"max_body_bytes,omitempty"` // per-record cap; default 1 MiB
 }
 
 // RateLimitConfig is a team's instance-local token-bucket gate (§5.3): RPM and
@@ -354,6 +374,9 @@ func LoadRaw(path string) (*Config, error) {
 		Analytics struct {
 			ModeB map[string]json.RawMessage `json:"mode_b"`
 		} `json:"analytics"`
+		Audit struct {
+			LogBodies map[string]json.RawMessage `json:"log_bodies"`
+		} `json:"audit"`
 		BudgetAlerts map[string]json.RawMessage `json:"budget_alerts"`
 	}
 	if err := json.Unmarshal(data, &probe); err != nil {
@@ -366,6 +389,12 @@ func LoadRaw(path string) (*Config, error) {
 	}
 	if _, bad := probe.Analytics.ModeB["dsn"]; bad {
 		return nil, fmt.Errorf("config: analytics.mode_b has inline dsn; use dsn_ref (§7)")
+	}
+	if _, bad := probe.Audit.LogBodies["key"]; bad {
+		return nil, fmt.Errorf("config: audit.log_bodies has inline key; use key_ref (§7)")
+	}
+	if _, bad := probe.Audit.LogBodies["dsn"]; bad {
+		return nil, fmt.Errorf("config: audit.log_bodies has inline dsn; use dsn_ref (§7)")
 	}
 	if _, bad := probe.BudgetAlerts["webhook_url"]; bad {
 		return nil, fmt.Errorf("config: budget_alerts has inline webhook_url; use webhook_url_ref (§7)")
@@ -394,10 +423,90 @@ func LoadRaw(path string) (*Config, error) {
 	if err := validateAnalyticsModeB(cfg.Analytics.ModeB); err != nil {
 		return nil, err
 	}
+	if err := validateBodyLog(cfg.Audit.LogBodies); err != nil {
+		return nil, err
+	}
 	if err := validateBudgetAlerts(cfg.BudgetAlerts); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// validateBodyLog checks the opt-in audit.log_bodies block (D4, ADR-018).
+// key_ref is always required and resolves to a 64-hex-char (32-byte) master
+// key — the error never echoes the resolved value. postgres additionally
+// requires dsn_ref, resolved the same way as analytics.mode_b's DSN (never
+// inline). nil block (body logging off) is valid.
+func validateBodyLog(bl *BodyLogConfig) error {
+	if bl == nil {
+		return nil
+	}
+	if bl.Type != "" && bl.Type != "sqlite" && bl.Type != "postgres" {
+		return fmt.Errorf("config: audit.log_bodies.type must be \"sqlite\" or \"postgres\", got %q", bl.Type)
+	}
+	if bl.KeyRef == nil {
+		return fmt.Errorf("config: audit.log_bodies.key_ref is required")
+	}
+	if err := ValidateSecretRef(bl.KeyRef); err != nil {
+		return fmt.Errorf("config: audit.log_bodies.key_ref: %w", err)
+	}
+	key, err := ResolveSecretRef(bl.KeyRef)
+	if err != nil {
+		return fmt.Errorf("config: audit.log_bodies.key_ref: %w", err)
+	}
+	if raw, hexErr := hex.DecodeString(key); hexErr != nil || len(raw) != 32 {
+		return fmt.Errorf("config: audit.log_bodies.key_ref must resolve to 64 hex characters (a 32-byte AES-256 key)")
+	}
+	bl.Key = key
+	if bl.Type == "postgres" {
+		if bl.DSNRef == nil {
+			return fmt.Errorf("config: audit.log_bodies.dsn_ref is required when type is \"postgres\"")
+		}
+		if err := ValidateSecretRef(bl.DSNRef); err != nil {
+			return fmt.Errorf("config: audit.log_bodies.dsn_ref: %w", err)
+		}
+		dsn, err := ResolveSecretRef(bl.DSNRef)
+		if err != nil {
+			return fmt.Errorf("config: audit.log_bodies.dsn_ref: %w", err)
+		}
+		bl.DSN = dsn
+	}
+	if bl.TTL == "" {
+		bl.TTL = "168h"
+	}
+	if err := validateDurationString("audit.log_bodies.ttl", bl.TTL, time.Minute); err != nil {
+		return err
+	}
+	if bl.MaxBytes < 0 {
+		return fmt.Errorf("config: audit.log_bodies.max_bytes must be >= 0")
+	}
+	if bl.MaxBytes == 0 {
+		bl.MaxBytes = 1 << 30 // 1 GiB
+	}
+	if bl.MaxBodyBytes < 0 {
+		return fmt.Errorf("config: audit.log_bodies.max_body_bytes must be >= 0")
+	}
+	if bl.MaxBodyBytes == 0 {
+		bl.MaxBodyBytes = 1 << 20 // 1 MiB
+	}
+	return nil
+}
+
+// ResolveBodyPath derives the default SQLite body-store path (bodies.db
+// beside the first file audit sink), mirroring ResolveAnalytics. An explicit
+// Path always wins; with no file sink and no explicit path, it falls back to
+// "bodies.db" in the working directory (still opt-in — log_bodies must be
+// configured at all to reach this).
+func ResolveBodyPath(c *Config) string {
+	if c.Audit.LogBodies != nil && c.Audit.LogBodies.Path != "" {
+		return c.Audit.LogBodies.Path
+	}
+	for _, s := range c.Audit.Sinks {
+		if s.Type == "file" && s.Path != "" {
+			return filepath.Join(filepath.Dir(s.Path), "bodies.db")
+		}
+	}
+	return "bodies.db"
 }
 
 // validateBudgetAlerts checks the opt-in budget-alert block (D5b, ADR-017).
