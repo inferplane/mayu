@@ -3,6 +3,7 @@ package pgstore
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -115,6 +116,58 @@ func TestUpsertEventCorrectsCostOnReingest(t *testing.T) {
 	}
 	if sum.Totals.CostMicros != 2000 {
 		t.Fatalf("cost = %d, want 2000 (upsert must overwrite, not insert-or-ignore)", sum.Totals.CostMicros)
+	}
+}
+
+// TestUpsertEventQueryPreservesBodyRefPattern pins the exact SQL fix without
+// needing a live Postgres — a re-ingest of a pre-D4 record (BodyRef="") must
+// not clobber a previously-captured body_ref. Runs unconditionally (no DSN).
+func TestUpsertEventQueryPreservesBodyRefPattern(t *testing.T) {
+	src, err := os.ReadFile("pgstore.go")
+	if err != nil {
+		t.Fatalf("read pgstore.go: %v", err)
+	}
+	q := string(src)
+	if !strings.Contains(q, "NULLIF(excluded.body_ref, '')") || !strings.Contains(q, "events.body_ref)") {
+		t.Fatalf("upsertEvent's ON CONFLICT DO UPDATE must preserve body_ref via " +
+			"COALESCE(NULLIF(excluded.body_ref, ''), events.body_ref) — got a query " +
+			"that unconditionally overwrites it with the incoming (possibly empty) value")
+	}
+}
+
+// TestUpsertEventPreservesBodyRefOnEmptyReingest is the Postgres-backed
+// regression test: re-ingesting the same record ID with an empty BodyRef (the
+// shape of a pre-D4 audit record) must not erase a previously-captured ref.
+func TestUpsertEventPreservesBodyRefOnEmptyReingest(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	epoch, ok, err := tryAcquireLease(ctx, s.db, "h1", 15*time.Second)
+	if err != nil || !ok {
+		t.Fatalf("acquire: ok=%v err=%v", ok, err)
+	}
+	ref := "01BODYREF"
+	r := completedRecord("01REBUILD", "2026-07-09T10:00:00Z", "alpha", "m1", 10, 5, 500)
+	r.BodyRef = &ref
+	if err := s.ingestBatch(ctx, "h1", epoch, []audit.Record{r}, map[string]int64{"seg-a": 100}); err != nil {
+		t.Fatalf("first ingest: %v", err)
+	}
+	// Re-ingest the SAME id as a pre-D4 record would parse: BodyRef unset.
+	r2 := completedRecord("01REBUILD", "2026-07-09T10:00:00Z", "alpha", "m1", 10, 5, 500)
+	if err := s.ingestBatch(ctx, "h1", epoch, []audit.Record{r2}, map[string]int64{"seg-a": 200}); err != nil {
+		t.Fatalf("second ingest (rebuild replay): %v", err)
+	}
+	rows, err := s.Recent(10, "")
+	if err != nil {
+		t.Fatalf("Recent: %v", err)
+	}
+	var got string
+	for _, e := range rows {
+		if e.ID == "01REBUILD" {
+			got = e.BodyRef
+		}
+	}
+	if got != ref {
+		t.Fatalf("body_ref after empty re-ingest = %q, want %q (a rebuild replay must not erase a captured body_ref)", got, ref)
 	}
 }
 

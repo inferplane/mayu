@@ -450,7 +450,7 @@ func upsertEvent(ctx context.Context, tx pgx.Tx, r audit.Record, key rollupKey) 
 			day=excluded.day, team=excluded.team, model=excluded.model, provider=excluded.provider,
 			status=excluded.status, input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens,
 			cache_read=excluded.cache_read, cache_creation=excluded.cache_creation, cost_micros=excluded.cost_micros,
-			ts=excluded.ts, body_ref=excluded.body_ref`,
+			ts=excluded.ts, body_ref = COALESCE(NULLIF(excluded.body_ref, ''), events.body_ref)`,
 		r.ID, key.day, key.team, key.model, r.Request.Provider, status, in, out, cacheRead, cacheCreate, r.Cost.AmountUSDMicros, r.TS, bodyRef)
 	return err
 }
