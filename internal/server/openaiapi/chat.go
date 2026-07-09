@@ -159,7 +159,9 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// both for the region filter and the guardrail override.
 	var teamRec keystore.TeamRecord
 	if h.teamPolicy != nil {
-		teamRec, _ = h.teamPolicy(p.Team)
+		if rec, ok := h.teamPolicy(p.Team); ok {
+			teamRec = rec
+		}
 	}
 	// Per-team region lock (D7, ADR-020): drop targets outside the team's
 	// allowed regions BEFORE governance/billing. An unlabeled target is always

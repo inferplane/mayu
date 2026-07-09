@@ -138,7 +138,9 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// record is indistinguishable from a record with no overrides (zero value).
 	var teamRec keystore.TeamRecord
 	if h.teamPolicy != nil {
-		teamRec, _ = h.teamPolicy(p.Team)
+		if rec, ok := h.teamPolicy(p.Team); ok {
+			teamRec = rec
+		}
 	}
 	// Per-team region lock (D7, ADR-020): drop targets outside the team's
 	// allowed regions BEFORE any billing/masking work. An unlabeled target is

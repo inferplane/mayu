@@ -90,6 +90,31 @@ func TestChatTeamPolicy_NoGuardrailOmitsAuditFields(t *testing.T) {
 	}
 }
 
+// TestChatTeamPolicy_OkFalseIgnoresRecord mirrors the anthropicapi test:
+// teamPolicy's ok=false must be honored even when the returned TeamRecord is
+// non-zero — neither guardrail nor region filter applies.
+func TestChatTeamPolicy_OkFalseIgnoresRecord(t *testing.T) {
+	rec := &recProvider{}
+	h := NewChatHandler(recRouter(rec))
+	h.SetTeamPolicy(func(team string) (keystore.TeamRecord, bool) {
+		return keystore.TeamRecord{GuardrailID: "gr-x", AllowedRegions: []string{"eu"}}, false
+	})
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[]}`))
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik", Team: "acme", AllowedModels: []string{"*"}})
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req.WithContext(ctx))
+	if rr.Code != 200 {
+		t.Fatalf("status %d: %s (ok=false must be honored — no region filter, no guardrail)", rr.Code, rr.Body)
+	}
+	if rec.last == nil {
+		t.Fatal("provider not called")
+	}
+	if rec.last.GuardrailID != "" {
+		t.Fatalf("expected no guardrail override when ok=false, got %+v", rec.last)
+	}
+}
+
 func TestChatTeamPolicy_NilSetterLeavesGuardrailEmpty(t *testing.T) {
 	rec := &recProvider{}
 	h := NewChatHandler(recRouter(rec))
