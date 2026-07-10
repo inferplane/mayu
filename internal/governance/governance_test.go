@@ -236,3 +236,46 @@ func TestGovernorSettleSetsBudgetUtilizationGauge(t *testing.T) {
 		t.Fatalf("budget_utilization_ratio not recorded (count=%d err=%v)", got, err)
 	}
 }
+
+// Task 3: UsageOf reports the caller's effective governance state read-only.
+// F2: an unlimited dimension is nil, never remaining:0. F3: both team and key
+// budget are reported.
+func TestGovernorUsageOf(t *testing.T) {
+	teams := map[string]TeamPolicy{
+		"t": {BudgetMicrosPerMonth: 1_000_000, TokensPerDay: 10_000},
+	}
+	g := NewGovernor(teams, limiter.NewMemory(), budget.NewMemory(), nil)
+	// spend some team budget + quota, and some per-key budget.
+	kp := KeyPolicy{BudgetMicrosPerMonth: 500_000}
+	// Settle debits both budget (1500 µUSD, team+key) AND the team's token
+	// quota (Input+Output=1500 tokens, since TokensPerDay>0 — governance.go's
+	// Settle debits "quota:"+team whenever the team has a daily token limit).
+	// The extra explicit DebitQuota below simulates a second request that
+	// only consumed quota (no billable cost), so team quota ends at 1500+2000.
+	g.Settle("t", "ik1", kp, "p", "m", pricing.Usage{Input: 1000, Output: 500}, testTable()) // 1500 µUSD both team+key
+	g.lim.DebitQuota("quota:t", 2000, 24*time.Hour)
+
+	u := g.UsageOf("t", "ik1", kp)
+	if u.TeamBudget == nil {
+		t.Fatal("team budget must be reported when limited")
+	}
+	if u.TeamBudget.LimitUSDMicros != 1_000_000 || u.TeamBudget.SpentUSDMicros != 1500 {
+		t.Fatalf("team budget wrong: %+v", u.TeamBudget)
+	}
+	if u.TeamBudget.RemainingUSDMicros != 1_000_000-1500 {
+		t.Fatalf("remaining wrong: %+v", u.TeamBudget)
+	}
+	if u.KeyBudget == nil || u.KeyBudget.LimitUSDMicros != 500_000 || u.KeyBudget.SpentUSDMicros != 1500 {
+		t.Fatalf("key budget wrong: %+v", u.KeyBudget)
+	}
+	if u.TeamQuota == nil || u.TeamQuota.UsedTokens != 3500 {
+		t.Fatalf("team quota wrong: %+v", u.TeamQuota)
+	}
+
+	// F2: an unlimited team → nil budget/quota, not zero.
+	g2 := NewGovernor(map[string]TeamPolicy{"t": {}}, limiter.NewMemory(), budget.NewMemory(), nil)
+	u2 := g2.UsageOf("t", "", KeyPolicy{})
+	if u2.TeamBudget != nil || u2.TeamQuota != nil || u2.KeyBudget != nil {
+		t.Fatalf("unlimited dimensions must be nil, got %+v", u2)
+	}
+}

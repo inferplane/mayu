@@ -21,6 +21,7 @@ import (
 	"github.com/inferplane/inferplane/internal/server/auditapi"
 	"github.com/inferplane/inferplane/internal/server/configapi"
 	"github.com/inferplane/inferplane/internal/server/openaiapi"
+	"github.com/inferplane/inferplane/internal/server/usageapi"
 	"github.com/inferplane/inferplane/pkg/ulid"
 )
 
@@ -56,6 +57,7 @@ func DataMux(r *router.Router, store keystore.Store, aud *audit.Writer, gov *gov
 	// OpenAI clients do not. (Documented heuristic, M5 §3.2.)
 	mux.Handle("GET /v1/models", negotiateModels(
 		anthropicapi.NewModelsHandler(r), openaiapi.NewModelsHandler(r)))
+	mux.Handle("GET /v1/usage", usageapi.NewHandler(gov))
 	return KeyAuth(store, mux)
 }
 
