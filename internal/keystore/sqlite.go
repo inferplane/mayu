@@ -173,7 +173,10 @@ func ensureSchema(db *sql.DB) error {
 
 // existingColumns returns the set of column names table currently has, via
 // PRAGMA table_info — the shared read-side of the keys/teams ALTER-if-missing
-// migration pattern.
+// migration pattern. table is string-concatenated into the query because
+// SQLite's PRAGMA syntax does not accept bound parameters for identifiers;
+// both call sites pass compile-time literals ("keys", "teams") — never
+// extend this to a caller-supplied or otherwise untrusted table name.
 func existingColumns(ctx context.Context, conn *sql.Conn, table string) (map[string]bool, error) {
 	rows, err := conn.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
 	if err != nil {

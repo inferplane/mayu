@@ -41,6 +41,29 @@ func recRouter(p providers.Provider) *router.Router {
 	return router.New(holderFor(provs, models))
 }
 
+// anthropicWireProvider fakes an anthropic-wire upstream (e.g. Bedrock/Anthropic
+// native): RawBody is anthropic-shaped JSON, distinct from what the OpenAI
+// ingress writes to the client (which is openai.ResponseFromCanonical(Parsed)).
+type anthropicWireProvider struct{}
+
+func (anthropicWireProvider) Name() string               { return "anthropic" }
+func (anthropicWireProvider) Models() []schema.ModelInfo { return nil }
+func (anthropicWireProvider) Complete(context.Context, *providers.ProxyRequest) (*providers.ProxyResponse, error) {
+	return &providers.ProxyResponse{
+		StatusCode: 200,
+		RawBody:    []byte(`{"id":"msg_1","type":"message","role":"assistant","model":"up","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn"}`),
+		Parsed: &schema.ChatResponse{
+			ID: "msg_1", Type: "message", Role: "assistant", Model: "up",
+			Content: []schema.ContentBlock{{Type: "text", Text: strPtr("hi")}},
+		},
+	}, nil
+}
+func (anthropicWireProvider) Stream(context.Context, *providers.ProxyRequest) (iter.Seq2[*providers.StreamEvent, error], error) {
+	return nil, nil
+}
+
+func strPtr(s string) *string { return &s }
+
 func testKeyBody(seed byte) [32]byte {
 	var k [32]byte
 	for i := range k {
@@ -137,6 +160,57 @@ func TestChatBodyCapture_NilRecorderOmitsBodyRef(t *testing.T) {
 
 	if strings.Contains(buf.String(), `"body_ref"`) {
 		t.Fatalf("body_ref must be absent with no recorder configured: %s", buf.String())
+	}
+}
+
+// TestChatBodyCapture_CapturesClientFacingBytesNotUpstreamWire proves the
+// captured response body is the OpenAI-shaped JSON actually written to the
+// client when routing through a non-openai-wire (anthropic/Bedrock) provider
+// — not the upstream's native wire bytes, which the client never saw.
+func TestChatBodyCapture_CapturesClientFacingBytesNotUpstreamWire(t *testing.T) {
+	prov := anthropicWireProvider{}
+	bodies := testRecorder(t)
+
+	var buf bytes.Buffer
+	w, err := audit.NewWriter("i", filepath.Join(t.TempDir(), "a.wal"), []audit.Sink{audit.NewWriterSink("b", &buf, true)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := NewChatHandlerFull(recRouter(prov), w, nil)
+	h.SetBodyRecorder(bodies)
+
+	reqBody := `{"model":"m","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik", Team: "acme", AllowedModels: []string{"*"}})
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req.WithContext(ctx))
+	w.Close()
+	bodies.Close()
+
+	if rr.Code != 200 {
+		t.Fatalf("status %d: %s", rr.Code, rr.Body)
+	}
+	clientBytes := rr.Body.Bytes()
+	ref := extractBodyRef(t, buf.Bytes())
+	got, err := bodies.Fetch(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Positive: the captured response is the OpenAI-shaped bytes the client
+	// actually received.
+	if !bytes.Equal(bytes.TrimSpace(got.Response), bytes.TrimSpace(clientBytes)) {
+		t.Fatalf("captured response = %s\nwant (client-written) %s", got.Response, clientBytes)
+	}
+	// Negative: it must NOT be the upstream's anthropic-wire bytes — a test
+	// that only checked "captured == written" would pass trivially if both
+	// sides were still wrongly using RawBody.
+	anthropicWireBody := `{"id":"msg_1","type":"message","role":"assistant","model":"up","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn"}`
+	if bytes.Equal(bytes.TrimSpace(got.Response), []byte(anthropicWireBody)) {
+		t.Fatalf("captured response is the upstream anthropic-wire body, not what the OpenAI client received: %s", got.Response)
+	}
+	if !bytes.Contains(clientBytes, []byte(`"object":"chat.completion"`)) {
+		t.Fatalf("sanity: client response is not OpenAI-shaped: %s", clientBytes)
 	}
 }
 

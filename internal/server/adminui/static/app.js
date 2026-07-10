@@ -1047,7 +1047,15 @@ let logsCursor = null; // last-seen event id, for "load more" keyset pagination
 
 async function refreshLogsView() {
   const content = $("logs-content");
-  if (!capOn("analytics_index")) { content.hidden = true; return; }
+  if (!capOn("analytics_index")) {
+    if (capOn("logs_bodies")) {
+      content.hidden = false;
+      content.textContent = "Body logging is on, but the analytics index is off, so captured bodies aren't browsable here. Enable analytics_index to browse them in the console.";
+    } else {
+      content.hidden = true;
+    }
+    return;
+  }
   content.hidden = false;
   logsCursor = null;
   $("body-drawer").hidden = true;

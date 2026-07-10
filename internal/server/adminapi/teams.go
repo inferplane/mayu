@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -24,14 +25,14 @@ import (
 // (ADR-016 precedence: a DB record wins over config only while it exists).
 type TeamsHandler struct {
 	store       keystore.TeamStore
-	configTeams func() []string // names declared in config, for the "source":"config" rows list() adds
+	configTeams func() []keystore.TeamRecord // teams declared in config, for the "source":"config" rows list() adds
 	emit        func(audit.Record)
 }
 
 // NewTeamsHandler builds the handler. configTeams may be nil (no config-only
-// names to surface). emit (nil-safe) receives admin_team_upserted /
+// teams to surface). emit (nil-safe) receives admin_team_upserted /
 // admin_team_deleted / admin_denied audit records.
-func NewTeamsHandler(store keystore.TeamStore, configTeams func() []string, emit func(audit.Record)) *TeamsHandler {
+func NewTeamsHandler(store keystore.TeamStore, configTeams func() []keystore.TeamRecord, emit func(audit.Record)) *TeamsHandler {
 	return &TeamsHandler{store: store, configTeams: configTeams, emit: emit}
 }
 
@@ -71,7 +72,8 @@ func (h *TeamsHandler) adminEvent(event string, id principal.AdminIdentity, team
 func teamView(t keystore.TeamRecord, source string) map[string]any {
 	v := map[string]any{"name": t.Name, "source": source}
 	if source != "record" {
-		return v // config-only row: name + source only, values live in the file
+		v["allowed_regions"] = t.AllowedRegions
+		return v
 	}
 	v["allowed_models"] = t.AllowedModels
 	v["rpm"] = t.RPM
@@ -101,11 +103,11 @@ func (h *TeamsHandler) list(w http.ResponseWriter, r *http.Request) {
 		out = append(out, teamView(t, "record"))
 	}
 	if h.configTeams != nil {
-		for _, name := range h.configTeams() {
-			if haveRecord[name] {
+		for _, rec := range h.configTeams() {
+			if haveRecord[rec.Name] {
 				continue // a DB record for this name replaces the config row (ADR-016 precedence)
 			}
-			out = append(out, teamView(keystore.TeamRecord{Name: name}, "config"))
+			out = append(out, teamView(rec, "config"))
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -191,6 +193,9 @@ func validateAllowedRegions(regions []string) error {
 		return fmt.Errorf("allowed_regions exceeds %d bytes joined", maxAllowedRegionsBytes)
 	}
 	for _, region := range regions {
+		if strings.TrimSpace(region) == "" {
+			return fmt.Errorf("allowed_regions entries must not be empty")
+		}
 		if strings.Contains(region, ",") {
 			return fmt.Errorf("allowed_regions entries must not contain ','")
 		}
@@ -221,14 +226,16 @@ func validateGuardrailFields(id, version string) error {
 			return fmt.Errorf("guardrail_id must not contain control characters")
 		}
 	}
+	if id != "" && strings.TrimSpace(id) == "" {
+		return fmt.Errorf("guardrail_id must not be whitespace-only")
+	}
 	if version != "" && id == "" {
 		return fmt.Errorf("guardrail_version set without guardrail_id")
 	}
 	if version != "" && version != "DRAFT" {
-		for _, r := range version {
-			if r < '0' || r > '9' {
-				return fmt.Errorf("guardrail_version must be \"DRAFT\" or a numeric version, got %q", version)
-			}
+		n, err := strconv.Atoi(version)
+		if err != nil || n < 1 || strconv.Itoa(n) != version {
+			return fmt.Errorf("guardrail_version must be \"DRAFT\" or a numeric version, got %q", version)
 		}
 	}
 	return nil

@@ -140,6 +140,32 @@ func TestLoadRejectsGuardrailVersionWithoutID(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsMalformedGuardrailVersion mirrors adminapi.validateGuardrailFields's
+// version rule at config-load time — a config file with an invalid
+// guardrail_version otherwise loads cleanly and only fails at runtime with an
+// AWS ValidationException on every Bedrock request.
+func TestLoadRejectsMalformedGuardrailVersion(t *testing.T) {
+	for _, version := range []string{"latest", "0", "01", "+1"} {
+		dir := t.TempDir()
+		f := filepath.Join(dir, "bad.json")
+		os.WriteFile(f, []byte(`{"providers":{"p":{"type":"bedrock","guardrail_id":"gr-abc","guardrail_version":"`+version+`"}}}`), 0o600)
+		if _, err := Load(f); err == nil {
+			t.Fatalf("guardrail_version %q: expected rejection", version)
+		}
+	}
+}
+
+func TestLoadAcceptsValidGuardrailVersion(t *testing.T) {
+	for _, version := range []string{"", "DRAFT", "1", "42"} {
+		dir := t.TempDir()
+		f := filepath.Join(dir, "ok.json")
+		os.WriteFile(f, []byte(`{"providers":{"p":{"type":"bedrock","guardrail_id":"gr-abc","guardrail_version":"`+version+`"}}}`), 0o600)
+		if _, err := Load(f); err != nil {
+			t.Fatalf("guardrail_version %q: unexpected rejection: %v", version, err)
+		}
+	}
+}
+
 func TestLoadTeamsAndPricing(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "c.json")

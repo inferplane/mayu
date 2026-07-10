@@ -159,7 +159,9 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// both for the region filter and the guardrail override.
 	var teamRec keystore.TeamRecord
 	if h.teamPolicy != nil {
-		teamRec, _ = h.teamPolicy(p.Team)
+		if rec, ok := h.teamPolicy(p.Team); ok {
+			teamRec = rec
+		}
 	}
 	// Per-team region lock (D7, ADR-020): drop targets outside the team's
 	// allowed regions BEFORE governance/billing. An unlabeled target is always
@@ -242,13 +244,13 @@ func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, pr
 			}
 			w.WriteHeader(ue.StatusCode)
 			w.Write(ue.Body)
-			h.auditCompleted(ulid.New(), p, model, upstream, ue.StatusCode, nil, nil, tracing.TraceID(req.Context()), "")
+			h.auditCompleted(ulid.New(), p, model, upstream, ue.StatusCode, nil, nil, tracing.TraceID(req.Context()), "", pr.GuardrailID, pr.GuardrailVersion)
 			recordSpanResponse(req, prov.Name(), upstream, nil, false)
 			h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, ue.StatusCode, time.Since(start).Seconds(), 0)
 			return false
 		}
 		writeErr(w, 502, "api_error", "upstream error")
-		h.auditCompleted(ulid.New(), p, model, upstream, 502, nil, nil, tracing.TraceID(req.Context()), "")
+		h.auditCompleted(ulid.New(), p, model, upstream, 502, nil, nil, tracing.TraceID(req.Context()), "", pr.GuardrailID, pr.GuardrailVersion)
 		recordSpanResponse(req, prov.Name(), upstream, nil, false)
 		h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 502, time.Since(start).Seconds(), 0)
 		return false
@@ -260,20 +262,21 @@ func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, pr
 		h.r.RecordResult(providerName, identity, true)
 	}
 	w.Header().Set("Content-Type", "application/json")
+	var clientBody []byte
 	if providerWire(prov.Name()) == "openai" {
 		// openai-wire provider: tee its OpenAI bytes verbatim (lossless, §3.3).
-		w.WriteHeader(resp.StatusCode)
-		w.Write(resp.RawBody)
+		clientBody = resp.RawBody
 	} else {
 		// anthropic-wire provider: CONVERT the canonical response → OpenAI shape.
-		w.WriteHeader(resp.StatusCode)
 		if resp.Parsed != nil {
-			w.Write(openai.ResponseFromCanonical(resp.Parsed))
+			clientBody = openai.ResponseFromCanonical(resp.Parsed)
 		} else {
 			// No parsed canonical (e.g. non-2xx): tee whatever bytes we have.
-			w.Write(resp.RawBody)
+			clientBody = resp.RawBody
 		}
 	}
+	w.WriteHeader(resp.StatusCode)
+	w.Write(clientBody)
 	var usage *audit.UsageRef
 	var cost *audit.CostRef
 	if resp.Parsed != nil {
@@ -287,9 +290,9 @@ func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, pr
 	recID := ulid.New()
 	var bodyRef string
 	if h.bodies != nil && resp.StatusCode < 400 {
-		bodyRef = h.bodies.Capture(recID, p.Team, pr.RawBody, resp.RawBody)
+		bodyRef = h.bodies.Capture(recID, p.Team, pr.RawBody, clientBody)
 	}
-	h.auditCompleted(recID, p, model, upstream, resp.StatusCode, usage, cost, tracing.TraceID(req.Context()), bodyRef)
+	h.auditCompleted(recID, p, model, upstream, resp.StatusCode, usage, cost, tracing.TraceID(req.Context()), bodyRef, pr.GuardrailID, pr.GuardrailVersion)
 	recordSpanResponse(req, prov.Name(), upstream, usage, resp.StatusCode < 400)
 	h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, resp.StatusCode, time.Since(start).Seconds(), 0)
 	return false
@@ -311,13 +314,13 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 			}
 			w.WriteHeader(ue.StatusCode)
 			w.Write(ue.Body)
-			h.auditCompleted(ulid.New(), p, model, upstream, ue.StatusCode, nil, nil, tracing.TraceID(req.Context()), "")
+			h.auditCompleted(ulid.New(), p, model, upstream, ue.StatusCode, nil, nil, tracing.TraceID(req.Context()), "", pr.GuardrailID, pr.GuardrailVersion)
 			recordSpanResponse(req, prov.Name(), upstream, nil, false)
 			h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, ue.StatusCode, time.Since(start).Seconds(), 0)
 			return false
 		}
 		writeErr(w, 502, "api_error", "upstream stream error")
-		h.auditCompleted(ulid.New(), p, model, upstream, 502, nil, nil, tracing.TraceID(req.Context()), "")
+		h.auditCompleted(ulid.New(), p, model, upstream, 502, nil, nil, tracing.TraceID(req.Context()), "", pr.GuardrailID, pr.GuardrailVersion)
 		recordSpanResponse(req, prov.Name(), upstream, nil, false)
 		h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 502, time.Since(start).Seconds(), 0)
 		return false
@@ -325,7 +328,7 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeErr(w, 500, "api_error", "streaming unsupported")
-		h.auditCompleted(ulid.New(), p, model, upstream, 500, nil, nil, tracing.TraceID(req.Context()), "")
+		h.auditCompleted(ulid.New(), p, model, upstream, 500, nil, nil, tracing.TraceID(req.Context()), "", pr.GuardrailID, pr.GuardrailVersion)
 		recordSpanResponse(req, prov.Name(), upstream, nil, false)
 		h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 500, time.Since(start).Seconds(), 0)
 		return false
@@ -384,7 +387,7 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 	if h.bodies != nil {
 		bodyRef = h.bodies.Capture(recID, p.Team, pr.RawBody, nil)
 	}
-	h.auditCompleted(recID, p, model, upstream, 200, usage, cost, tracing.TraceID(req.Context()), bodyRef)
+	h.auditCompleted(recID, p, model, upstream, 200, usage, cost, tracing.TraceID(req.Context()), bodyRef, pr.GuardrailID, pr.GuardrailVersion)
 	recordSpanResponse(req, prov.Name(), upstream, usage, true)
 	h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, 200, time.Since(start).Seconds(), ttft)
 	return false
@@ -490,7 +493,7 @@ func (h *ChatHandler) audit(p keystore.Principal, model, upstream string, outcom
 // minted by the caller so a body capture (D4, ADR-018) tagged with this exact
 // ID can happen BEFORE the record is built. bodyRef is "" when body logging
 // is off or nothing was captured. No-op without an audit writer.
-func (h *ChatHandler) auditCompleted(id string, p keystore.Principal, model, upstream string, status int, usage *audit.UsageRef, cost *audit.CostRef, traceID, bodyRef string) {
+func (h *ChatHandler) auditCompleted(id string, p keystore.Principal, model, upstream string, status int, usage *audit.UsageRef, cost *audit.CostRef, traceID, bodyRef, guardrailID, guardrailVersion string) {
 	if h.aud == nil {
 		return
 	}
@@ -510,6 +513,12 @@ func (h *ChatHandler) auditCompleted(id string, p keystore.Principal, model, ups
 	}
 	if bodyRef != "" {
 		rec.BodyRef = &bodyRef
+	}
+	if guardrailID != "" {
+		rec.GuardrailID = &guardrailID
+	}
+	if guardrailVersion != "" {
+		rec.GuardrailVersion = &guardrailVersion
 	}
 	h.aud.Append(rec)
 }

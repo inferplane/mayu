@@ -51,6 +51,19 @@ func TestBodiesHandler_noIdentityDenied(t *testing.T) {
 	}
 }
 
+// TestBodiesHandler_NonAdminIdentityDenied is defense-in-depth: this handler
+// is mounted behind requireAdmin in server.go, but ServeHTTP's own guard must
+// independently reject a non-admin identity (IsAdmin=false), not just an
+// absent one — in case a future refactor ever mounts it without that wrapper.
+func TestBodiesHandler_NonAdminIdentityDenied(t *testing.T) {
+	h := NewBodiesHandler(newTestBodyRecorder(t), nil)
+	id := &principal.AdminIdentity{IsAdmin: false, Subject: "not-an-admin", AuthMethod: "oidc"}
+	rec := doAsBodies(h, id, "GET", "/admin/bodies/ref-1")
+	if rec.Code != 403 {
+		t.Fatalf("non-admin identity: got %d, want 403 (fail-closed)", rec.Code)
+	}
+}
+
 func TestBodiesHandler_GetRoundTripEmitsBodyAccessed(t *testing.T) {
 	bodies := newTestBodyRecorder(t)
 	ref := bodies.Capture("rec-1", "acme", []byte("the request"), []byte("the response"))

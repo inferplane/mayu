@@ -445,15 +445,15 @@ func newGateway(cfgPath string) (*gateway, error) {
 	} else if analyticsIdx != nil {
 		analyticsQ = analyticsIdx
 	}
-	// configTeams surfaces config-declared team NAMES only (no values — those
-	// live in the file) so /admin/teams can show them as "source":"config"
-	// until/unless a DB record for the same name takes precedence (ADR-016).
-	configTeams := func() []string {
-		names := make([]string, 0, len(cfg.Teams))
-		for name := range cfg.Teams {
-			names = append(names, name)
+	// configTeams surfaces config-declared teams, carrying allowed_regions for
+	// pre-fill, so /admin/teams can show them as "source":"config" until/unless
+	// a DB record for the same name takes precedence (ADR-016).
+	configTeams := func() []keystore.TeamRecord {
+		recs := make([]keystore.TeamRecord, 0, len(cfg.Teams))
+		for name, tc := range cfg.Teams {
+			recs = append(recs, keystore.TeamRecord{Name: name, AllowedRegions: tc.AllowedRegions})
 		}
-		return names
+		return recs
 	}
 	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, m, writer, liveExport(holder), capabilities, analyticsQ, store, configTeams, alertFires, bodyRec, cfg.Probe.AllowedHosts...)}
 	return g, nil

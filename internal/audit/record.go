@@ -93,6 +93,19 @@ type Record struct {
 	// RecordRef is the request_completed record's ULID that a body_accessed
 	// or body_deleted event refers to (access accountability, §6.3).
 	RecordRef *string `json:"record_ref,omitempty"`
+	// GuardrailID and GuardrailVersion record the per-TEAM Bedrock guardrail
+	// override applied to this request (threaded from ProxyRequest, which the
+	// team-policy lookup stamps — see messages.go/chat.go). Nil when no team
+	// override applied to this request, INCLUDING when a provider-level
+	// default guardrail from ADR-019 was applied instead: that resolution
+	// happens entirely inside providers/bedrock (guardrailFor) and is never
+	// written back to ProxyRequest, so it is not visible at this layer today
+	// — a known limitation, not a bug (fixing it would mean threading the
+	// provider's effective guardrail back through ProxyResponse, out of scope
+	// for this field). They are appended at the END like BodyRef/RecordRef so
+	// old records stay byte-identical.
+	GuardrailID      *string `json:"guardrail_id,omitempty"`
+	GuardrailVersion *string `json:"guardrail_version,omitempty"`
 }
 
 // Canonical returns the deterministic JSON used both for the on-disk record and
