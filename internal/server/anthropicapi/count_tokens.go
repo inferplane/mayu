@@ -47,6 +47,7 @@ func (h *CountTokensHandler) ServeHTTP(w http.ResponseWriter, req *http.Request)
 func (h *CountTokensHandler) count(req *http.Request, raw []byte) int64 {
 	var parsed schema.ChatRequest
 	_ = json.Unmarshal(raw, &parsed) // best-effort; estimator works on raw bytes too
+	model := h.r.Canonical(parsed.Model)
 	// PII masking (ADR-009): mask BEFORE forwarding to the upstream counter so the
 	// count reflects what is sent AND the upstream never sees unmasked PII. On a
 	// masker error, return a LOCAL estimate — never forward unmasked, never 500.
@@ -59,7 +60,7 @@ func (h *CountTokensHandler) count(req *http.Request, raw []byte) int64 {
 			raw = masked
 		}
 	}
-	chain, _, err := h.r.ResolveChain(parsed.Model)
+	chain, _, err := h.r.ResolveChain(model)
 	if err != nil || len(chain) == 0 {
 		return estimateTokens(raw)
 	}
@@ -77,7 +78,7 @@ func (h *CountTokensHandler) count(req *http.Request, raw []byte) int64 {
 	}
 	ct := chain[0]
 	if tc, ok := ct.Provider.(providers.TokenCounter); ok {
-		pr := &providers.ProxyRequest{Model: parsed.Model, Upstream: ct.Upstream, RawBody: raw, Headers: req.Header}
+		pr := &providers.ProxyRequest{Model: model, Upstream: ct.Upstream, RawBody: raw, Headers: req.Header}
 		if got, cerr := tc.CountTokens(req.Context(), pr); cerr == nil {
 			return got
 		}

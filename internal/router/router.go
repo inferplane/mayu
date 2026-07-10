@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/inferplane/inferplane/internal/keystore"
 	"github.com/inferplane/inferplane/internal/live"
 	"github.com/inferplane/inferplane/internal/metrics"
 	"github.com/inferplane/inferplane/providers"
@@ -30,6 +31,34 @@ func New(holder *live.Holder) *Router {
 // SetMetrics attaches the Prometheus metrics sink. The circuit-state gauge is
 // updated on every RecordResult. Pass nil (or never call) to disable.
 func (r *Router) SetMetrics(m *metrics.Metrics) { r.metrics = m }
+
+// Canonical resolves a configured model alias using one live snapshot.
+func (r *Router) Canonical(model string) string {
+	st := r.live.Load()
+	return st.Canonical(model)
+}
+
+// Allows reports whether p's allow-list permits the (already-canonicalized)
+// model. Ingress handlers canonicalize a REQUESTED alias before this check
+// (ADR-021 F6) so an alias-only allow-list can never bypass RBAC on the
+// request side. This closes the mirror-image gap: an allow-LIST entry that
+// itself names an alias (an operator config mistake, or a valid alias they
+// reasonably expect to grant access through) is also resolved to canonical
+// before comparing, so a key configured with an alias in allowed_models
+// isn't silently locked out of every request. Still exact-match once
+// canonicalized — no broadening of what a key can reach.
+func (r *Router) Allows(p keystore.Principal, model string) bool {
+	if p.Allows(model) {
+		return true
+	}
+	st := r.live.Load()
+	for _, m := range p.AllowedModels {
+		if st.Canonical(m) == model {
+			return true
+		}
+	}
+	return false
+}
 
 // ChainTarget is one resolved fallback target: the provider instance, its
 // CONFIG provider name (pricing/metric key), the breaker Identity (type+base_url,

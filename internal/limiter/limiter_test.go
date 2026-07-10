@@ -74,3 +74,30 @@ func TestQuotaUsedReportsCurrentWindow(t *testing.T) {
 		t.Fatalf("QuotaUsed = %d, want 500", u)
 	}
 }
+
+func TestRateUsedPeeksWithoutMutating(t *testing.T) {
+	l := NewMemory()
+	now := time.Unix(1_700_000_000, 0)
+	l.now = func() time.Time { return now }
+	key := "key:rate"
+	// never touched → 0 used (full capacity), and unlimited (ratePerMin<=0) → 0.
+	if u := l.RateUsed(key, 60, 100); u != 0 {
+		t.Fatalf("fresh RateUsed = %d, want 0", u)
+	}
+	if u := l.RateUsed(key, 0, 100); u != 0 {
+		t.Fatalf("unlimited RateUsed = %d, want 0", u)
+	}
+	l.AllowRate(key, 40, 60, 100) // debit 40 of burst 100
+	if u := l.RateUsed(key, 60, 100); u != 40 {
+		t.Fatalf("RateUsed after debit = %d, want 40", u)
+	}
+	// a peek must not itself consume any tokens: repeated reads are stable.
+	if u := l.RateUsed(key, 60, 100); u != 40 {
+		t.Fatalf("RateUsed peek must be idempotent, got %d", u)
+	}
+	// advance 30s at 60/min=1/s → 30 tokens refill → used drops to 10.
+	now = now.Add(30 * time.Second)
+	if u := l.RateUsed(key, 60, 100); u != 10 {
+		t.Fatalf("RateUsed after refill = %d, want 10", u)
+	}
+}

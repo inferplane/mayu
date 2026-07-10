@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/inferplane/inferplane/internal/config"
+	"github.com/inferplane/inferplane/internal/keystore"
 	"github.com/inferplane/inferplane/internal/live"
 	"github.com/inferplane/inferplane/internal/metrics"
 	"github.com/inferplane/inferplane/providers"
@@ -103,6 +104,41 @@ func circuitState(t *testing.T, m *metrics.Metrics) float64 {
 	}
 	t.Fatal("inferplane_circuit_state not found in exposition")
 	return -1
+}
+
+// F6 code-gate follow-up: an allow-list ENTRY that names an alias (not just a
+// REQUEST for an alias) must still grant access, canonicalized — an operator
+// who configures allowed_models with an alias shouldn't get a permanently
+// locked-out key. Still exact-match once canonicalized: no broadening.
+func TestAllowsResolvesAliasInAllowList(t *testing.T) {
+	provs := map[string]providers.Provider{"a": mockprovider.New("claude-sonnet-4-6")}
+	models := map[string]config.ModelConfig{
+		"claude-sonnet-4-6": {
+			Aliases: []string{"apac.anthropic.claude-sonnet-4-6"},
+			Targets: []config.Target{{Provider: "a", Model: "claude-sonnet-4-6"}},
+		},
+	}
+	r, _ := newTestRouter(provs, models)
+
+	withAlias := keystore.Principal{AllowedModels: []string{"apac.anthropic.claude-sonnet-4-6"}}
+	if !r.Allows(withAlias, "claude-sonnet-4-6") {
+		t.Fatal("an allow-list entry naming an alias must grant access to its canonical model")
+	}
+
+	withCanonical := keystore.Principal{AllowedModels: []string{"claude-sonnet-4-6"}}
+	if !r.Allows(withCanonical, "claude-sonnet-4-6") {
+		t.Fatal("canonical allow-list entry must still work (no regression)")
+	}
+
+	withOther := keystore.Principal{AllowedModels: []string{"some-other-model"}}
+	if r.Allows(withOther, "claude-sonnet-4-6") {
+		t.Fatal("an unrelated allow-list entry must not grant access")
+	}
+
+	wildcard := keystore.Principal{AllowedModels: []string{"*"}}
+	if !r.Allows(wildcard, "claude-sonnet-4-6") {
+		t.Fatal("wildcard must still allow")
+	}
 }
 
 func TestResolveUnknownProvider(t *testing.T) {

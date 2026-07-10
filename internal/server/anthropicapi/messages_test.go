@@ -89,6 +89,91 @@ func TestMessagesUnknownModel(t *testing.T) {
 	}
 }
 
+// Task 1: an unknown-model 404 must list the models the key may use, so a
+// caller who fat-fingered a model name (tickets row 25/41/52) can self-correct.
+func TestMessages404ListsAvailableModels(t *testing.T) {
+	provs := map[string]providers.Provider{"p": mockprovider.New("claude-sonnet-4-6")}
+	models := map[string]config.ModelConfig{
+		"claude-sonnet-4-6": {Targets: []config.Target{{Provider: "p", Model: "claude-sonnet-4-6"}}},
+		"claude-opus-4-7":   {Targets: []config.Target{{Provider: "p", Model: "claude-opus-4-7"}}},
+	}
+	h := NewMessagesHandler(router.New(holderFor(provs, models)))
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-9","messages":[]}`))
+	rec := httptest.NewRecorder()
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik_secret", Team: "t", AllowedModels: []string{"*"}})
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != 404 {
+		t.Fatalf("want 404, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"not_found_error"`) {
+		t.Fatalf("error type must stay not_found_error: %s", body)
+	}
+	if !strings.Contains(body, "claude-sonnet-4-6") || !strings.Contains(body, "claude-opus-4-7") {
+		t.Fatalf("404 must list available models: %s", body)
+	}
+	if strings.Contains(body, "ik_secret") {
+		t.Fatalf("404 body must not leak key id: %s", body)
+	}
+}
+
+// The available list is filtered by the key's allow-list — a model the key
+// can't use is not advertised.
+func TestMessages404FiltersByAllowList(t *testing.T) {
+	provs := map[string]providers.Provider{"p": mockprovider.New("claude-sonnet-4-6")}
+	models := map[string]config.ModelConfig{
+		"claude-sonnet-4-6": {Targets: []config.Target{{Provider: "p", Model: "claude-sonnet-4-6"}}},
+		"secret-model":      {Targets: []config.Target{{Provider: "p", Model: "secret-model"}}},
+	}
+	h := NewMessagesHandler(router.New(holderFor(provs, models)))
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-9","messages":[]}`))
+	rec := httptest.NewRecorder()
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik", Team: "t", AllowedModels: []string{"claude-sonnet-4-6"}})
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	body := rec.Body.String()
+	if strings.Contains(body, "secret-model") {
+		t.Fatalf("404 must not list models outside the allow-list: %s", body)
+	}
+	if !strings.Contains(body, "claude-sonnet-4-6") {
+		t.Fatalf("404 must list allowed models: %s", body)
+	}
+}
+
+// A key allowed no configured model gets an explicit message, not a dangling list.
+func TestMessages404EmptyAvailable(t *testing.T) {
+	h := NewMessagesHandler(testRouter())
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-9","messages":[]}`))
+	rec := httptest.NewRecorder()
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik", Team: "t", AllowedModels: []string{"nothing-matches"}})
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if !strings.Contains(rec.Body.String(), "No models available for this key") {
+		t.Fatalf("empty allow-list must yield explicit message: %s", rec.Body.String())
+	}
+}
+
+// F5: the 403 "model not allowed" branch also lists what the key CAN use.
+func TestMessages403ListsAvailableModels(t *testing.T) {
+	provs := map[string]providers.Provider{"p": mockprovider.New("claude-sonnet-4-6")}
+	models := map[string]config.ModelConfig{
+		"claude-sonnet-4-6": {Targets: []config.Target{{Provider: "p", Model: "claude-sonnet-4-6"}}},
+	}
+	h := NewMessagesHandler(router.New(holderFor(provs, models)))
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-opus-4-7","messages":[]}`))
+	rec := httptest.NewRecorder()
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik", Team: "t", AllowedModels: []string{"claude-sonnet-4-6"}})
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != 403 {
+		t.Fatalf("want 403, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "claude-sonnet-4-6") {
+		t.Fatalf("403 must list available models: %s", rec.Body.String())
+	}
+}
+
 type errStreamProvider struct{}
 
 func (errStreamProvider) Name() string               { return "errstream" }
@@ -466,4 +551,55 @@ func holderFor(provs map[string]providers.Provider, models map[string]config.Mod
 	h := &live.Holder{}
 	h.Swap(live.NewState(provs, models, govPricing(), ids))
 	return h
+}
+
+// Task 2: a request naming an ALIAS routes to the canonical target. Alias
+// normalization happens before RBAC, so an allow-list holding the canonical
+// name grants access to alias requests too (F6) — and, per the code-gate HIGH
+// finding on PR #25, an allow-list holding ONLY the alias is ALSO resolved to
+// its canonical target rather than permanently denied: canonicalizing an
+// allow-list entry is still an exact match on both sides, so there is no
+// bypass risk, only a dead config entry if left unresolved (an operator who
+// writes an alias into allowed_models clearly means to grant that model).
+func TestMessagesAliasRoutesToCanonical(t *testing.T) {
+	provs := map[string]providers.Provider{"p": mockprovider.New("claude-sonnet-4-6")}
+	models := map[string]config.ModelConfig{
+		"claude-sonnet-4-6": {
+			Aliases: []string{"apac.anthropic.claude-sonnet-4-6"},
+			Targets: []config.Target{{Provider: "p", Model: "claude-sonnet-4-6"}},
+		},
+	}
+	h := NewMessagesHandler(router.New(holderFor(provs, models)))
+
+	// allow-list holds the canonical name → alias request succeeds.
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"apac.anthropic.claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik", Team: "t", AllowedModels: []string{"claude-sonnet-4-6"}})
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != 200 {
+		t.Fatalf("alias must route to canonical target: got %d body %s", rec.Code, rec.Body.String())
+	}
+
+	// allow-list holds ONLY the alias (not canonical) → still allowed: the
+	// allow-list entry is canonicalized too, so this isn't a permanent lockout.
+	req2 := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"apac.anthropic.claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	rec2 := httptest.NewRecorder()
+	ctx2 := principal.With(req2.Context(), keystore.Principal{KeyID: "ik", Team: "t", AllowedModels: []string{"apac.anthropic.claude-sonnet-4-6"}})
+	h.ServeHTTP(rec2, req2.WithContext(ctx2))
+	if rec2.Code != 200 {
+		t.Fatalf("alias-only allow-list must still resolve to its canonical target: got %d body %s", rec2.Code, rec2.Body.String())
+	}
+
+	// an allow-list entry naming an UNRELATED model must still deny — the
+	// canonicalized-comparison fix is not a broadening of access in general.
+	req3 := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"apac.anthropic.claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	rec3 := httptest.NewRecorder()
+	ctx3 := principal.With(req3.Context(), keystore.Principal{KeyID: "ik", Team: "t", AllowedModels: []string{"some-other-model"}})
+	h.ServeHTTP(rec3, req3.WithContext(ctx3))
+	if rec3.Code != 403 {
+		t.Fatalf("unrelated allow-list entry must still deny: got %d", rec3.Code)
+	}
 }

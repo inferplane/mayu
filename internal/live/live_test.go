@@ -166,3 +166,32 @@ func TestLiveImportsAreLeafSafe(t *testing.T) {
 		}
 	}
 }
+
+// Task 2: BuildState builds an alias→canonical map; State.Canonical resolves an
+// alias to its canonical model name and is the identity for anything else.
+func TestBuildStateAliases(t *testing.T) {
+	cfg := sampleConfig()
+	mc := cfg.Models["claude"]
+	mc.Aliases = []string{"apac.anthropic.claude-sonnet-4-6"}
+	cfg.Models["claude"] = mc
+	st, _, err := BuildState(cfg)
+	if err != nil {
+		t.Fatalf("BuildState with alias: %v", err)
+	}
+	if got := st.Canonical("apac.anthropic.claude-sonnet-4-6"); got != "claude" {
+		t.Fatalf("alias must resolve to canonical: got %q want %q", got, "claude")
+	}
+	if got := st.Canonical("claude"); got != "claude" {
+		t.Fatalf("canonical name must be identity: got %q", got)
+	}
+	if got := st.Canonical("unknown-xyz"); got != "unknown-xyz" {
+		t.Fatalf("unknown name must be identity: got %q", got)
+	}
+	// Route still only accepts canonical names.
+	if _, ok := st.Route("apac.anthropic.claude-sonnet-4-6"); ok {
+		t.Fatal("Route must not resolve an alias directly")
+	}
+	if _, ok := st.Route("claude"); !ok {
+		t.Fatal("Route must resolve the canonical name")
+	}
+}

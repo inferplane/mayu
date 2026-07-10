@@ -29,6 +29,12 @@ type LimiterStore interface {
 	// QuotaUsed reports tokens used in the current window (0 if none) — for the
 	// quota-utilization observability gauge.
 	QuotaUsed(key string, window time.Duration) int64
+	// RateUsed reports how much of the bucket's burst capacity is currently
+	// consumed (0 if the bucket has never been touched) — a read-only
+	// projection of the same refill AllowRate computes, for usage reporting;
+	// never writes back to the bucket (unlike AllowRate, which always
+	// refills/debits on every call).
+	RateUsed(key string, ratePerMin, burst int64) int64
 }
 
 type bucket struct {
@@ -103,6 +109,34 @@ func (m *Memory) QuotaUsed(key string, window time.Duration) int64 {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.curWindow(key, window).used
+}
+
+// RateUsed peeks at the bucket's projected token level (same refill math as
+// AllowRate) without writing it back, so a status read never perturbs
+// enforcement. A never-touched bucket reports 0 used (full capacity).
+func (m *Memory) RateUsed(key string, ratePerMin, burst int64) int64 {
+	if ratePerMin <= 0 {
+		return 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b := m.buckets[key]
+	if b == nil {
+		return 0
+	}
+	elapsed := m.now().Sub(b.last).Seconds()
+	tokens := b.tokens + elapsed*(float64(ratePerMin)/60.0)
+	if tokens > float64(burst) {
+		tokens = float64(burst)
+	}
+	used := float64(burst) - tokens
+	if used < 0 {
+		used = 0
+	}
+	// Round rather than truncate: the sub-token refill that accrues during
+	// the microseconds between a debit and this read would otherwise always
+	// bias the reported figure down by one (e.g. 199.9998 -> 199, not 200).
+	return int64(used + 0.5)
 }
 
 // curWindow returns the live window for key, resetting if elapsed. Caller holds mu.

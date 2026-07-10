@@ -38,6 +38,7 @@ func (h *Holder) Swap(s *State) { h.p.Store(s) }
 type State struct {
 	providers  map[string]providers.Provider
 	models     map[string]config.ModelConfig
+	aliases    map[string]string
 	pricing    *pricing.Table
 	identities map[string]string // config provider name → identity (type+base_url)
 	// providerConfigs is the source ProviderConfig per name, kept so the
@@ -62,7 +63,10 @@ func (s *State) Providers() map[string]providers.Provider {
 func (s *State) Models() map[string]config.ModelConfig {
 	out := make(map[string]config.ModelConfig, len(s.models))
 	for k, v := range s.models {
-		mc := config.ModelConfig{Targets: append([]config.Target(nil), v.Targets...)}
+		mc := config.ModelConfig{
+			Aliases: append([]string(nil), v.Aliases...),
+			Targets: append([]config.Target(nil), v.Targets...),
+		}
 		out[k] = mc
 	}
 	return out
@@ -80,7 +84,19 @@ func (s *State) Route(model string) (config.ModelConfig, bool) {
 	if !ok {
 		return config.ModelConfig{}, false
 	}
-	return config.ModelConfig{Targets: append([]config.Target(nil), mc.Targets...)}, true
+	return config.ModelConfig{
+		Aliases: append([]string(nil), mc.Aliases...),
+		Targets: append([]config.Target(nil), mc.Targets...),
+	}, true
+}
+
+// Canonical resolves a configured model alias to its canonical model name.
+// Unknown names, including canonical names themselves, are returned unchanged.
+func (s *State) Canonical(name string) string {
+	if canonical, ok := s.aliases[name]; ok {
+		return canonical
+	}
+	return name
 }
 
 // Provider returns the built provider for a config name (read-only).
@@ -140,14 +156,21 @@ func NewState(provs map[string]providers.Provider, models map[string]config.Mode
 		p[k] = v
 	}
 	m := make(map[string]config.ModelConfig, len(models))
+	a := make(map[string]string)
 	for k, v := range models {
-		m[k] = config.ModelConfig{Targets: append([]config.Target(nil), v.Targets...)}
+		m[k] = config.ModelConfig{
+			Aliases: append([]string(nil), v.Aliases...),
+			Targets: append([]config.Target(nil), v.Targets...),
+		}
+		for _, alias := range v.Aliases {
+			a[alias] = k
+		}
 	}
 	ids := make(map[string]string, len(identities))
 	for k, v := range identities {
 		ids[k] = v
 	}
-	return &State{providers: p, models: m, pricing: price, identities: ids}
+	return &State{providers: p, models: m, aliases: a, pricing: price, identities: ids}
 }
 
 // identityOf is the breaker/topology identity of a provider: a re-added or

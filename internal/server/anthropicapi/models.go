@@ -24,7 +24,7 @@ func (h *ModelsHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if p, ok := principal.From(req.Context()); ok {
 		filtered := names[:0:0]
 		for _, n := range names {
-			if p.Allows(n) {
+			if h.r.Allows(p, n) {
 				filtered = append(filtered, n)
 			}
 		}

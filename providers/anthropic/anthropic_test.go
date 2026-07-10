@@ -165,3 +165,91 @@ func TestStreamNon2xxReturnsTeeableError(t *testing.T) {
 		t.Fatalf("headers not preserved: retry-after=%q", ue.Header.Get("Retry-After"))
 	}
 }
+
+// F1 (Task 2): when an alias was used, req.Upstream differs from the body's
+// model. The provider must rewrite ONLY the top-level "model" field to Upstream
+// so the alias never reaches Anthropic — while preserving cache_control bytes.
+func TestCompleteRewritesTopLevelModelForAlias(t *testing.T) {
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"m","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+
+	p, _ := factory(providers.Config{Type: "anthropic", BaseURL: upstream.URL, APIKey: "sk-up"})
+	// client sent the ALIAS in the body; resolved Upstream is the real model.
+	raw := []byte(`{"model":"apac.anthropic.claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`)
+	_, err := p.Complete(context.Background(), &providers.ProxyRequest{
+		Model: "claude-sonnet-4-6", Upstream: "claude-sonnet-4-6", RawBody: raw,
+		Headers: http.Header{"Anthropic-Version": {"2023-06-01"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(gotBody), "apac.anthropic.claude-sonnet-4-6") {
+		t.Fatalf("alias must not reach upstream: %s", gotBody)
+	}
+	if !strings.Contains(string(gotBody), `"claude-sonnet-4-6"`) {
+		t.Fatalf("top-level model must be rewritten to Upstream: %s", gotBody)
+	}
+	if !strings.Contains(string(gotBody), `"cache_control":{"type":"ephemeral"}`) {
+		t.Fatalf("cache_control must survive the rewrite: %s", gotBody)
+	}
+}
+
+// The common (non-alias) path stays byte-identical verbatim: no rewrite when
+// the body model already equals Upstream.
+func TestCompleteVerbatimWhenModelMatchesUpstream(t *testing.T) {
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"m","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+	p, _ := factory(providers.Config{Type: "anthropic", BaseURL: upstream.URL, APIKey: "sk-up"})
+	raw := []byte(`{"model":"claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	_, err := p.Complete(context.Background(), &providers.ProxyRequest{
+		Model: "claude-sonnet-4-6", Upstream: "claude-sonnet-4-6", RawBody: raw,
+		Headers: http.Header{"Anthropic-Version": {"2023-06-01"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotBody) != string(raw) {
+		t.Fatalf("non-alias body must be byte-identical:\n got: %s\nwant: %s", gotBody, raw)
+	}
+}
+
+// F1 hardening (code-gate): the alias-path rewrite must NOT HTML-escape nested
+// prompt content (&, <, >) — a common case for code. Only the top-level model
+// changes; the message text bytes survive.
+func TestCompleteAliasRewritePreservesSpecialChars(t *testing.T) {
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"m","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+	p, _ := factory(providers.Config{Type: "anthropic", BaseURL: upstream.URL, APIKey: "sk-up"})
+	// prompt contains &, <, > — must not become & etc.
+	raw := []byte(`{"model":"apac.anthropic.claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"if a < b && b > c"}]}`)
+	_, err := p.Complete(context.Background(), &providers.ProxyRequest{
+		Model: "claude-sonnet-4-6", Upstream: "claude-sonnet-4-6", RawBody: raw,
+		Headers: http.Header{"Anthropic-Version": {"2023-06-01"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(gotBody), "if a < b && b > c") {
+		t.Fatalf("special chars must survive as literal bytes: %s", gotBody)
+	}
+	// The HTML-escaping bug would emit the \u003c / \u003e / \u0026 escape
+	// sequences; those must be absent (the literal <, >, & are fine).
+	if strings.Contains(string(gotBody), `\u003c`) || strings.Contains(string(gotBody), `\u003e`) || strings.Contains(string(gotBody), `\u0026`) {
+		t.Fatalf("nested content must not be HTML-escaped: %s", gotBody)
+	}
+}

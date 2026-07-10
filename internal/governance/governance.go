@@ -47,6 +47,27 @@ type KeyPolicy struct {
 	BudgetMicrosPerMonth int64
 }
 
+type BudgetUsage struct {
+	LimitUSDMicros     int64  `json:"limit_usd_micros"`
+	SpentUSDMicros     int64  `json:"spent_usd_micros"`
+	RemainingUSDMicros int64  `json:"remaining_usd_micros"`
+	Window             string `json:"window"`
+}
+
+type QuotaUsage struct {
+	LimitTokens int64  `json:"limit_tokens"`
+	UsedTokens  int64  `json:"used_tokens"`
+	Window      string `json:"window"`
+}
+
+type UsageStatus struct {
+	Team       string       `json:"team"`
+	TeamBudget *BudgetUsage `json:"team_budget,omitempty"`
+	TeamQuota  *QuotaUsage  `json:"team_quota,omitempty"`
+	KeyBudget  *BudgetUsage `json:"key_budget,omitempty"`
+	KeyQuota   *QuotaUsage  `json:"key_quota,omitempty"`
+}
+
 // Governor enforces rate/quota/budget and settles cost. Its stateful stores
 // (limiter rate buckets, budget µUSD counters) are owned here and PERSIST
 // across config hot-reloads. The pricing table is NOT stored — it is a
@@ -168,6 +189,48 @@ func (g *Governor) PreCheck(team, keyID string, kp KeyPolicy, estimateTokens int
 		return GovDecision{Status: 402, Reason: "key budget exceeded"}
 	}
 	return GovDecision{Allowed: true}
+}
+
+func (g *Governor) UsageOf(team, keyID string, kp KeyPolicy) UsageStatus {
+	u := UsageStatus{Team: team}
+	if p, ok := g.policyOf(team); ok {
+		if p.BudgetMicrosPerMonth > 0 {
+			spent := g.bud.Spent("budget:"+team, 30*24*time.Hour)
+			u.TeamBudget = &BudgetUsage{
+				LimitUSDMicros:     p.BudgetMicrosPerMonth,
+				SpentUSDMicros:     spent,
+				RemainingUSDMicros: max64(0, p.BudgetMicrosPerMonth-spent),
+				Window:             "720h",
+			}
+		}
+		if p.TokensPerDay > 0 {
+			u.TeamQuota = &QuotaUsage{
+				LimitTokens: p.TokensPerDay,
+				UsedTokens:  g.lim.QuotaUsed("quota:"+team, 24*time.Hour),
+				Window:      "24h",
+			}
+		}
+	}
+	if kp.BudgetMicrosPerMonth > 0 {
+		spent := g.bud.Spent("budget:key:"+keyID, 30*24*time.Hour)
+		u.KeyBudget = &BudgetUsage{
+			LimitUSDMicros:     kp.BudgetMicrosPerMonth,
+			SpentUSDMicros:     spent,
+			RemainingUSDMicros: max64(0, kp.BudgetMicrosPerMonth-spent),
+			Window:             "720h",
+		}
+	}
+	if kp.TokensPerMinute > 0 {
+		// Same bucket key/burst PreCheck debits ("tpm:key:"+keyID) — RateUsed
+		// only peeks at the projected refill, never writes it back.
+		used := g.lim.RateUsed("tpm:key:"+keyID, kp.TokensPerMinute, kp.TokensPerMinute)
+		u.KeyQuota = &QuotaUsage{
+			LimitTokens: kp.TokensPerMinute,
+			UsedTokens:  used,
+			Window:      "1m",
+		}
+	}
+	return u
 }
 
 // Settle records actual token usage against quota and computes+debits cost.

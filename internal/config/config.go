@@ -91,6 +91,7 @@ type Target struct {
 }
 
 type ModelConfig struct {
+	Aliases []string `json:"aliases,omitempty"`
 	Targets []Target `json:"targets"`
 }
 
@@ -439,7 +440,26 @@ func LoadRaw(path string) (*Config, error) {
 	if err := validateBudgetAlerts(cfg.BudgetAlerts); err != nil {
 		return nil, err
 	}
+	if err := validateModelAliases(cfg.Models); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+func validateModelAliases(models map[string]ModelConfig) error {
+	seen := make(map[string]string)
+	for model, mc := range models {
+		for _, alias := range mc.Aliases {
+			if _, ok := models[alias]; ok {
+				return fmt.Errorf("config: model %q alias %q collides with existing model name", model, alias)
+			}
+			if prev, ok := seen[alias]; ok {
+				return fmt.Errorf("config: model alias %q declared by both %q and %q", alias, prev, model)
+			}
+			seen[alias] = model
+		}
+	}
+	return nil
 }
 
 // validateBodyLog checks the opt-in audit.log_bodies block (D4, ADR-018).

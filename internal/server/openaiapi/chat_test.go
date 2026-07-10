@@ -121,6 +121,30 @@ func TestChatUnknownModel404(t *testing.T) {
 	}
 }
 
+// Task 1: the 404 must list the models the key may use (OpenAI envelope).
+func TestChat404ListsAvailableModels(t *testing.T) {
+	provs := map[string]providers.Provider{"p": mockprovider.New("gpt-x")}
+	models := map[string]config.ModelConfig{
+		"gpt-x": {Targets: []config.Target{{Provider: "p", Model: "gpt-x"}}},
+		"gpt-y": {Targets: []config.Target{{Provider: "p", Model: "gpt-y"}}},
+	}
+	h := NewChatHandler(router.New(holderFor(provs, models)))
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-z","messages":[]}`))
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik_secret", AllowedModels: []string{"*"}})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != 404 {
+		t.Fatalf("want 404, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "gpt-x") || !strings.Contains(body, "gpt-y") {
+		t.Fatalf("404 must list available models: %s", body)
+	}
+	if strings.Contains(body, "ik_secret") {
+		t.Fatalf("404 body must not leak key id: %s", body)
+	}
+}
+
 func TestChat404DoesNotLeakModelLabel(t *testing.T) {
 	m := metrics.New()
 	h := NewChatHandlerMetrics(testRouter(), nil, nil, m)
