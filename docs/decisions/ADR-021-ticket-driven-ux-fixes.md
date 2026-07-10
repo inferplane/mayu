@@ -63,24 +63,31 @@ invariant intact for the common path.
 
 A data-plane endpoint behind the same `KeyAuth` as `/v1/messages`. `Governor.UsageOf(team,
 keyID, kp)` (read-only — no debit, no state mutation) reports the caller's **per-key AND
-team** budget/quota. Each dimension is pointer-typed: an unlimited dimension (`limit <= 0`,
-the same "unlimited" convention `budget.Check`/`limiter` already use) serializes as `null`,
-never `remaining: 0` (which would falsely read as "used up"). Integer µUSD throughout; the
-response never contains `key_id` (the id is only a store-lookup key). A nil governor
-(governance disabled) returns a well-formed ungoverned payload, never a panic.
+team** budget/quota, including the key's own TPM bucket (`LimiterStore.RateUsed` — a
+read-only peek at the same refill math `AllowRate` already does, never writing the bucket
+back; added during code-gate after 3 of 4 panel reviewers flagged that a key's TPM limit —
+the thing that actually blocks a developer mid-burst — was invisible even though its
+*budget* was reported). Each dimension is pointer-typed: an unlimited dimension
+(`limit <= 0`, the same "unlimited" convention `budget.Check`/`limiter` already use)
+serializes as `null`, never `remaining: 0` (which would falsely read as "used up"). Integer
+µUSD/tokens throughout; the response never contains `key_id` (the id is only a store-lookup
+key). A nil governor (governance disabled) returns a well-formed ungoverned payload, never
+a panic.
 
 ## Consequences
 
 - **Positive:** the top three ticket categories (auth aside) are directly addressed;
-  clients can self-diagnose model errors and self-check budget without an admin.
+  clients can self-diagnose model errors and self-check budget/rate limits without an admin.
 - **Known limitation (accepted):** `Router.Canonical` and `ResolveChain` each load their
   own `live.State` snapshot, so a hot-reload landing between them could split alias
   resolution from routing. Impact is bounded to a stray 404 (canonical names are stable
   across an alias-only reload) and reloads are rare + validated; not worth threading a
   shared snapshot through the RBAC boundary. Revisit if reloads become frequent.
 - **Out of scope (follow-up):** aliases in the providerstore/UI-write DB path; per-key
-  rate-limit *rate* (rpm/tpm) reporting in `/v1/usage` (only cumulative budget/quota are
-  reported, which is what the tickets asked for).
+  RPM (request-count, as opposed to TPM/token) usage reporting in `/v1/usage` — RPM limits
+  return immediate 429 feedback on the blocking request itself, so the self-service value of
+  polling it ahead of time is much lower than for budget/TPM (which build up silently); add
+  if a real need appears.
 
 ## Verification
 
