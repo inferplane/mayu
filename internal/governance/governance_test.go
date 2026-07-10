@@ -245,8 +245,8 @@ func TestGovernorUsageOf(t *testing.T) {
 		"t": {BudgetMicrosPerMonth: 1_000_000, TokensPerDay: 10_000},
 	}
 	g := NewGovernor(teams, limiter.NewMemory(), budget.NewMemory(), nil)
-	// spend some team budget + quota, and some per-key budget.
-	kp := KeyPolicy{BudgetMicrosPerMonth: 500_000}
+	// spend some team budget + quota, and some per-key budget + tpm quota.
+	kp := KeyPolicy{BudgetMicrosPerMonth: 500_000, TokensPerMinute: 1000}
 	// Settle debits both budget (1500 µUSD, team+key) AND the team's token
 	// quota (Input+Output=1500 tokens, since TokensPerDay>0 — governance.go's
 	// Settle debits "quota:"+team whenever the team has a daily token limit).
@@ -254,6 +254,11 @@ func TestGovernorUsageOf(t *testing.T) {
 	// only consumed quota (no billable cost), so team quota ends at 1500+2000.
 	g.Settle("t", "ik1", kp, "p", "m", pricing.Usage{Input: 1000, Output: 500}, testTable()) // 1500 µUSD both team+key
 	g.lim.DebitQuota("quota:t", 2000, 24*time.Hour)
+	// F3: the key's per-minute token bucket (enforced in PreCheck) must also
+	// surface here — debit 300 of its 1000 burst via a real PreCheck call.
+	if d := g.PreCheck("t", "ik1", kp, 300); !d.Allowed {
+		t.Fatalf("PreCheck unexpectedly blocked: %+v", d)
+	}
 
 	u := g.UsageOf("t", "ik1", kp)
 	if u.TeamBudget == nil {
@@ -271,11 +276,15 @@ func TestGovernorUsageOf(t *testing.T) {
 	if u.TeamQuota == nil || u.TeamQuota.UsedTokens != 3500 {
 		t.Fatalf("team quota wrong: %+v", u.TeamQuota)
 	}
+	// F3: the key's own tpm bucket (not just its budget) is reported too.
+	if u.KeyQuota == nil || u.KeyQuota.LimitTokens != 1000 || u.KeyQuota.UsedTokens != 300 {
+		t.Fatalf("key quota wrong: %+v", u.KeyQuota)
+	}
 
 	// F2: an unlimited team → nil budget/quota, not zero.
 	g2 := NewGovernor(map[string]TeamPolicy{"t": {}}, limiter.NewMemory(), budget.NewMemory(), nil)
 	u2 := g2.UsageOf("t", "", KeyPolicy{})
-	if u2.TeamBudget != nil || u2.TeamQuota != nil || u2.KeyBudget != nil {
+	if u2.TeamBudget != nil || u2.TeamQuota != nil || u2.KeyBudget != nil || u2.KeyQuota != nil {
 		t.Fatalf("unlimited dimensions must be nil, got %+v", u2)
 	}
 }

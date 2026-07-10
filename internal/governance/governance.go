@@ -65,6 +65,7 @@ type UsageStatus struct {
 	TeamBudget *BudgetUsage `json:"team_budget,omitempty"`
 	TeamQuota  *QuotaUsage  `json:"team_quota,omitempty"`
 	KeyBudget  *BudgetUsage `json:"key_budget,omitempty"`
+	KeyQuota   *QuotaUsage  `json:"key_quota,omitempty"`
 }
 
 // Governor enforces rate/quota/budget and settles cost. Its stateful stores
@@ -217,6 +218,16 @@ func (g *Governor) UsageOf(team, keyID string, kp KeyPolicy) UsageStatus {
 			SpentUSDMicros:     spent,
 			RemainingUSDMicros: max64(0, kp.BudgetMicrosPerMonth-spent),
 			Window:             "720h",
+		}
+	}
+	if kp.TokensPerMinute > 0 {
+		// Same bucket key/burst PreCheck debits ("tpm:key:"+keyID) — RateUsed
+		// only peeks at the projected refill, never writes it back.
+		used := g.lim.RateUsed("tpm:key:"+keyID, kp.TokensPerMinute, kp.TokensPerMinute)
+		u.KeyQuota = &QuotaUsage{
+			LimitTokens: kp.TokensPerMinute,
+			UsedTokens:  used,
+			Window:      "1m",
 		}
 	}
 	return u
