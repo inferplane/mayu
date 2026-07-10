@@ -1,6 +1,8 @@
 # LLM Gateway: 고객 불만, 필요성, 필수 항목 분석
 
 > **작성일**: 2026-06-26 | **소스**: Slack 내부 대화, 웹 리서치, Knowledge Graph
+>
+> 실제 접수 티켓(59건) 기준 분석은 [docs/customer-issue-analysis.md](docs/customer-issue-analysis.md) 참고.
 
 ---
 
