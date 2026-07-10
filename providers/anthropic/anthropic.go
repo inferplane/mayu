@@ -89,11 +89,19 @@ func rewriteTopLevelModel(raw []byte, upstream string) ([]byte, error) {
 		return nil, err
 	}
 	fields["model"] = repl
-	out, err := json.Marshal(fields)
-	if err != nil {
+	// Re-emit with HTML escaping OFF so nested content bytes (a prompt
+	// containing &, <, > or U+2028/2029 — common in code) survive unchanged;
+	// only the top-level model value is meant to differ. Top-level key order
+	// may be normalized by the map round-trip, which carries no meaning
+	// upstream and never touches cached content.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(fields); err != nil {
 		return nil, err
 	}
-	return out, nil
+	// Encoder appends a trailing newline; drop it to keep the body tight.
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 func (p *provider) Complete(ctx context.Context, req *providers.ProxyRequest) (*providers.ProxyResponse, error) {

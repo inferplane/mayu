@@ -222,3 +222,34 @@ func TestCompleteVerbatimWhenModelMatchesUpstream(t *testing.T) {
 		t.Fatalf("non-alias body must be byte-identical:\n got: %s\nwant: %s", gotBody, raw)
 	}
 }
+
+// F1 hardening (code-gate): the alias-path rewrite must NOT HTML-escape nested
+// prompt content (&, <, >) — a common case for code. Only the top-level model
+// changes; the message text bytes survive.
+func TestCompleteAliasRewritePreservesSpecialChars(t *testing.T) {
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"m","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+	p, _ := factory(providers.Config{Type: "anthropic", BaseURL: upstream.URL, APIKey: "sk-up"})
+	// prompt contains &, <, > — must not become & etc.
+	raw := []byte(`{"model":"apac.anthropic.claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"if a < b && b > c"}]}`)
+	_, err := p.Complete(context.Background(), &providers.ProxyRequest{
+		Model: "claude-sonnet-4-6", Upstream: "claude-sonnet-4-6", RawBody: raw,
+		Headers: http.Header{"Anthropic-Version": {"2023-06-01"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(gotBody), "if a < b && b > c") {
+		t.Fatalf("special chars must survive as literal bytes: %s", gotBody)
+	}
+	// The HTML-escaping bug would emit the \u003c / \u003e / \u0026 escape
+	// sequences; those must be absent (the literal <, >, & are fine).
+	if strings.Contains(string(gotBody), `\u003c`) || strings.Contains(string(gotBody), `\u003e`) || strings.Contains(string(gotBody), `\u0026`) {
+		t.Fatalf("nested content must not be HTML-escaped: %s", gotBody)
+	}
+}

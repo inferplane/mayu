@@ -393,17 +393,9 @@ func LoadRaw(path string) (*Config, error) {
 	if err := json.Unmarshal(data, &probe); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
-	legacyAPIKeyRefs := make(map[string]SecretRef)
 	for name, p := range probe.Providers {
-		if raw, bad := p["api_key"]; bad {
-			var ref SecretRef
-			if err := json.Unmarshal(raw, &ref); err != nil || (ref.Env == "" && ref.File == "") {
-				return nil, fmt.Errorf("config: provider %q has inline api_key; use api_key_ref (§7)", name)
-			}
-			if err := ValidateSecretRef(&ref); err != nil {
-				return nil, fmt.Errorf("config: provider %q api_key: %w", name, err)
-			}
-			legacyAPIKeyRefs[name] = ref
+		if _, bad := p["api_key"]; bad {
+			return nil, fmt.Errorf("config: provider %q has inline api_key; use api_key_ref (§7)", name)
 		}
 	}
 	if _, bad := probe.Analytics.ModeB["dsn"]; bad {
@@ -421,15 +413,6 @@ func LoadRaw(path string) (*Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
-	}
-	for name, ref := range legacyAPIKeyRefs {
-		p := cfg.Providers[name]
-		if p.APIKeyRef != nil {
-			return nil, fmt.Errorf("config: provider %q sets both api_key and api_key_ref", name)
-		}
-		ref := ref
-		p.APIKeyRef = &ref
-		cfg.Providers[name] = p
 	}
 	for i := range cfg.Server.AdminAuth.TokenRefs {
 		ref := cfg.Server.AdminAuth.TokenRefs[i]

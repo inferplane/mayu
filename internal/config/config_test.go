@@ -911,7 +911,7 @@ func TestLoadModelAliases(t *testing.T) {
 	dir := t.TempDir()
 	good := filepath.Join(dir, "good.json")
 	if err := os.WriteFile(good, []byte(`{
-  "providers": {"ant": {"type": "anthropic", "base_url": "https://api.anthropic.com", "api_key": {"env": "K"}}},
+  "providers": {"ant": {"type": "anthropic", "base_url": "https://api.anthropic.com", "api_key_ref": {"env": "K"}}},
   "models": {
     "claude-sonnet-4-6": {"aliases": ["apac.anthropic.claude-sonnet-4-6"], "targets": [{"provider": "ant", "model": "claude-sonnet-4-6"}]}
   }
@@ -930,7 +930,7 @@ func TestLoadModelAliases(t *testing.T) {
 	// alias collides with an existing model name → rejected.
 	bad := filepath.Join(dir, "bad.json")
 	if err := os.WriteFile(bad, []byte(`{
-  "providers": {"ant": {"type": "anthropic", "base_url": "https://api.anthropic.com", "api_key": {"env": "K"}}},
+  "providers": {"ant": {"type": "anthropic", "base_url": "https://api.anthropic.com", "api_key_ref": {"env": "K"}}},
   "models": {
     "a": {"targets": [{"provider": "ant", "model": "a"}]},
     "b": {"aliases": ["a"], "targets": [{"provider": "ant", "model": "b"}]}
