@@ -43,7 +43,11 @@ func (p *provider) Name() string { return "anthropic" }
 func (p *provider) Models() []schema.ModelInfo { return nil } // M2: models come from config
 
 func (p *provider) buildUpstream(ctx context.Context, path string, req *providers.ProxyRequest) (*http.Request, error) {
-	u, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+path, bytes.NewReader(req.RawBody))
+	body, err := rewriteTopLevelModel(req.RawBody, req.Upstream)
+	if err != nil {
+		return nil, err
+	}
+	u, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -62,6 +66,34 @@ func (p *provider) buildUpstream(ctx context.Context, path string, req *provider
 		u.Header.Set("x-api-key", p.apiKey)
 	}
 	return u, nil
+}
+
+func rewriteTopLevelModel(raw []byte, upstream string) ([]byte, error) {
+	if upstream == "" {
+		return raw, nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	modelRaw, ok := fields["model"]
+	if !ok {
+		return raw, nil
+	}
+	var model string
+	if err := json.Unmarshal(modelRaw, &model); err == nil && model == upstream {
+		return raw, nil
+	}
+	repl, err := json.Marshal(upstream)
+	if err != nil {
+		return nil, err
+	}
+	fields["model"] = repl
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (p *provider) Complete(ctx context.Context, req *providers.ProxyRequest) (*providers.ProxyResponse, error) {

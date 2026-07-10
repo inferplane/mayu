@@ -552,3 +552,37 @@ func holderFor(provs map[string]providers.Provider, models map[string]config.Mod
 	h.Swap(live.NewState(provs, models, govPricing(), ids))
 	return h
 }
+
+// Task 2: a request naming an ALIAS routes to the canonical target. Alias
+// normalization happens before RBAC, so an allow-list holding only the alias
+// (not the canonical name) is denied — no bypass (F6).
+func TestMessagesAliasRoutesToCanonical(t *testing.T) {
+	provs := map[string]providers.Provider{"p": mockprovider.New("claude-sonnet-4-6")}
+	models := map[string]config.ModelConfig{
+		"claude-sonnet-4-6": {
+			Aliases: []string{"apac.anthropic.claude-sonnet-4-6"},
+			Targets: []config.Target{{Provider: "p", Model: "claude-sonnet-4-6"}},
+		},
+	}
+	h := NewMessagesHandler(router.New(holderFor(provs, models)))
+
+	// allow-list holds the canonical name → alias request succeeds.
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"apac.anthropic.claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik", Team: "t", AllowedModels: []string{"claude-sonnet-4-6"}})
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != 200 {
+		t.Fatalf("alias must route to canonical target: got %d body %s", rec.Code, rec.Body.String())
+	}
+
+	// allow-list holds ONLY the alias (not canonical) → denied after normalization.
+	req2 := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"apac.anthropic.claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	rec2 := httptest.NewRecorder()
+	ctx2 := principal.With(req2.Context(), keystore.Principal{KeyID: "ik", Team: "t", AllowedModels: []string{"apac.anthropic.claude-sonnet-4-6"}})
+	h.ServeHTTP(rec2, req2.WithContext(ctx2))
+	if rec2.Code != 403 {
+		t.Fatalf("alias-only allow-list must deny (no RBAC bypass): got %d", rec2.Code)
+	}
+}

@@ -903,3 +903,42 @@ func TestBudgetAlertsRejectsBadThreshold(t *testing.T) {
 		t.Fatal("a non-positive threshold must be rejected")
 	}
 }
+
+// Task 2: config-file model aliases. An alias is an alternate name resolving to
+// a canonical model; load rejects collisions (alias == a model name, or two
+// models declaring the same alias).
+func TestLoadModelAliases(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good.json")
+	if err := os.WriteFile(good, []byte(`{
+  "providers": {"ant": {"type": "anthropic", "base_url": "https://api.anthropic.com", "api_key": {"env": "K"}}},
+  "models": {
+    "claude-sonnet-4-6": {"aliases": ["apac.anthropic.claude-sonnet-4-6"], "targets": [{"provider": "ant", "model": "claude-sonnet-4-6"}]}
+  }
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("K", "sk-x")
+	cfg, err := Load(good)
+	if err != nil {
+		t.Fatalf("alias config must load: %v", err)
+	}
+	if got := cfg.Models["claude-sonnet-4-6"].Aliases; len(got) != 1 || got[0] != "apac.anthropic.claude-sonnet-4-6" {
+		t.Fatalf("alias not parsed: %+v", got)
+	}
+
+	// alias collides with an existing model name → rejected.
+	bad := filepath.Join(dir, "bad.json")
+	if err := os.WriteFile(bad, []byte(`{
+  "providers": {"ant": {"type": "anthropic", "base_url": "https://api.anthropic.com", "api_key": {"env": "K"}}},
+  "models": {
+    "a": {"targets": [{"provider": "ant", "model": "a"}]},
+    "b": {"aliases": ["a"], "targets": [{"provider": "ant", "model": "b"}]}
+  }
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(bad); err == nil {
+		t.Fatal("alias colliding with a model name must be rejected")
+	}
+}

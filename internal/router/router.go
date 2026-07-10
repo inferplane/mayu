@@ -31,6 +31,12 @@ func New(holder *live.Holder) *Router {
 // updated on every RecordResult. Pass nil (or never call) to disable.
 func (r *Router) SetMetrics(m *metrics.Metrics) { r.metrics = m }
 
+// Canonical resolves a configured model alias using one live snapshot.
+func (r *Router) Canonical(model string) string {
+	st := r.live.Load()
+	return st.Canonical(model)
+}
+
 // ChainTarget is one resolved fallback target: the provider instance, its
 // CONFIG provider name (pricing/metric key), the breaker Identity (type+base_url,
 // captured from the generation this was resolved on so RecordResult records

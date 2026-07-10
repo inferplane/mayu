@@ -117,16 +117,17 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 400, "invalid_request_error", "malformed JSON")
 		return
 	}
+	model := h.r.Canonical(parsed.Model)
 	// Tracing (ADR-011): join the client's trace (W3C traceparent), start ONE
 	// server span owned across the whole request (incl. the fallback loop) and
 	// end it exactly once via defer; no-op when tracing is off. The provider
 	// system / response model / usage / terminal status are set later in the
 	// serve methods via the span in the request context.
 	tctx := tracing.Extract(req.Context(), req.Header)
-	tctx, span := tracing.Start(tctx, "chat "+parsed.Model)
+	tctx, span := tracing.Start(tctx, "chat "+model)
 	defer span.End()
 	req = req.WithContext(tctx)
-	tracing.SetGenAIRequest(span, parsed.Model)
+	tracing.SetGenAIRequest(span, model)
 	traceID := tracing.TraceID(tctx)
 	// M3 enforcement: require an authenticated principal and check the
 	// per-key model allow-list BEFORE resolving/forwarding (§3.1, §5.1).
@@ -136,24 +137,24 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 401, "authentication_error", "no principal")
 		return
 	}
-	if !p.Allows(parsed.Model) {
+	if !p.Allows(model) {
 		// A deny is recorded as a started record carrying the 403 outcome.
-		h.audit(p, parsed.Model, "", &audit.OutcomeRef{Status: 403}, false, traceID)
+		h.audit(p, model, "", &audit.OutcomeRef{Status: 403}, false, traceID)
 		// Pre-resolution reject: model is still attacker-controlled → sentinel label.
 		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 403, time.Since(start).Seconds(), 0)
 		tracing.SetStatus(span, false, "model not allowed")
-		writeErr(w, 403, "permission_error", "model not allowed for this key: "+parsed.Model+h.availableModelsErrorSuffix(p))
+		writeErr(w, 403, "permission_error", "model not allowed for this key: "+model+h.availableModelsErrorSuffix(p))
 		return
 	}
-	chain, st, err := h.r.ResolveChain(parsed.Model)
+	chain, st, err := h.r.ResolveChain(model)
 	if err != nil {
 		// Unknown model is recorded as a started record carrying the 404 outcome,
 		// for consistency with the 403 allow-list deny above.
-		h.audit(p, parsed.Model, "", &audit.OutcomeRef{Status: 404}, false, traceID)
+		h.audit(p, model, "", &audit.OutcomeRef{Status: 404}, false, traceID)
 		// Pre-resolution reject: model is still attacker-controlled → sentinel label.
 		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 404, time.Since(start).Seconds(), 0)
 		tracing.SetStatus(span, false, "unknown model")
-		writeErr(w, 404, "not_found_error", "unknown model: "+parsed.Model+h.availableModelsErrorSuffix(p))
+		writeErr(w, 404, "not_found_error", "unknown model: "+model+h.availableModelsErrorSuffix(p))
 		return
 	}
 	// Team-record fresh lookup (D6/D7, ADR-016 pattern): one call reused below
@@ -173,10 +174,10 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if len(teamRec.AllowedRegions) > 0 {
 		if filtered := router.FilterRegions(chain, teamRec.AllowedRegions); len(filtered) == 0 {
 			errMsg := "region_blocked"
-			h.audit(p, parsed.Model, "", &audit.OutcomeRef{Status: 403, Error: &errMsg}, false, traceID)
+			h.audit(p, model, "", &audit.OutcomeRef{Status: 403, Error: &errMsg}, false, traceID)
 			h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 403, time.Since(start).Seconds(), 0)
 			tracing.SetStatus(span, false, "region blocked")
-			writeErr(w, 403, "permission_error", "no allowed-region target for model: "+parsed.Model)
+			writeErr(w, 403, "permission_error", "no allowed-region target for model: "+model)
 			return
 		} else {
 			chain = filtered
@@ -191,8 +192,8 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if h.mask.Enabled(p.Team) {
 		masked, n, err := maskBody(raw, h.mask.Filter)
 		if err != nil {
-			h.audit(p, parsed.Model, chain[0].Upstream, &audit.OutcomeRef{Status: 400}, false, traceID)
-			h.metrics.ObserveRequest(ingressName, parsed.Model, chain[0].ProviderName, p.Team, 400, time.Since(start).Seconds(), 0)
+			h.audit(p, model, chain[0].Upstream, &audit.OutcomeRef{Status: 400}, false, traceID)
+			h.metrics.ObserveRequest(ingressName, model, chain[0].ProviderName, p.Team, 400, time.Since(start).Seconds(), 0)
 			tracing.SetStatus(span, false, "pii mask failed")
 			writeErr(w, 400, "invalid_request_error", "request could not be PII-masked")
 			return
@@ -200,8 +201,8 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		if n > 0 {
 			var reparsed schema.ChatRequest
 			if err := json.Unmarshal(masked, &reparsed); err != nil {
-				h.audit(p, parsed.Model, chain[0].Upstream, &audit.OutcomeRef{Status: 400}, false, traceID)
-				h.metrics.ObserveRequest(ingressName, parsed.Model, chain[0].ProviderName, p.Team, 400, time.Since(start).Seconds(), 0)
+				h.audit(p, model, chain[0].Upstream, &audit.OutcomeRef{Status: 400}, false, traceID)
+				h.metrics.ObserveRequest(ingressName, model, chain[0].ProviderName, p.Team, 400, time.Since(start).Seconds(), 0)
 				tracing.SetStatus(span, false, "pii mask failed")
 				writeErr(w, 400, "invalid_request_error", "request could not be PII-masked")
 				return
@@ -220,8 +221,8 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if h.gov != nil {
 		dec := h.gov.PreCheck(p.Team, p.KeyID, keyPolicyOf(p), estimateTokens(raw))
 		if !dec.Allowed {
-			h.audit(p, parsed.Model, chain[0].Upstream, &audit.OutcomeRef{Status: dec.Status}, false, traceID)
-			h.metrics.ObserveRequest(ingressName, parsed.Model, chain[0].ProviderName, p.Team, dec.Status, time.Since(start).Seconds(), 0)
+			h.audit(p, model, chain[0].Upstream, &audit.OutcomeRef{Status: dec.Status}, false, traceID)
+			h.metrics.ObserveRequest(ingressName, model, chain[0].ProviderName, p.Team, dec.Status, time.Since(start).Seconds(), 0)
 			tracing.SetStatus(span, false, "governance deny")
 			writeErr(w, dec.Status, govErrType(dec.Status), dec.Reason)
 			return
@@ -229,7 +230,7 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	// request_started: the request passed auth + allow-list + governance and
 	// resolved a target (the first in the priority chain).
-	h.audit(p, parsed.Model, chain[0].Upstream, nil, piiMasked, traceID)
+	h.audit(p, model, chain[0].Upstream, nil, piiMasked, traceID)
 	stream := parsed.Stream != nil && *parsed.Stream
 
 	// Priority fallback chain (§4.5): try targets in order. A pre-TTFT failure
@@ -243,7 +244,7 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		upHeaders := req.Header.Clone()
 		tracing.Inject(req.Context(), upHeaders)
 		pr := &providers.ProxyRequest{
-			Model: parsed.Model, Upstream: ct.Upstream, Parsed: &parsed,
+			Model: model, Upstream: ct.Upstream, Parsed: &parsed,
 			RawBody: raw, Headers: upHeaders, Stream: stream,
 			IngressProtocol:  "anthropic",
 			GuardrailID:      teamRec.GuardrailID,
@@ -256,16 +257,16 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 		var retriable bool
 		if stream {
-			retriable = h.serveStream(w, req, ct.Provider, pr, p, parsed.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, start, table)
+			retriable = h.serveStream(w, req, ct.Provider, pr, p, model, ct.ProviderName, ct.Identity, ct.Upstream, last, start, table)
 		} else {
-			retriable = h.serveComplete(w, req, ct.Provider, pr, p, parsed.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, start, table)
+			retriable = h.serveComplete(w, req, ct.Provider, pr, p, model, ct.ProviderName, ct.Identity, ct.Upstream, last, start, table)
 		}
 		if !retriable {
 			return // committed (success, or terminal error on the last target)
 		}
 		// Pre-TTFT failure with a next target available → record + fall back.
 		h.r.RecordResult(ct.ProviderName, ct.Identity, false)
-		h.metrics.ObserveFallback(parsed.Model, ct.ProviderName, chain[i+1].ProviderName, "upstream_error")
+		h.metrics.ObserveFallback(model, ct.ProviderName, chain[i+1].ProviderName, "upstream_error")
 	}
 }
 

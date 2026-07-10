@@ -132,13 +132,14 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 400, "invalid_request_error", "malformed JSON")
 		return
 	}
+	model := h.r.Canonical(canonical.Model)
 	// Tracing (ADR-011): join the client trace, start ONE server span across the
 	// request, end once via defer; no-op when off.
 	tctx := tracing.Extract(req.Context(), req.Header)
-	tctx, span := tracing.Start(tctx, "chat "+canonical.Model)
+	tctx, span := tracing.Start(tctx, "chat "+model)
 	defer span.End()
 	req = req.WithContext(tctx)
-	tracing.SetGenAIRequest(span, canonical.Model)
+	tracing.SetGenAIRequest(span, model)
 	traceID := tracing.TraceID(tctx)
 	// Require an authenticated principal and enforce the per-key model
 	// allow-list BEFORE resolving/forwarding (§3.1, §5.1).
@@ -155,27 +156,27 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if h.mask.Enabled(p.Team) {
 		// Audit the security-critical rejection (a masking-bypass attempt) — a
 		// silent reject would be a blind spot in the tamper-evident chain (P4 gate).
-		h.audit(p, canonical.Model, "", &audit.OutcomeRef{Status: 400}, traceID)
+		h.audit(p, model, "", &audit.OutcomeRef{Status: 400}, traceID)
 		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 400, time.Since(start).Seconds(), 0)
 		tracing.SetStatus(span, false, "pii mask bypass blocked")
 		writeErr(w, 400, "invalid_request_error", "PII masking is enabled for your team but not supported on the OpenAI-compatible endpoint yet; use /v1/messages")
 		return
 	}
-	if !p.Allows(canonical.Model) {
-		h.audit(p, canonical.Model, "", &audit.OutcomeRef{Status: 403}, traceID)
+	if !p.Allows(model) {
+		h.audit(p, model, "", &audit.OutcomeRef{Status: 403}, traceID)
 		// Pre-resolution reject: model is still attacker-controlled → sentinel label.
 		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 403, time.Since(start).Seconds(), 0)
 		tracing.SetStatus(span, false, "model not allowed")
-		writeErr(w, 403, "permission_error", "model not allowed for this key: "+canonical.Model+h.availableModelsErrorSuffix(p))
+		writeErr(w, 403, "permission_error", "model not allowed for this key: "+model+h.availableModelsErrorSuffix(p))
 		return
 	}
-	chain, st, err := h.r.ResolveChain(canonical.Model)
+	chain, st, err := h.r.ResolveChain(model)
 	if err != nil {
-		h.audit(p, canonical.Model, "", &audit.OutcomeRef{Status: 404}, traceID)
+		h.audit(p, model, "", &audit.OutcomeRef{Status: 404}, traceID)
 		// Pre-resolution reject: model is still attacker-controlled → sentinel label.
 		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 404, time.Since(start).Seconds(), 0)
 		tracing.SetStatus(span, false, "unknown model")
-		writeErr(w, 404, "not_found_error", "unknown model: "+canonical.Model+h.availableModelsErrorSuffix(p))
+		writeErr(w, 404, "not_found_error", "unknown model: "+model+h.availableModelsErrorSuffix(p))
 		return
 	}
 	// Team-record fresh lookup (D6/D7, ADR-016 pattern): one call reused below
@@ -192,10 +193,10 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if len(teamRec.AllowedRegions) > 0 {
 		if filtered := router.FilterRegions(chain, teamRec.AllowedRegions); len(filtered) == 0 {
 			errMsg := "region_blocked"
-			h.audit(p, canonical.Model, "", &audit.OutcomeRef{Status: 403, Error: &errMsg}, traceID)
+			h.audit(p, model, "", &audit.OutcomeRef{Status: 403, Error: &errMsg}, traceID)
 			h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 403, time.Since(start).Seconds(), 0)
 			tracing.SetStatus(span, false, "region blocked")
-			writeErr(w, 403, "permission_error", "no allowed-region target for model: "+canonical.Model)
+			writeErr(w, 403, "permission_error", "no allowed-region target for model: "+model)
 			return
 		} else {
 			chain = filtered
@@ -207,8 +208,8 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if h.gov != nil {
 		dec := h.gov.PreCheck(p.Team, p.KeyID, keyPolicyOf(p), estimateTokens(raw))
 		if !dec.Allowed {
-			h.audit(p, canonical.Model, chain[0].Upstream, &audit.OutcomeRef{Status: dec.Status}, traceID)
-			h.metrics.ObserveRequest(ingressName, canonical.Model, chain[0].ProviderName, p.Team, dec.Status, time.Since(start).Seconds(), 0)
+			h.audit(p, model, chain[0].Upstream, &audit.OutcomeRef{Status: dec.Status}, traceID)
+			h.metrics.ObserveRequest(ingressName, model, chain[0].ProviderName, p.Team, dec.Status, time.Since(start).Seconds(), 0)
 			tracing.SetStatus(span, false, "governance deny")
 			writeErr(w, dec.Status, govErrType(dec.Status), dec.Reason)
 			return
@@ -216,7 +217,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	// request_started: the request passed auth + allow-list + governance and
 	// resolved a target (the first in the priority chain).
-	h.audit(p, canonical.Model, chain[0].Upstream, nil, traceID)
+	h.audit(p, model, chain[0].Upstream, nil, traceID)
 	stream := canonical.Stream != nil && *canonical.Stream
 
 	// Priority fallback chain (§4.5): try targets in order. A pre-TTFT failure
@@ -226,7 +227,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		upHeaders := req.Header.Clone()
 		tracing.Inject(req.Context(), upHeaders)
 		pr := &providers.ProxyRequest{
-			Model: canonical.Model, Upstream: ct.Upstream, Parsed: canonical,
+			Model: model, Upstream: ct.Upstream, Parsed: canonical,
 			RawBody: raw, Headers: upHeaders, Stream: stream,
 			IngressProtocol:  "openai",
 			GuardrailID:      teamRec.GuardrailID,
@@ -238,15 +239,15 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 		var retriable bool
 		if stream {
-			retriable = h.serveStream(w, req, ct.Provider, pr, p, canonical.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, start, table)
+			retriable = h.serveStream(w, req, ct.Provider, pr, p, model, ct.ProviderName, ct.Identity, ct.Upstream, last, start, table)
 		} else {
-			retriable = h.serveComplete(w, req, ct.Provider, pr, p, canonical.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, start, table)
+			retriable = h.serveComplete(w, req, ct.Provider, pr, p, model, ct.ProviderName, ct.Identity, ct.Upstream, last, start, table)
 		}
 		if !retriable {
 			return
 		}
 		h.r.RecordResult(ct.ProviderName, ct.Identity, false)
-		h.metrics.ObserveFallback(canonical.Model, ct.ProviderName, chain[i+1].ProviderName, "upstream_error")
+		h.metrics.ObserveFallback(model, ct.ProviderName, chain[i+1].ProviderName, "upstream_error")
 	}
 }
 
