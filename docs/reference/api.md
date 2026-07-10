@@ -15,8 +15,9 @@ contract is in [docs/api-reference.md](../api-reference.md).
 | Component | Path | Purpose |
 |---|---|---|
 | Data/admin mux | `internal/server/server.go` | DataMux / AdminMux wiring (auth, governance, metrics) |
-| Anthropic ingress | `internal/server/anthropicapi/` | `/v1/messages`, `/v1/messages/count_tokens`, `/v1/models` |
-| OpenAI ingress | `internal/server/openaiapi/` | `/v1/chat/completions`, `/v1/models` |
+| Anthropic ingress | `internal/server/anthropicapi/` | `/v1/messages`, `/v1/messages/count_tokens`, `/v1/models`. Unknown-model 404 and disallowed-model 403 list the key's allow-filtered available models (ADR-021) |
+| OpenAI ingress | `internal/server/openaiapi/` | `/v1/chat/completions`, `/v1/models` (same discoverable 404/403, ADR-021) |
+| Usage API | `internal/server/usageapi/usage.go` | `GET /v1/usage` — data-plane, KeyAuth; the caller's own effective governance state (per-key + team budget/quota, integer µUSD, unlimited dims null). Never echoes `key_id` (ADR-021) |
 | Admin keys API | `internal/server/adminapi/keys.go` | issue / list / revoke virtual keys (per-team entitlement + admin audit, ADR-004) |
 | Admin teams/users API | `internal/server/adminapi/teams.go` | `GET /admin/teams` (any AdminAuth identity); `PUT`/`DELETE /admin/teams/{name}` upsert/delete a team governance record (**full-admin only**, ADR-016 D3) — enforced dynamically in the request hot path via `Governor.SetTeamLookup`, no restart; `GET /admin/users` derived read-only owner projection (no users table, no per-user spend) |
 | Whoami API | `internal/server/adminapi/whoami.go` | `GET /admin/whoami` secret-free resolved identity (subject/teams/is_admin/auth_method) for self-service key issuance (ADR-010) |
@@ -32,9 +33,9 @@ contract is in [docs/api-reference.md](../api-reference.md).
 | OpenAI conversion | `internal/openai/convert.go` | OpenAI ⇄ canonical request/response/chunk |
 
 ### 3. Key Decisions
-- `count_tokens` must always return 200 — a non-200 crashes Claude Code.
-- Verbatim body forwarding on protocol match; canonical conversion only on mismatch.
-- Errors are returned in the ingress protocol's own error shape.
+- `count_tokens` must always return 200 — a non-200 crashes Claude Code (aliases are canonicalized here too, ADR-021).
+- Verbatim body forwarding on protocol match; canonical conversion only on mismatch. Model **aliases** (config `models.<name>.aliases`, ADR-021) are normalized to the canonical name BEFORE RBAC/routing/audit/metrics; on the anthropic verbatim path the only body change is a cache-safe top-level `model` rewrite (nested `cache_control` preserved, HTML escaping off).
+- Errors are returned in the ingress protocol's own error shape; the unknown/disallowed-model messages append the allow-filtered available-model list (ADR-021).
 
 ### 4. Code Pointers
 - `internal/server/anthropicapi/messages.go` — Messages handler, streaming tee, cardinality-safe labels
@@ -43,7 +44,7 @@ contract is in [docs/api-reference.md](../api-reference.md).
 
 ### 5. Cross-references
 - Related modules: `internal/router`, `internal/governance`, `internal/alert`, `internal/bodystore`, `providers/`
-- Related ADRs: docs/decisions/ADR-016-teams-as-keystore-records.md, docs/decisions/ADR-017-budget-alert-webhooks.md, docs/decisions/ADR-018-opt-in-body-logging.md
+- Related ADRs: docs/decisions/ADR-016-teams-as-keystore-records.md, docs/decisions/ADR-017-budget-alert-webhooks.md, docs/decisions/ADR-018-opt-in-body-logging.md, docs/decisions/ADR-021-ticket-driven-ux-fixes.md
 - Related runbooks: docs/runbooks/
 
 <a id="korean"></a>
@@ -58,8 +59,9 @@ HTTP 표면입니다. 두 인그레스(Anthropic Messages, OpenAI Chat Completio
 | 구성요소 | 경로 | 목적 |
 |---|---|---|
 | 데이터/관리 mux | `internal/server/server.go` | DataMux / AdminMux 배선(auth, governance, metrics) |
-| Anthropic 인그레스 | `internal/server/anthropicapi/` | `/v1/messages`, `/v1/messages/count_tokens`, `/v1/models` |
-| OpenAI 인그레스 | `internal/server/openaiapi/` | `/v1/chat/completions`, `/v1/models` |
+| Anthropic 인그레스 | `internal/server/anthropicapi/` | `/v1/messages`, `/v1/messages/count_tokens`, `/v1/models`. 미등록 모델 404·미허용 모델 403은 키의 allow-필터된 사용 가능 모델 목록을 포함 (ADR-021) |
+| OpenAI 인그레스 | `internal/server/openaiapi/` | `/v1/chat/completions`, `/v1/models` (동일한 discoverable 404/403, ADR-021) |
+| Usage API | `internal/server/usageapi/usage.go` | `GET /v1/usage` — 데이터 플레인, KeyAuth; 호출자 본인의 거버넌스 상태(키별+팀 예산/쿼터, 정수 µUSD, 무제한 차원은 null). `key_id` 절대 미노출 (ADR-021) |
 | 관리 키 API | `internal/server/adminapi/keys.go` | 가상 키 발급 / 목록 / 폐기 (팀별 권한 + 관리 감사, ADR-004) |
 | 관리 팀/유저 API | `internal/server/adminapi/teams.go` | `GET /admin/teams`(모든 AdminAuth 신원); `PUT`/`DELETE /admin/teams/{name}` 팀 거버넌스 레코드 upsert/삭제(**풀 어드민 전용**, ADR-016 D3) — `Governor.SetTeamLookup`으로 요청 hot path에서 재시작 없이 동적 적용; `GET /admin/users` 파생 읽기 전용 owner 프로젝션(유저 테이블 없음, 유저별 spend 없음) |
 | Whoami API | `internal/server/adminapi/whoami.go` | `GET /admin/whoami` 시크릿 무노출 신원(subject/teams/is_admin/auth_method) — 셀프서비스 키 발급용 (ADR-010) |
@@ -75,9 +77,9 @@ HTTP 표면입니다. 두 인그레스(Anthropic Messages, OpenAI Chat Completio
 | OpenAI 변환 | `internal/openai/convert.go` | OpenAI ⇄ canonical 요청/응답/청크 |
 
 ### 3. 주요 결정
-- `count_tokens`는 항상 200 반환 — 비-200은 Claude Code를 크래시시킴.
-- 프로토콜 일치 시 본문 verbatim 전달, 불일치 시에만 canonical 변환.
-- 오류는 인그레스 프로토콜 고유의 오류 형태로 반환.
+- `count_tokens`는 항상 200 반환 — 비-200은 Claude Code를 크래시시킴 (여기서도 alias를 canonical로 정규화, ADR-021).
+- 프로토콜 일치 시 본문 verbatim 전달, 불일치 시에만 canonical 변환. 모델 **alias**(config `models.<name>.aliases`, ADR-021)는 RBAC/라우팅/감사/메트릭 이전에 canonical로 정규화; anthropic verbatim 경로의 유일한 본문 변경은 캐시 안전 top-level `model` 재작성(nested `cache_control` 보존, HTML 이스케이프 off).
+- 오류는 인그레스 프로토콜 고유의 오류 형태로 반환; 미등록/미허용 모델 메시지는 allow-필터된 사용 가능 모델 목록을 덧붙임 (ADR-021).
 
 ### 4. 코드 포인터
 - `internal/server/anthropicapi/messages.go` — Messages 핸들러, 스트리밍 tee, 카디널리티 안전 레이블
@@ -86,5 +88,5 @@ HTTP 표면입니다. 두 인그레스(Anthropic Messages, OpenAI Chat Completio
 
 ### 5. 상호 참조
 - 관련 모듈: `internal/router`, `internal/governance`, `internal/alert`, `internal/bodystore`, `providers/`
-- 관련 ADR: docs/decisions/ADR-016-teams-as-keystore-records.md, docs/decisions/ADR-017-budget-alert-webhooks.md, docs/decisions/ADR-018-opt-in-body-logging.md
+- 관련 ADR: docs/decisions/ADR-016-teams-as-keystore-records.md, docs/decisions/ADR-017-budget-alert-webhooks.md, docs/decisions/ADR-018-opt-in-body-logging.md, docs/decisions/ADR-021-ticket-driven-ux-fixes.md
 - 관련 런북: docs/runbooks/
