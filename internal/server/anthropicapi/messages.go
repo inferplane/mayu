@@ -90,7 +90,7 @@ func (h *MessagesHandler) availableModelsErrorSuffix(p keystore.Principal) strin
 	names := h.r.AllModels()
 	available := make([]string, 0, len(names))
 	for _, name := range names {
-		if p.Allows(name) {
+		if h.r.Allows(p, name) {
 			available = append(available, name)
 		}
 	}
@@ -137,7 +137,7 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 401, "authentication_error", "no principal")
 		return
 	}
-	if !p.Allows(model) {
+	if !h.r.Allows(p, model) {
 		// A deny is recorded as a started record carrying the 403 outcome.
 		h.audit(p, model, "", &audit.OutcomeRef{Status: 403}, false, traceID)
 		// Pre-resolution reject: model is still attacker-controlled → sentinel label.

@@ -554,8 +554,13 @@ func holderFor(provs map[string]providers.Provider, models map[string]config.Mod
 }
 
 // Task 2: a request naming an ALIAS routes to the canonical target. Alias
-// normalization happens before RBAC, so an allow-list holding only the alias
-// (not the canonical name) is denied — no bypass (F6).
+// normalization happens before RBAC, so an allow-list holding the canonical
+// name grants access to alias requests too (F6) — and, per the code-gate HIGH
+// finding on PR #25, an allow-list holding ONLY the alias is ALSO resolved to
+// its canonical target rather than permanently denied: canonicalizing an
+// allow-list entry is still an exact match on both sides, so there is no
+// bypass risk, only a dead config entry if left unresolved (an operator who
+// writes an alias into allowed_models clearly means to grant that model).
 func TestMessagesAliasRoutesToCanonical(t *testing.T) {
 	provs := map[string]providers.Provider{"p": mockprovider.New("claude-sonnet-4-6")}
 	models := map[string]config.ModelConfig{
@@ -576,13 +581,25 @@ func TestMessagesAliasRoutesToCanonical(t *testing.T) {
 		t.Fatalf("alias must route to canonical target: got %d body %s", rec.Code, rec.Body.String())
 	}
 
-	// allow-list holds ONLY the alias (not canonical) → denied after normalization.
+	// allow-list holds ONLY the alias (not canonical) → still allowed: the
+	// allow-list entry is canonicalized too, so this isn't a permanent lockout.
 	req2 := httptest.NewRequest("POST", "/v1/messages",
 		strings.NewReader(`{"model":"apac.anthropic.claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
 	rec2 := httptest.NewRecorder()
 	ctx2 := principal.With(req2.Context(), keystore.Principal{KeyID: "ik", Team: "t", AllowedModels: []string{"apac.anthropic.claude-sonnet-4-6"}})
 	h.ServeHTTP(rec2, req2.WithContext(ctx2))
-	if rec2.Code != 403 {
-		t.Fatalf("alias-only allow-list must deny (no RBAC bypass): got %d", rec2.Code)
+	if rec2.Code != 200 {
+		t.Fatalf("alias-only allow-list must still resolve to its canonical target: got %d body %s", rec2.Code, rec2.Body.String())
+	}
+
+	// an allow-list entry naming an UNRELATED model must still deny — the
+	// canonicalized-comparison fix is not a broadening of access in general.
+	req3 := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"apac.anthropic.claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	rec3 := httptest.NewRecorder()
+	ctx3 := principal.With(req3.Context(), keystore.Principal{KeyID: "ik", Team: "t", AllowedModels: []string{"some-other-model"}})
+	h.ServeHTTP(rec3, req3.WithContext(ctx3))
+	if rec3.Code != 403 {
+		t.Fatalf("unrelated allow-list entry must still deny: got %d", rec3.Code)
 	}
 }

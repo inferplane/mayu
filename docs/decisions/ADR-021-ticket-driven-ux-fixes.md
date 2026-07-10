@@ -46,8 +46,12 @@ UI-write DB DTO is deliberately **out of scope** — a follow-up). `live.BuildSt
 with a model name or another alias (one hop only). `State.Canonical(name)` resolves an
 alias (identity otherwise); `Route` still accepts canonical names only. Both ingresses
 and `count_tokens` call `Router.Canonical(...)` **before** the RBAC check, so allow-list,
-audit, metrics, and pricing all key off the canonical name — an alias never double-counts,
-and an alias-only allow-list still denies (no bypass).
+audit, metrics, and pricing all key off the canonical name — an alias never double-counts.
+`Router.Allows(p, model)` (added during code-gate, HIGH finding on PR #25) canonicalizes
+`p.AllowedModels` entries too, not just the request: an allow-list holding only an alias
+now grants its canonical target instead of a permanent lockout — canonicalizing both sides
+is still an exact match, so this closes an operator footgun without widening what a key
+can reach (an unrelated allow-list entry still denies).
 
 **Cache-invariant carve-out (the one subtle decision):** the anthropic passthrough
 provider forwards `RawBody` verbatim and never rewrote the body `model`, so an alias would

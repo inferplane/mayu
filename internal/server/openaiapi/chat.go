@@ -103,7 +103,7 @@ func (h *ChatHandler) availableModelsErrorSuffix(p keystore.Principal) string {
 	names := h.r.AllModels()
 	available := make([]string, 0, len(names))
 	for _, name := range names {
-		if p.Allows(name) {
+		if h.r.Allows(p, name) {
 			available = append(available, name)
 		}
 	}
@@ -162,7 +162,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, 400, "invalid_request_error", "PII masking is enabled for your team but not supported on the OpenAI-compatible endpoint yet; use /v1/messages")
 		return
 	}
-	if !p.Allows(model) {
+	if !h.r.Allows(p, model) {
 		h.audit(p, model, "", &audit.OutcomeRef{Status: 403}, traceID)
 		// Pre-resolution reject: model is still attacker-controlled → sentinel label.
 		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 403, time.Since(start).Seconds(), 0)
