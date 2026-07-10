@@ -12,6 +12,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/inferplane/inferplane/internal/audit"
@@ -31,7 +33,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const ingressName = "openai"
+const (
+	ingressName      = "openai"
+	maxModelsInError = 20
+)
 
 // rejectedModelLabel is the bounded sentinel used as the Prometheus `model`
 // label on pre-resolution rejections (403 allow-list deny / 404 unknown model).
@@ -94,6 +99,24 @@ func providerWire(name string) string {
 	return "anthropic"
 }
 
+func (h *ChatHandler) availableModelsErrorSuffix(p keystore.Principal) string {
+	names := h.r.AllModels()
+	available := make([]string, 0, len(names))
+	for _, name := range names {
+		if p.Allows(name) {
+			available = append(available, name)
+		}
+	}
+	sort.Strings(available)
+	if len(available) == 0 {
+		return ". No models available for this key."
+	}
+	if len(available) > maxModelsInError {
+		available = append(available[:maxModelsInError], "...")
+	}
+	return ". Available models: " + strings.Join(available, ", ")
+}
+
 func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	start := time.Now()
 	raw, err := io.ReadAll(req.Body)
@@ -143,7 +166,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		// Pre-resolution reject: model is still attacker-controlled → sentinel label.
 		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 403, time.Since(start).Seconds(), 0)
 		tracing.SetStatus(span, false, "model not allowed")
-		writeErr(w, 403, "permission_error", "model not allowed for this key: "+canonical.Model)
+		writeErr(w, 403, "permission_error", "model not allowed for this key: "+canonical.Model+h.availableModelsErrorSuffix(p))
 		return
 	}
 	chain, st, err := h.r.ResolveChain(canonical.Model)
@@ -152,7 +175,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		// Pre-resolution reject: model is still attacker-controlled → sentinel label.
 		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 404, time.Since(start).Seconds(), 0)
 		tracing.SetStatus(span, false, "unknown model")
-		writeErr(w, 404, "not_found_error", "unknown model: "+canonical.Model)
+		writeErr(w, 404, "not_found_error", "unknown model: "+canonical.Model+h.availableModelsErrorSuffix(p))
 		return
 	}
 	// Team-record fresh lookup (D6/D7, ADR-016 pattern): one call reused below

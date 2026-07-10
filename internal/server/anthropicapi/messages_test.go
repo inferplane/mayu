@@ -89,6 +89,91 @@ func TestMessagesUnknownModel(t *testing.T) {
 	}
 }
 
+// Task 1: an unknown-model 404 must list the models the key may use, so a
+// caller who fat-fingered a model name (tickets row 25/41/52) can self-correct.
+func TestMessages404ListsAvailableModels(t *testing.T) {
+	provs := map[string]providers.Provider{"p": mockprovider.New("claude-sonnet-4-6")}
+	models := map[string]config.ModelConfig{
+		"claude-sonnet-4-6": {Targets: []config.Target{{Provider: "p", Model: "claude-sonnet-4-6"}}},
+		"claude-opus-4-7":   {Targets: []config.Target{{Provider: "p", Model: "claude-opus-4-7"}}},
+	}
+	h := NewMessagesHandler(router.New(holderFor(provs, models)))
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-9","messages":[]}`))
+	rec := httptest.NewRecorder()
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik_secret", Team: "t", AllowedModels: []string{"*"}})
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != 404 {
+		t.Fatalf("want 404, got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"not_found_error"`) {
+		t.Fatalf("error type must stay not_found_error: %s", body)
+	}
+	if !strings.Contains(body, "claude-sonnet-4-6") || !strings.Contains(body, "claude-opus-4-7") {
+		t.Fatalf("404 must list available models: %s", body)
+	}
+	if strings.Contains(body, "ik_secret") {
+		t.Fatalf("404 body must not leak key id: %s", body)
+	}
+}
+
+// The available list is filtered by the key's allow-list — a model the key
+// can't use is not advertised.
+func TestMessages404FiltersByAllowList(t *testing.T) {
+	provs := map[string]providers.Provider{"p": mockprovider.New("claude-sonnet-4-6")}
+	models := map[string]config.ModelConfig{
+		"claude-sonnet-4-6": {Targets: []config.Target{{Provider: "p", Model: "claude-sonnet-4-6"}}},
+		"secret-model":      {Targets: []config.Target{{Provider: "p", Model: "secret-model"}}},
+	}
+	h := NewMessagesHandler(router.New(holderFor(provs, models)))
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-9","messages":[]}`))
+	rec := httptest.NewRecorder()
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik", Team: "t", AllowedModels: []string{"claude-sonnet-4-6"}})
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	body := rec.Body.String()
+	if strings.Contains(body, "secret-model") {
+		t.Fatalf("404 must not list models outside the allow-list: %s", body)
+	}
+	if !strings.Contains(body, "claude-sonnet-4-6") {
+		t.Fatalf("404 must list allowed models: %s", body)
+	}
+}
+
+// A key allowed no configured model gets an explicit message, not a dangling list.
+func TestMessages404EmptyAvailable(t *testing.T) {
+	h := NewMessagesHandler(testRouter())
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-9","messages":[]}`))
+	rec := httptest.NewRecorder()
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik", Team: "t", AllowedModels: []string{"nothing-matches"}})
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if !strings.Contains(rec.Body.String(), "No models available for this key") {
+		t.Fatalf("empty allow-list must yield explicit message: %s", rec.Body.String())
+	}
+}
+
+// F5: the 403 "model not allowed" branch also lists what the key CAN use.
+func TestMessages403ListsAvailableModels(t *testing.T) {
+	provs := map[string]providers.Provider{"p": mockprovider.New("claude-sonnet-4-6")}
+	models := map[string]config.ModelConfig{
+		"claude-sonnet-4-6": {Targets: []config.Target{{Provider: "p", Model: "claude-sonnet-4-6"}}},
+	}
+	h := NewMessagesHandler(router.New(holderFor(provs, models)))
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-opus-4-7","messages":[]}`))
+	rec := httptest.NewRecorder()
+	ctx := principal.With(req.Context(), keystore.Principal{KeyID: "ik", Team: "t", AllowedModels: []string{"claude-sonnet-4-6"}})
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	if rec.Code != 403 {
+		t.Fatalf("want 403, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "claude-sonnet-4-6") {
+		t.Fatalf("403 must list available models: %s", rec.Body.String())
+	}
+}
+
 type errStreamProvider struct{}
 
 func (errStreamProvider) Name() string               { return "errstream" }
