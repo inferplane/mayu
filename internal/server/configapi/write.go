@@ -8,8 +8,10 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/config"
@@ -34,12 +36,14 @@ type secretRefWrite struct {
 // ProviderWrite is the register/replace DTO. It has NO field that can hold a
 // secret value — only the ref (env name / file path) and the bedrock IAM mode.
 type ProviderWrite struct {
-	Type       string          `json:"type"`
-	BaseURL    string          `json:"base_url,omitempty"`
-	Region     string          `json:"region,omitempty"`
-	Auth       authWrite       `json:"auth,omitempty"`
-	APIKeyRef  *secretRefWrite `json:"api_key_ref,omitempty"`
-	AuthHeader string          `json:"auth_header,omitempty"`
+	Type             string          `json:"type"`
+	BaseURL          string          `json:"base_url,omitempty"`
+	Region           string          `json:"region,omitempty"`
+	Auth             authWrite       `json:"auth,omitempty"`
+	APIKeyRef        *secretRefWrite `json:"api_key_ref,omitempty"`
+	AuthHeader       string          `json:"auth_header,omitempty"`
+	GuardrailID      string          `json:"guardrail_id,omitempty"`
+	GuardrailVersion string          `json:"guardrail_version,omitempty"`
 }
 
 type authWrite struct {
@@ -99,10 +103,34 @@ func ParseProviderWrite(name string, body []byte) (providerstore.ProviderRow, er
 			return zero, fmt.Errorf("auth_header must be %q or %q, got %q", "x-api-key", "bearer", w.AuthHeader)
 		}
 	}
+	if len(w.GuardrailID) > 2048 {
+		return zero, fmt.Errorf("guardrail_id exceeds 2048 bytes")
+	}
+	for _, r := range w.GuardrailID {
+		if unicode.IsControl(r) {
+			return zero, fmt.Errorf("guardrail_id must not contain control characters")
+		}
+	}
+	if w.GuardrailID != "" && strings.TrimSpace(w.GuardrailID) == "" {
+		return zero, fmt.Errorf("guardrail_id must not be whitespace-only")
+	}
+	if w.GuardrailVersion != "" && w.GuardrailID == "" {
+		return zero, fmt.Errorf("guardrail_version set without guardrail_id")
+	}
+	if w.GuardrailVersion != "" && w.GuardrailVersion != "DRAFT" {
+		n, err := strconv.Atoi(w.GuardrailVersion)
+		if err != nil || n < 1 || strconv.Itoa(n) != w.GuardrailVersion {
+			return zero, fmt.Errorf("guardrail_version must be \"\", \"DRAFT\", or a positive integer with no leading zero/sign, got %q", w.GuardrailVersion)
+		}
+	}
+	if w.GuardrailID != "" && w.Type != "bedrock" {
+		return zero, fmt.Errorf("guardrail_id is only meaningful for type %q, got type %q", "bedrock", w.Type)
+	}
 
 	row := providerstore.ProviderRow{
 		Name: name, Type: w.Type, BaseURL: w.BaseURL, Region: w.Region,
 		AuthMode: w.Auth.Mode, AuthProfile: w.Auth.Profile, AuthHeader: w.AuthHeader,
+		GuardrailID: w.GuardrailID, GuardrailVersion: w.GuardrailVersion,
 	}
 	if w.APIKeyRef != nil {
 		// Validate the ref SHAPE through the shared guard (config.ValidateSecretRef

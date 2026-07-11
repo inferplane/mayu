@@ -2,6 +2,7 @@ package configapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -120,6 +121,76 @@ func TestParseProviderWriteRejectsBothRefs(t *testing.T) {
 	body := []byte(`{"type":"anthropic","api_key_ref":{"env":"K","file":"/secret"}}`)
 	if _, err := ParseProviderWrite("p", body); err == nil {
 		t.Fatal("setting both env and file refs must be rejected")
+	}
+}
+
+func TestParseProviderWriteCarriesGuardrail(t *testing.T) {
+	body := []byte(`{"type":"bedrock","region":"us-west-2","guardrail_id":"gr-abc","guardrail_version":"3"}`)
+	row, err := ParseProviderWrite("bedrock-us", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.GuardrailID != "gr-abc" || row.GuardrailVersion != "3" {
+		t.Fatalf("guardrail fields not carried into the row: %+v", row)
+	}
+}
+
+func TestParseProviderWriteRejectsGuardrailVersionWithoutID(t *testing.T) {
+	body := []byte(`{"type":"bedrock","guardrail_version":"3"}`)
+	_, err := ParseProviderWrite("p", body)
+	if err == nil {
+		t.Fatal("guardrail_version without guardrail_id must be rejected")
+	}
+	if !strings.Contains(err.Error(), "guardrail_version") {
+		t.Fatalf("expected a guardrail_version-specific error, got: %v", err)
+	}
+}
+
+func TestParseProviderWriteRejectsMalformedGuardrailVersion(t *testing.T) {
+	for _, version := range []string{"latest", "0", "01", "+1"} {
+		body := []byte(`{"type":"bedrock","guardrail_id":"gr-abc","guardrail_version":"` + version + `"}`)
+		if _, err := ParseProviderWrite("p", body); err == nil {
+			t.Fatalf("guardrail_version %q: expected rejection", version)
+		}
+	}
+	for _, version := range []string{"", "DRAFT", "1", "42"} {
+		body := []byte(`{"type":"bedrock","guardrail_id":"gr-abc","guardrail_version":"` + version + `"}`)
+		if _, err := ParseProviderWrite("p", body); err != nil {
+			t.Fatalf("guardrail_version %q: unexpected rejection: %v", version, err)
+		}
+	}
+}
+
+func TestParseProviderWriteRejectsGuardrailOnNonBedrockType(t *testing.T) {
+	body := []byte(`{"type":"anthropic","guardrail_id":"gr-abc"}`)
+	_, err := ParseProviderWrite("p", body)
+	if err == nil {
+		t.Fatal("guardrail_id on a non-bedrock type must be rejected")
+	}
+	if !strings.Contains(err.Error(), `only meaningful for type "bedrock"`) {
+		t.Fatalf("expected the specific bedrock-only error message, got: %v", err)
+	}
+}
+
+func TestParseProviderWriteRejectsGuardrailIDShape(t *testing.T) {
+	cases := []struct {
+		name string
+		id   string
+	}{
+		{"too long", strings.Repeat("g", 2049)},
+		{"control char", "grabc"}, // json.Marshal below escapes this correctly; a raw byte here would break JSON syntax
+		{"whitespace-only", " "},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			body, err := json.Marshal(map[string]string{"type": "bedrock", "guardrail_id": c.id})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ParseProviderWrite("p", body); err == nil {
+				t.Fatalf("guardrail_id %q: expected rejection", c.id)
+			}
+		})
 	}
 }
 
