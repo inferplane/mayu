@@ -84,6 +84,19 @@ func TestViewAuthStrings(t *testing.T) {
 	}
 }
 
+// TestViewFromEchoesGuardrailFields: guardrail_id/guardrail_version are not
+// secrets (same category as Region) and must be echoed back for the console
+// to prefill an edit.
+func TestViewFromEchoesGuardrailFields(t *testing.T) {
+	providers := map[string]config.ProviderConfig{
+		"bedrock-us": {Type: "bedrock", Region: "us-west-2", GuardrailID: "gr-abc", GuardrailVersion: "3"},
+	}
+	v := ViewFrom(providers, nil)
+	if len(v.Providers) != 1 || v.Providers[0].GuardrailID != "gr-abc" || v.Providers[0].GuardrailVersion != "3" {
+		t.Fatalf("guardrail fields not echoed: %+v", v.Providers)
+	}
+}
+
 func TestViewProvidersAndModelsSorted(t *testing.T) {
 	// Deterministic order (maps are unordered) so the console renders stably.
 	providers := map[string]config.ProviderConfig{"zeta": {Type: "anthropic"}, "alpha": {Type: "bedrock"}}

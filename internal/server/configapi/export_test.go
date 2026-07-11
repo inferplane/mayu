@@ -61,6 +61,34 @@ func TestExportReParsesAsConfig(t *testing.T) {
 	}
 }
 
+// TestExportIncludesGuardrailFields pins export's genuinely zero-code-diff
+// guardrail behavior against a future refactor: ExportDocFrom serializes
+// config.ProviderConfig directly, which already carries the json-tagged
+// GuardrailID/GuardrailVersion fields, so a DB-registered bedrock provider's
+// guardrail must survive export → re-parse untouched (plan-gate round 1 finding).
+func TestExportIncludesGuardrailFields(t *testing.T) {
+	snapshot := func() ExportDoc {
+		return ExportDocFrom(
+			map[string]config.ProviderConfig{
+				"bedrock-us": {Type: "bedrock", Region: "us-west-2", GuardrailID: "gr-abc", GuardrailVersion: "3"},
+			},
+			nil,
+		)
+	}
+	h := ExportHandler(snapshot)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/admin/config/export", nil))
+
+	var cfg config.Config
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("export does not re-parse as config: %v", err)
+	}
+	p, ok := cfg.Providers["bedrock-us"]
+	if !ok || p.GuardrailID != "gr-abc" || p.GuardrailVersion != "3" {
+		t.Fatalf("export lost guardrail fields: %+v", p)
+	}
+}
+
 func TestExportRejectsWrite(t *testing.T) {
 	h := ExportHandler(exportSnapshot)
 	rec := httptest.NewRecorder()
