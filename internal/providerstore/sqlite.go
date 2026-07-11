@@ -17,11 +17,12 @@ type SQLiteStore struct{ db *sql.DB }
 
 // schema — TEXT-only, Postgres-portable. The providers table has NO secret
 // column: api_key_ref_env / api_key_ref_file hold the REFERENCE, never a value.
-// auth_header is included directly here (not just via the migration below) so
-// a FRESH database gets the canonical shape in one DDL instead of always
-// taking the ALTER TABLE path — same reasoning as the keystore's governance
-// columns. ensureSchema still runs the migration too, so it's a no-op on a
-// fresh DB but required for one created before this column existed.
+// auth_header and guardrail fields are included directly here (not just via the
+// migration below) so a FRESH database gets the canonical shape in one DDL
+// instead of always taking the ALTER TABLE path — same reasoning as the
+// keystore's governance columns. ensureSchema still runs the migrations too,
+// so they're a no-op on a fresh DB but required for one created before these
+// columns existed.
 const schema = `
 CREATE TABLE IF NOT EXISTS providers (
     name             TEXT PRIMARY KEY,
@@ -32,7 +33,9 @@ CREATE TABLE IF NOT EXISTS providers (
     auth_profile     TEXT NOT NULL DEFAULT '',
     api_key_ref_env  TEXT NOT NULL DEFAULT '',
     api_key_ref_file TEXT NOT NULL DEFAULT '',
-    auth_header      TEXT NOT NULL DEFAULT ''
+    auth_header       TEXT NOT NULL DEFAULT '',
+    guardrail_id      TEXT NOT NULL DEFAULT '',
+    guardrail_version TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS model_targets (
     model    TEXT NOT NULL,
@@ -134,6 +137,8 @@ func ensureSchema(db *sql.DB) error {
 
 	columns := []struct{ name, ddl string }{
 		{"auth_header", `ALTER TABLE providers ADD COLUMN auth_header TEXT NOT NULL DEFAULT ''`},
+		{"guardrail_id", `ALTER TABLE providers ADD COLUMN guardrail_id TEXT NOT NULL DEFAULT ''`},
+		{"guardrail_version", `ALTER TABLE providers ADD COLUMN guardrail_version TEXT NOT NULL DEFAULT ''`},
 	}
 	for _, c := range columns {
 		if existing[c.name] {
@@ -153,14 +158,15 @@ func ensureSchema(db *sql.DB) error {
 
 func (s *SQLiteStore) UpsertProvider(ctx context.Context, p ProviderRow) error {
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO providers (name, type, base_url, region, auth_mode, auth_profile, api_key_ref_env, api_key_ref_file, auth_header)
-VALUES (?,?,?,?,?,?,?,?,?)
+INSERT INTO providers (name, type, base_url, region, auth_mode, auth_profile, api_key_ref_env, api_key_ref_file, auth_header, guardrail_id, guardrail_version)
+VALUES (?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(name) DO UPDATE SET
     type=excluded.type, base_url=excluded.base_url, region=excluded.region,
     auth_mode=excluded.auth_mode, auth_profile=excluded.auth_profile,
     api_key_ref_env=excluded.api_key_ref_env, api_key_ref_file=excluded.api_key_ref_file,
-    auth_header=excluded.auth_header`,
-		p.Name, p.Type, p.BaseURL, p.Region, p.AuthMode, p.AuthProfile, p.APIKeyRefEnv, p.APIKeyRefFile, p.AuthHeader)
+    auth_header=excluded.auth_header,
+    guardrail_id=excluded.guardrail_id, guardrail_version=excluded.guardrail_version`,
+		p.Name, p.Type, p.BaseURL, p.Region, p.AuthMode, p.AuthProfile, p.APIKeyRefEnv, p.APIKeyRefFile, p.AuthHeader, p.GuardrailID, p.GuardrailVersion)
 	if err != nil {
 		return fmt.Errorf("providerstore: upsert: %w", err)
 	}
@@ -170,9 +176,9 @@ ON CONFLICT(name) DO UPDATE SET
 func (s *SQLiteStore) GetProvider(ctx context.Context, name string) (ProviderRow, error) {
 	var p ProviderRow
 	err := s.db.QueryRowContext(ctx, `
-SELECT name, type, base_url, region, auth_mode, auth_profile, api_key_ref_env, api_key_ref_file, auth_header
+SELECT name, type, base_url, region, auth_mode, auth_profile, api_key_ref_env, api_key_ref_file, auth_header, guardrail_id, guardrail_version
 FROM providers WHERE name = ?`, name).
-		Scan(&p.Name, &p.Type, &p.BaseURL, &p.Region, &p.AuthMode, &p.AuthProfile, &p.APIKeyRefEnv, &p.APIKeyRefFile, &p.AuthHeader)
+		Scan(&p.Name, &p.Type, &p.BaseURL, &p.Region, &p.AuthMode, &p.AuthProfile, &p.APIKeyRefEnv, &p.APIKeyRefFile, &p.AuthHeader, &p.GuardrailID, &p.GuardrailVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ProviderRow{}, ErrNotFound
 	}
@@ -184,7 +190,7 @@ FROM providers WHERE name = ?`, name).
 
 func (s *SQLiteStore) ListProviders(ctx context.Context) ([]ProviderRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT name, type, base_url, region, auth_mode, auth_profile, api_key_ref_env, api_key_ref_file, auth_header
+SELECT name, type, base_url, region, auth_mode, auth_profile, api_key_ref_env, api_key_ref_file, auth_header, guardrail_id, guardrail_version
 FROM providers ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -193,7 +199,7 @@ FROM providers ORDER BY name`)
 	var out []ProviderRow
 	for rows.Next() {
 		var p ProviderRow
-		if err := rows.Scan(&p.Name, &p.Type, &p.BaseURL, &p.Region, &p.AuthMode, &p.AuthProfile, &p.APIKeyRefEnv, &p.APIKeyRefFile, &p.AuthHeader); err != nil {
+		if err := rows.Scan(&p.Name, &p.Type, &p.BaseURL, &p.Region, &p.AuthMode, &p.AuthProfile, &p.APIKeyRefEnv, &p.APIKeyRefFile, &p.AuthHeader, &p.GuardrailID, &p.GuardrailVersion); err != nil {
 			return nil, err
 		}
 		out = append(out, p)

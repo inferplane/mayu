@@ -124,6 +124,92 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 	}
 }
 
+func TestProviderRoundTripGuardrail(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	row := ProviderRow{
+		Name: "bedrock-prod", Type: "bedrock", Region: "us-west-2", AuthMode: "irsa",
+		GuardrailID: "gr-abc123", GuardrailVersion: "3",
+	}
+	if err := s.UpsertProvider(ctx, row); err != nil {
+		t.Fatalf("UpsertProvider: %v", err)
+	}
+	got, err := s.GetProvider(ctx, "bedrock-prod")
+	if err != nil {
+		t.Fatalf("GetProvider: %v", err)
+	}
+	if got.GuardrailID != "gr-abc123" || got.GuardrailVersion != "3" {
+		t.Fatalf("guardrail fields not round-tripped: got %+v", got)
+	}
+	list, err := s.ListProviders(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].GuardrailID != "gr-abc123" || list[0].GuardrailVersion != "3" {
+		t.Fatalf("ListProviders lost guardrail fields: %+v", list)
+	}
+}
+
+// TestMigrationAddsGuardrailColumns opens a store whose providers table
+// predates the guardrail_id/guardrail_version columns (created with a schema
+// that already has auth_header, mirroring where a real deployment would be
+// mid-upgrade) and confirms OpenSQLite adds them rather than failing, and that
+// the store is immediately usable with the new columns.
+func TestMigrationAddsGuardrailColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const oldSchema = `
+CREATE TABLE providers (
+    name             TEXT PRIMARY KEY,
+    type             TEXT NOT NULL,
+    base_url         TEXT NOT NULL DEFAULT '',
+    region           TEXT NOT NULL DEFAULT '',
+    auth_mode        TEXT NOT NULL DEFAULT '',
+    auth_profile     TEXT NOT NULL DEFAULT '',
+    api_key_ref_env  TEXT NOT NULL DEFAULT '',
+    api_key_ref_file TEXT NOT NULL DEFAULT '',
+    auth_header      TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE model_targets (model TEXT, position INTEGER, provider TEXT, model_id TEXT, api TEXT, PRIMARY KEY (model, position));
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+`
+	if _, err := old.Exec(oldSchema); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`INSERT INTO providers (name, type) VALUES ('pre-existing', 'bedrock')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("OpenSQLite on pre-migration schema: %v", err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+
+	got, err := s.GetProvider(ctx, "pre-existing")
+	if err != nil {
+		t.Fatalf("GetProvider on migrated row: %v", err)
+	}
+	if got.GuardrailID != "" || got.GuardrailVersion != "" {
+		t.Fatalf("migrated row should default guardrail fields to empty, got %+v", got)
+	}
+
+	if err := s.UpsertProvider(ctx, ProviderRow{Name: "new", Type: "bedrock", GuardrailID: "gr-x", GuardrailVersion: "DRAFT"}); err != nil {
+		t.Fatalf("UpsertProvider after migration: %v", err)
+	}
+	got2, err := s.GetProvider(ctx, "new")
+	if err != nil || got2.GuardrailID != "gr-x" || got2.GuardrailVersion != "DRAFT" {
+		t.Fatalf("post-migration write: got=%+v err=%v", got2, err)
+	}
+}
+
 func TestProviderUpsertReplaces(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

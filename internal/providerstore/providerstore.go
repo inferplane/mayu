@@ -38,6 +38,12 @@ type ProviderRow struct {
 	// AuthHeader selects the anthropic provider's credential header
 	// ("x-api-key" default, "bearer") — see config.ProviderConfig.AuthHeader.
 	AuthHeader string
+	// GuardrailID selects the bedrock provider's default guardrail ID — see
+	// config.ProviderConfig.GuardrailID.
+	GuardrailID string
+	// GuardrailVersion selects the bedrock provider's default guardrail version
+	// — see config.ProviderConfig.GuardrailVersion.
+	GuardrailVersion string
 }
 
 // Target is one entry in a model's ordered fallback chain. It mirrors
