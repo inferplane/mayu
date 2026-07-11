@@ -366,9 +366,9 @@ function routeActions(m) {
 const PROVIDER_FIELDS = {
   anthropic: ["pf-baseurl", "pf-refkind", "pf-refval"],
   openai_compatible: ["pf-baseurl", "pf-refkind", "pf-refval"],
-  bedrock: ["pf-region", "pf-authmode"],
+  bedrock: ["pf-region", "pf-authmode", "pf-guardrail-id", "pf-guardrail-version"],
 };
-const PROVIDER_FIELD_IDS = ["pf-baseurl", "pf-refkind", "pf-refval", "pf-region", "pf-authmode"];
+const PROVIDER_FIELD_IDS = ["pf-baseurl", "pf-refkind", "pf-refval", "pf-region", "pf-authmode", "pf-guardrail-id", "pf-guardrail-version"];
 
 // Registered providers from the last topology load, used to populate the route
 // target dropdown + typeahead (ADR-014 D4). catalogCache memoizes type→models.
@@ -408,6 +408,8 @@ function fillProviderForm(p) {
   $("pf-baseurl").value = (p.base_url && p.base_url !== "(default)") ? p.base_url : "";
   $("pf-region").value = p.region || "";
   $("pf-authmode").value = "";
+  $("pf-guardrail-id").value = p.guardrail_id || "";
+  $("pf-guardrail-version").value = p.guardrail_version || "";
   $("pf-refkind").value = "none";
   $("pf-refval").value = "";
   const a = p.auth || "";
@@ -485,6 +487,8 @@ function providerFormBody() {
   const bu = $("pf-baseurl").value.trim(); if (bu) body.base_url = bu;
   const region = $("pf-region").value.trim(); if (region) body.region = region;
   const mode = $("pf-authmode").value.trim(); if (mode) body.auth = { mode: mode };
+  if ($("pf-guardrail-id").value.trim()) body.guardrail_id = $("pf-guardrail-id").value.trim();
+  if ($("pf-guardrail-version").value.trim()) body.guardrail_version = $("pf-guardrail-version").value.trim();
   const kind = $("pf-refkind").value, val = $("pf-refval").value.trim();
   if (kind === "env" && val) body.api_key_ref = { env: val };
   else if (kind === "file" && val) body.api_key_ref = { file: val };
