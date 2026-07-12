@@ -9,6 +9,8 @@ import (
 	"fmt"
 )
 
+var ErrRewrapFailed = errors.New("bodystore: rewrap failed")
+
 // ParseMasterKey decodes a 64-hex-char (32-byte) AES-256 key, the shape
 // audit.log_bodies.key_ref must resolve to. The error never echoes the input.
 func ParseMasterKey(hexKey string) ([32]byte, error) {
@@ -64,6 +66,24 @@ func open(key [32]byte, s sealed) ([]byte, error) {
 		return nil, fmt.Errorf("bodystore: decrypt: %w", err)
 	}
 	return pt, nil
+}
+
+// RewrapKey rewraps a data key from oldMaster to newMaster using only the
+// wrapped-key columns; the request/response ciphertext is never touched by this
+// function. It never distinguishes wrong-key from tampered-key from
+// malformed-length: all unwrap problems become ErrRewrapFailed.
+func RewrapKey(oldMaster, newMaster [32]byte, nonce, ct []byte) (newNonce, newCT []byte, err error) {
+	dataKeyBytes, err := open(oldMaster, sealed{nonce: nonce, ct: ct})
+	if err != nil || len(dataKeyBytes) != 32 {
+		return nil, nil, ErrRewrapFailed
+	}
+	var dataKey [32]byte
+	copy(dataKey[:], dataKeyBytes)
+	s, err := seal(newMaster, dataKey[:])
+	if err != nil {
+		return nil, nil, err
+	}
+	return s.nonce, s.ct, nil
 }
 
 // envelope is the per-record encryption state: a fresh random data key wraps
