@@ -264,6 +264,19 @@ function emptyRow(span, text) {
 /* ---------- providers (topology view, ADR-005; UI-write when a store is
    enabled, ADR-008) ---------- */
 
+// fetchProviderHealth returns the periodic background prober's current
+// per-provider status map (ADR-014 deferred item), or {} if the
+// capability is off or the fetch fails.
+async function fetchProviderHealth() {
+  if (!capOn("provider_auto_health")) return {};
+  try {
+    const out = await api("GET", "/admin/providers/health", null, true);
+    return (out && out !== DISABLED) ? (out.providers || {}) : {};
+  } catch {
+    return {};
+  }
+}
+
 async function refreshProviders() {
   let view;
   try {
@@ -287,6 +300,7 @@ async function refreshProviders() {
   const pbody = $("providers-table").querySelector("tbody");
   pbody.textContent = "";
   const provs = view.providers || [];
+  const autoHealth = await fetchProviderHealth();
   if (!provs.length) {
     pbody.appendChild(emptyRow(writable ? 6 : 4, "no providers configured"));
   } else {
@@ -298,7 +312,7 @@ async function refreshProviders() {
       tr.appendChild(td(p.auth)); // ref name / IAM mode — never a secret value
       if (writable) {
         const statusCell = document.createElement("td");
-        probeBadge(statusCell, probeCacheGet(p.name));
+        probeBadge(statusCell, probeCacheGet(p.name) || autoHealth[p.name] || null);
         tr.appendChild(statusCell);
         tr.appendChild(providerActions(p));
       }
