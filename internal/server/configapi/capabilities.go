@@ -25,6 +25,7 @@ type Capabilities struct {
 	RegionPolicy        bool   `json:"region_policy"`
 	Guardrails          bool   `json:"guardrails"`
 	BudgetAlerts        bool   `json:"budget_alerts"`
+	ProviderAutoHealth  bool   `json:"provider_auto_health"`
 }
 
 // CapabilitiesHandler serves the capability map (GET only, JSON). It is mounted

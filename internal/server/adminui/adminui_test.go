@@ -380,6 +380,24 @@ func TestAdminUI_budgetAlertsWired(t *testing.T) {
 	}
 }
 
+// TestAdminUI_providerAutoHealthWired (ADR-014 deferred item): the providers
+// table falls back to the periodic background prober's status for a
+// provider the operator hasn't manually tested this page-session, via a
+// token-gated call to the new read endpoint — never a bare fetch (CSP-adjacent
+// convention already enforced for /admin/alerts/recent).
+func TestAdminUI_providerAutoHealthWired(t *testing.T) {
+	_, js := get(t, "/app.js")
+	if !strings.Contains(js, `api("GET", "/admin/providers/health", null, true)`) {
+		t.Error("app.js missing token-gated call to /admin/providers/health")
+	}
+	if strings.Contains(js, `fetch("/admin/providers/health`) || strings.Contains(js, "fetch(`/admin/providers/health") {
+		t.Error("app.js bare-fetches /admin/providers/health (must use api())")
+	}
+	if !strings.Contains(js, `capOn("provider_auto_health")`) {
+		t.Error("app.js does not gate the auto-health fetch on the provider_auto_health capability")
+	}
+}
+
 // TestAdminUI_alertsTableShowsKeyColumn (ADR-017 per-key follow-up): without
 // this, a key-scoped fire renders indistinguishable from a team-level one in
 // the console (same columns, Team still populated) — a real console-

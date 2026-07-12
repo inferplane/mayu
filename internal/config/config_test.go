@@ -942,3 +942,49 @@ func TestLoadModelAliases(t *testing.T) {
 		t.Fatal("alias colliding with a model name must be rejected")
 	}
 }
+
+// --- provider_health_check block (ADR-014 deferred item) ---
+
+func TestLoadRaw_ProviderHealthCheckNilIsValid(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "ok.json")
+	os.WriteFile(f, []byte(`{}`), 0o600)
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProviderHealthCheck != nil {
+		t.Fatal("provider_health_check should be nil when absent")
+	}
+}
+
+func TestLoadRaw_ProviderHealthCheckValidInterval(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "ok.json")
+	os.WriteFile(f, []byte(`{"provider_health_check":{"interval":"50ms"}}`), 0o600)
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ProviderHealthCheck == nil || cfg.ProviderHealthCheck.Interval != "50ms" {
+		t.Fatalf("provider_health_check not parsed: %+v", cfg.ProviderHealthCheck)
+	}
+}
+
+func TestLoadRaw_ProviderHealthCheckMalformedInterval(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	os.WriteFile(f, []byte(`{"provider_health_check":{"interval":"not-a-duration"}}`), 0o600)
+	if _, err := Load(f); err == nil {
+		t.Fatal("malformed provider_health_check.interval must be rejected")
+	}
+}
+
+func TestLoadRaw_ProviderHealthCheckEmptyIntervalRejected(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	os.WriteFile(f, []byte(`{"provider_health_check":{}}`), 0o600)
+	if _, err := Load(f); err == nil {
+		t.Fatal("present-but-empty provider_health_check.interval must be rejected (else time.NewTicker(0) panics at startup)")
+	}
+}

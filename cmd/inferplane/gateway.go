@@ -35,38 +35,41 @@ import (
 	"github.com/inferplane/inferplane/internal/server/configapi"
 	"github.com/inferplane/inferplane/internal/tracing"
 	"github.com/inferplane/inferplane/pkg/ulid"
+	"github.com/inferplane/inferplane/providers"
 )
 
 // gateway is the fully wired serve assembly with its listeners already bound.
 // Binding in newGateway (rather than inside serve) makes ":0" configs testable:
 // the OS-chosen ports are discoverable via DataAddr/AdminAddr before traffic.
 type gateway struct {
-	cfgPath       string
-	cfg           *config.Config
-	store         keystore.Store
-	aud           *audit.Writer
-	holder        *live.Holder
-	router        *router.Router
-	pstore        providerstore.Store         // nil unless provider_store is configured (ADR-008)
-	pgstoreQ      *pgstore.Store              // nil unless analytics.mode_b is configured (ADR-015)
-	pgstoreAgg    *pgstore.Aggregator         // nil unless Mode B aggregation is configured
-	analyticsIdx  *analytics.Index            // nil unless the analytics index is enabled (spec §4 / D1)
-	analyticsSink audit.Sink                  // async ingestion sink; drained+closed before analyticsIdx on shutdown
-	otelDown      func(context.Context) error // OTel TracerProvider shutdown (nil unless otel configured, ADR-011)
-	instance      string                      // audit chain instance id (matches the audit Writer)
-	anchorer      audit.Anchorer              // nil unless audit.anchor is configured (ADR-012)
-	anchorEvery   time.Duration               // anchor interval
-	anchorLast    atomic.Int64                // highest record count successfully anchored (shared: worker + finalAnchor)
-	metrics       *metrics.Metrics            // for the anchor-failure counter
-	bodyStore     bodystore.Store             // nil unless audit.log_bodies is configured (D4, ADR-018)
-	bodyRec       *bodystore.Recorder         // nil unless audit.log_bodies is configured
-	bodyMaxBytes  int64                       // total body-store size cap, for the purge worker
-	notifier      *alert.Notifier             // nil unless budget_alerts is configured (D5b, ADR-017)
-	reloadMu      sync.Mutex                  // serializes reloads AND UI writes (concurrent SIGHUPs/triggers)
-	dataLn        net.Listener
-	adminLn       net.Listener
-	dataSrv       *http.Server
-	adminSrv      *http.Server
+	cfgPath          string
+	cfg              *config.Config
+	store            keystore.Store
+	aud              *audit.Writer
+	holder           *live.Holder
+	router           *router.Router
+	pstore           providerstore.Store         // nil unless provider_store is configured (ADR-008)
+	pgstoreQ         *pgstore.Store              // nil unless analytics.mode_b is configured (ADR-015)
+	pgstoreAgg       *pgstore.Aggregator         // nil unless Mode B aggregation is configured
+	analyticsIdx     *analytics.Index            // nil unless the analytics index is enabled (spec §4 / D1)
+	analyticsSink    audit.Sink                  // async ingestion sink; drained+closed before analyticsIdx on shutdown
+	otelDown         func(context.Context) error // OTel TracerProvider shutdown (nil unless otel configured, ADR-011)
+	instance         string                      // audit chain instance id (matches the audit Writer)
+	anchorer         audit.Anchorer              // nil unless audit.anchor is configured (ADR-012)
+	anchorEvery      time.Duration               // anchor interval
+	anchorLast       atomic.Int64                // highest record count successfully anchored (shared: worker + finalAnchor)
+	metrics          *metrics.Metrics            // for the anchor-failure counter
+	bodyStore        bodystore.Store             // nil unless audit.log_bodies is configured (D4, ADR-018)
+	bodyRec          *bodystore.Recorder         // nil unless audit.log_bodies is configured
+	bodyMaxBytes     int64                       // total body-store size cap, for the purge worker
+	notifier         *alert.Notifier             // nil unless budget_alerts is configured (D5b, ADR-017)
+	healthStore      *configapi.HealthStore      // nil unless provider_health_check is configured (ADR-014 deferred item)
+	healthProbeEvery time.Duration               // probe interval
+	reloadMu         sync.Mutex                  // serializes reloads AND UI writes (concurrent SIGHUPs/triggers)
+	dataLn           net.Listener
+	adminLn          net.Listener
+	dataSrv          *http.Server
+	adminSrv         *http.Server
 }
 
 // newGateway loads config and assembles the full serve wiring — metrics,
@@ -277,6 +280,17 @@ func newGateway(cfgPath string) (*gateway, error) {
 		fmt.Println("inferplane: budget alerts enabled")
 	}
 
+	// Periodic provider health probing (ADR-014 deferred item): opt-in, off
+	// unless configured. Iterates the CURRENT live topology on each tick (via
+	// g.holder.Load()), so a hot-reload/UI-write is picked up automatically.
+	var healthStore *configapi.HealthStore
+	var healthProbeEvery time.Duration
+	if phc := cfg.ProviderHealthCheck; phc != nil {
+		healthProbeEvery, _ = time.ParseDuration(phc.Interval) // shape already validated at config load
+		healthStore = configapi.NewHealthStore()
+		fmt.Println("inferplane: periodic provider health checks enabled")
+	}
+
 	// Optional self-TLS for the data plane (design §2.3): non-K8s single-binary
 	// deployments can terminate their own TLS; K8s terminates at ingress/mesh.
 	// The pair must be fully specified or fully empty.
@@ -385,28 +399,30 @@ func newGateway(cfgPath string) (*gateway, error) {
 	}
 
 	g := &gateway{
-		cfgPath:       cfgPath,
-		cfg:           cfg,
-		store:         store,
-		aud:           aud,
-		holder:        holder,
-		router:        r,
-		pstore:        pstore,
-		pgstoreQ:      pgstoreQ,
-		pgstoreAgg:    pgstoreAgg,
-		analyticsIdx:  analyticsIdx,
-		analyticsSink: analyticsSink,
-		otelDown:      otelDown,
-		notifier:      notifier,
-		instance:      inst,
-		anchorer:      anchorer,
-		anchorEvery:   anchorEvery,
-		metrics:       m,
-		bodyStore:     bodyStore,
-		bodyRec:       bodyRec,
-		bodyMaxBytes:  bodyMaxBytes,
-		dataLn:        dataLn,
-		adminLn:       adminLn,
+		cfgPath:          cfgPath,
+		cfg:              cfg,
+		store:            store,
+		aud:              aud,
+		holder:           holder,
+		router:           r,
+		pstore:           pstore,
+		pgstoreQ:         pgstoreQ,
+		pgstoreAgg:       pgstoreAgg,
+		analyticsIdx:     analyticsIdx,
+		analyticsSink:    analyticsSink,
+		otelDown:         otelDown,
+		notifier:         notifier,
+		instance:         inst,
+		anchorer:         anchorer,
+		anchorEvery:      anchorEvery,
+		metrics:          m,
+		bodyStore:        bodyStore,
+		bodyRec:          bodyRec,
+		bodyMaxBytes:     bodyMaxBytes,
+		healthStore:      healthStore,
+		healthProbeEvery: healthProbeEvery,
+		dataLn:           dataLn,
+		adminLn:          adminLn,
 	}
 	// The gateway implements configapi.Writer (build-once-swap-once). Pass it as
 	// the write callback ONLY when a store is configured; nil → writes 405.
@@ -434,11 +450,16 @@ func newGateway(cfgPath string) (*gateway, error) {
 			RegionPolicy:        true, // enforcement path always present (D7, ADR-020) — same rationale as TeamsRecords
 			LogsBodies:          bodyRec != nil,
 			BudgetAlerts:        notifier != nil,
+			ProviderAutoHealth:  healthStore != nil,
 		}
 	}
 	var alertFires func() []alert.Fire
 	if notifier != nil {
 		alertFires = notifier.Recent
+	}
+	var healthSnapshot func() map[string]configapi.HealthRecord
+	if healthStore != nil {
+		healthSnapshot = healthStore.Snapshot
 	}
 	var analyticsQ analyticsapi.Querier
 	if pgstoreQ != nil {
@@ -456,7 +477,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 		}
 		return recs
 	}
-	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, m, writer, liveExport(holder), capabilities, analyticsQ, store, configTeams, alertFires, bodyRec, cfg.Probe.AllowedHosts...)}
+	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, m, writer, liveExport(holder), capabilities, analyticsQ, store, configTeams, alertFires, healthSnapshot, bodyRec, cfg.Probe.AllowedHosts...)}
 	return g, nil
 }
 
@@ -733,6 +754,40 @@ func (g *gateway) bodyPurgeWorker(ctx context.Context, done chan<- struct{}) {
 	}
 }
 
+// healthProbeWorker periodically probes every registered provider's
+// HealthChecker (ADR-014 deferred item). Best-effort -- results are
+// recorded in g.healthStore; nothing is ever fatal.
+func (g *gateway) healthProbeWorker(ctx context.Context, done chan<- struct{}) {
+	defer close(done)
+	t := time.NewTicker(g.healthProbeEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			g.probeAllProviders(ctx)
+		}
+	}
+}
+
+// probeAllProviders iterates the CURRENT live topology (re-Load()'d, so a
+// hot-reload/UI-write between ticks is picked up automatically) and
+// records a HealthCheck result for every provider that implements
+// providers.HealthChecker; a provider that doesn't is silently skipped.
+func (g *gateway) probeAllProviders(ctx context.Context) {
+	for name, p := range g.holder.Load().Providers() {
+		hc, ok := p.(providers.HealthChecker)
+		if !ok {
+			continue
+		}
+		pctx, cancel := context.WithTimeout(ctx, configapi.ProbeTimeout)
+		res := hc.HealthCheck(pctx)
+		cancel()
+		g.healthStore.Set(name, res, time.Now())
+	}
+}
+
 // anchorOnce anchors the current head if the durable count advanced beyond the
 // last SUCCESSFUL anchor (so a failed anchor is retried, never skipped). Failures
 // are logged + counted, never propagated (best-effort).
@@ -875,6 +930,11 @@ func (g *gateway) serve(ctx context.Context) error {
 		bodyPurgeDone = make(chan struct{})
 		go g.bodyPurgeWorker(workerCtx, bodyPurgeDone)
 	}
+	var healthProbeDone chan struct{}
+	if g.healthStore != nil {
+		healthProbeDone = make(chan struct{})
+		go g.healthProbeWorker(workerCtx, healthProbeDone)
+	}
 	defer func() {
 		cancelWorker()
 		<-workerDone
@@ -886,6 +946,9 @@ func (g *gateway) serve(ctx context.Context) error {
 		}
 		if bodyPurgeDone != nil {
 			<-bodyPurgeDone
+		}
+		if healthProbeDone != nil {
+			<-healthProbeDone
 		}
 	}()
 

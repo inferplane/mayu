@@ -29,7 +29,7 @@ func TestCapabilitiesHandler_GET_returnsJSON(t *testing.T) {
 		t.Fatalf("got %+v, want analytics_index=off provider_store=true guardrails=true", got)
 	}
 	// JSON keys must be the snake_case contract the console reads.
-	for _, key := range []string{"analytics_index", "logs_bodies", "teams_records", "key_governance_fields", "provider_store", "region_policy", "guardrails", "budget_alerts"} {
+	for _, key := range []string{"analytics_index", "logs_bodies", "teams_records", "key_governance_fields", "provider_store", "region_policy", "guardrails", "budget_alerts", "provider_auto_health"} {
 		if !strings.Contains(rec.Body.String(), `"`+key+`"`) {
 			t.Fatalf("response missing key %q: %s", key, rec.Body.String())
 		}
