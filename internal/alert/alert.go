@@ -161,7 +161,7 @@ func (n *Notifier) ObserveKey(team, keyID string, spentMicros, limitMicros int64
 	}
 	if crossed == 0 {
 		if prev == 0 {
-			delete(n.firedKey, keyID) // bound map size: nothing armed, no need to remember this team
+			delete(n.firedKey, keyID) // bound map size: nothing armed, no need to remember this key
 		} else {
 			n.firedKey[keyID] = prev
 		}

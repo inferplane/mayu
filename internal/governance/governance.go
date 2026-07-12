@@ -288,8 +288,12 @@ func (g *Governor) Settle(team, keyID string, kp KeyPolicy, provider, model stri
 	}
 	if kp.BudgetMicrosPerMonth > 0 {
 		g.bud.Debit("budget:key:"+keyID, costMicros, 30*24*time.Hour)
-		spent := g.bud.Spent("budget:key:"+keyID, 30*24*time.Hour)
+		// Unlike the team block above, this read has no other consumer (no
+		// per-key /metrics gauge) — skip it entirely when alerting is off,
+		// the common case, to avoid an extra store read on every keyed
+		// request (code-gate MINOR, opus).
 		if g.notifyKeyBudget != nil {
+			spent := g.bud.Spent("budget:key:"+keyID, 30*24*time.Hour)
 			g.notifyKeyBudget(team, keyID, spent, kp.BudgetMicrosPerMonth)
 		}
 	}
