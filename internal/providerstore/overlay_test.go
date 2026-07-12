@@ -122,6 +122,42 @@ func TestOverlayPreservesAuthHeader(t *testing.T) {
 	}
 }
 
+// TestGuardrailRoundTripsThroughRowConversion mirrors
+// TestAuthHeaderRoundTripsThroughRowConversion: a file provider's guardrail
+// fields must survive rowFromProviderConfig → (DB) → providerConfigFromRow.
+func TestGuardrailRoundTripsThroughRowConversion(t *testing.T) {
+	pc := config.ProviderConfig{Type: "bedrock", GuardrailID: "gr-abc", GuardrailVersion: "3"}
+	row := rowFromProviderConfig("bedrock-prod", pc)
+	if row.GuardrailID != "gr-abc" || row.GuardrailVersion != "3" {
+		t.Fatalf("rowFromProviderConfig dropped guardrail fields: %+v", row)
+	}
+	back := providerConfigFromRow(row)
+	if back.GuardrailID != "gr-abc" || back.GuardrailVersion != "3" {
+		t.Fatalf("providerConfigFromRow dropped guardrail fields: %+v", back)
+	}
+}
+
+// TestSeedIfEmptyPreservesGuardrail is the regression test for the bug this
+// plan fixes: rowFromProviderConfig previously dropped GuardrailID/Version
+// entirely, so a config-file-declared bedrock provider's guardrail was
+// silently lost the moment SeedIfEmpty imported it into the DB. This must
+// fail against the pre-fix rowFromProviderConfig and pass after.
+func TestSeedIfEmptyPreservesGuardrail(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	cfg := fileCfg()
+	cfg.Providers["file-prov"] = config.ProviderConfig{
+		Type: "bedrock", Region: "us-west-2", GuardrailID: "gr-seed", GuardrailVersion: "DRAFT",
+	}
+	if err := SeedIfEmpty(ctx, s, cfg); err != nil {
+		t.Fatal(err)
+	}
+	pl, _ := s.ListProviders(ctx)
+	if len(pl) != 1 || pl[0].GuardrailID != "gr-seed" || pl[0].GuardrailVersion != "DRAFT" {
+		t.Fatalf("seed lost the guardrail fields: %+v", pl)
+	}
+}
+
 func TestSeedIfEmptySeedsOnceFromFile(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

@@ -108,9 +108,9 @@ func (s *SQLiteStore) Seed(ctx context.Context, providers []ProviderRow, models 
 
 	for _, p := range providers {
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO providers (name, type, base_url, region, auth_mode, auth_profile, api_key_ref_env, api_key_ref_file, auth_header)
-VALUES (?,?,?,?,?,?,?,?,?)`,
-			p.Name, p.Type, p.BaseURL, p.Region, p.AuthMode, p.AuthProfile, p.APIKeyRefEnv, p.APIKeyRefFile, p.AuthHeader); err != nil {
+INSERT INTO providers (name, type, base_url, region, auth_mode, auth_profile, api_key_ref_env, api_key_ref_file, auth_header, guardrail_id, guardrail_version)
+VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+			p.Name, p.Type, p.BaseURL, p.Region, p.AuthMode, p.AuthProfile, p.APIKeyRefEnv, p.APIKeyRefFile, p.AuthHeader, p.GuardrailID, p.GuardrailVersion); err != nil {
 			return false, fmt.Errorf("providerstore: seed provider %q: %w", p.Name, err)
 		}
 	}

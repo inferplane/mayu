@@ -111,11 +111,22 @@ silently left inconsistent with the spec's eventual shape.
 
 ## Deferred
 
-- `providerstore` (UI-registered providers) guardrail columns / provider-form
-  fields — a DB-registered Bedrock provider gets no *provider-level* default
-  guardrail yet; a team override still applies to it. Needs a
-  `providerstore` column migration + `configapi/write.go` + `overlay.go`
-  changes, scoped out to keep this PR reviewable.
+- ~~`providerstore` (UI-registered providers) guardrail columns / provider-form
+  fields~~ — **implemented** (2026-07-11, `docs/superpowers/plans/2026-07-11-providerstore-guardrail.md`):
+  `providerstore.ProviderRow` carries `GuardrailID`/`GuardrailVersion` (TEXT
+  columns, ALTER-TABLE migration mirroring `auth_header`); `overlay.go`'s
+  `providerConfigFromRow`/`rowFromProviderConfig` thread both fields (this also
+  fixed a real bug — `rowFromProviderConfig` previously dropped them, so a
+  config-file-declared bedrock provider's guardrail was silently lost the
+  moment `SeedIfEmpty` imported it into the DB); `configapi/write.go`'s
+  `ParseProviderWrite` validates guardrail shape/format/type-is-bedrock (same
+  six checks the team path and file-config path each enforce, duplicated
+  per this codebase's established per-surface pattern); `configapi/config.go`'s
+  `ProviderView`/`ViewFrom` echo both fields back (non-secret, console
+  prefill); the admin console's provider form gained `pf-guardrail-id`/
+  `pf-guardrail-version`. A DB-registered bedrock provider can now carry its
+  own default guardrail exactly like a file-config-declared one; a team
+  override still takes precedence when present.
 - `Trace` / `StreamProcessingMode` guardrail knobs (SDK fields left at zero
   value) — add as `Settings`/team-record fields when a real need for guardrail
   trace output appears.

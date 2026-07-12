@@ -409,6 +409,33 @@ func TestAdminUI_guardrailFieldsWired(t *testing.T) {
 	}
 }
 
+// TestAdminUI_providerGuardrailFieldsWired is the provider-form counterpart of
+// TestAdminUI_guardrailFieldsWired (ADR-019 providerstore guardrail).
+func TestAdminUI_providerGuardrailFieldsWired(t *testing.T) {
+	_, html := get(t, "/index.html")
+	for _, id := range []string{`id="pf-guardrail-id"`, `id="pf-guardrail-version"`} {
+		if !strings.Contains(html, id) {
+			t.Errorf("index.html missing guardrail element %s", id)
+		}
+	}
+	for _, banned := range []string{"onclick=", "onsubmit=", "onchange=", "style=", "onload="} {
+		if strings.Contains(html, banned) {
+			t.Errorf("index.html contains inline %q in the provider-form guardrail fields (CSP)", banned)
+		}
+	}
+
+	_, js := get(t, "/app.js")
+	if !strings.Contains(js, `"pf-guardrail-id"`) || !strings.Contains(js, `"pf-guardrail-version"`) {
+		t.Error("app.js does not reference the provider guardrail field ids")
+	}
+	if !strings.Contains(js, `body.guardrail_id = $("pf-guardrail-id").value.trim();`) {
+		t.Error("app.js does not submit guardrail_id in the provider-form handler")
+	}
+	if !strings.Contains(js, `$("pf-guardrail-id").value = p.guardrail_id`) {
+		t.Error("app.js does not prefill guardrail_id when editing a provider")
+	}
+}
+
 // TestAdminUI_regionFieldsWired (D7, ADR-020): the team form carries the
 // allowed_regions input, submits it through the existing PUT /admin/teams/{name}
 // call, and states the fail-closed-on-unlabeled-provider invariant.

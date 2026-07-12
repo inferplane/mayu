@@ -17,11 +17,13 @@ import (
 // of holding a secret value — Auth carries only the ref NAME (env var / file
 // path) or IAM mode, which are operationally essential and not sensitive.
 type ProviderView struct {
-	Name    string `json:"name"`
-	Type    string `json:"type"`
-	BaseURL string `json:"base_url,omitempty"`
-	Region  string `json:"region,omitempty"` // bedrock region (non-secret) — lets the console prefill an edit
-	Auth    string `json:"auth"`
+	Name             string `json:"name"`
+	Type             string `json:"type"`
+	BaseURL          string `json:"base_url,omitempty"`
+	Region           string `json:"region,omitempty"`            // bedrock region (non-secret) — lets the console prefill an edit
+	GuardrailID      string `json:"guardrail_id,omitempty"`      // bedrock Guardrail ID (non-secret) — lets the console prefill an edit
+	GuardrailVersion string `json:"guardrail_version,omitempty"` // bedrock Guardrail version (non-secret) — lets the console prefill an edit
+	Auth             string `json:"auth"`
 }
 
 type TargetView struct {
@@ -54,11 +56,13 @@ func ViewFrom(providers map[string]config.ProviderConfig, models map[string]conf
 	v := View{Providers: make([]ProviderView, 0, len(providers)), Models: make([]ModelView, 0, len(models))}
 	for name, p := range providers {
 		v.Providers = append(v.Providers, ProviderView{
-			Name:    name,
-			Type:    p.Type,
-			BaseURL: p.BaseURL,
-			Region:  p.Region,
-			Auth:    authString(p),
+			Name:             name,
+			Type:             p.Type,
+			BaseURL:          p.BaseURL,
+			Region:           p.Region,
+			GuardrailID:      p.GuardrailID,
+			GuardrailVersion: p.GuardrailVersion,
+			Auth:             authString(p),
 		})
 	}
 	sort.Slice(v.Providers, func(i, j int) bool { return v.Providers[i].Name < v.Providers[j].Name })
