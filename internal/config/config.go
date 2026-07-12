@@ -279,19 +279,20 @@ type OTelConfig struct {
 }
 
 type Config struct {
-	Server        ServerConfig              `json:"server"`
-	Providers     map[string]ProviderConfig `json:"providers"`
-	Models        map[string]ModelConfig    `json:"models"`
-	KeyStore      KeyStoreConfig            `json:"key_store"`
-	ProviderStore *ProviderStoreConfig      `json:"provider_store,omitempty"`
-	Audit         AuditConfig               `json:"audit"`
-	Teams         map[string]TeamConfig     `json:"teams"`
-	Pricing       PricingConfig             `json:"pricing"`
-	Plugins       []PluginConfig            `json:"plugins,omitempty"`
-	OTel          *OTelConfig               `json:"otel,omitempty"`
-	Probe         ProbeConfig               `json:"probe,omitempty"`
-	Analytics     AnalyticsConfig           `json:"analytics,omitempty"`
-	BudgetAlerts  *BudgetAlertsConfig       `json:"budget_alerts,omitempty"`
+	Server              ServerConfig               `json:"server"`
+	Providers           map[string]ProviderConfig  `json:"providers"`
+	Models              map[string]ModelConfig     `json:"models"`
+	KeyStore            KeyStoreConfig             `json:"key_store"`
+	ProviderStore       *ProviderStoreConfig       `json:"provider_store,omitempty"`
+	Audit               AuditConfig                `json:"audit"`
+	Teams               map[string]TeamConfig      `json:"teams"`
+	Pricing             PricingConfig              `json:"pricing"`
+	Plugins             []PluginConfig             `json:"plugins,omitempty"`
+	OTel                *OTelConfig                `json:"otel,omitempty"`
+	Probe               ProbeConfig                `json:"probe,omitempty"`
+	Analytics           AnalyticsConfig            `json:"analytics,omitempty"`
+	BudgetAlerts        *BudgetAlertsConfig        `json:"budget_alerts,omitempty"`
+	ProviderHealthCheck *ProviderHealthCheckConfig `json:"provider_health_check,omitempty"`
 }
 
 // BudgetAlertsConfig enables webhook budget alerts (D5b, ADR-017): a team's
@@ -304,6 +305,13 @@ type BudgetAlertsConfig struct {
 	WebhookURL    string     `json:"-"`                    // resolved at load
 	Thresholds    []float64  `json:"thresholds,omitempty"` // ratios in (0,+inf); default [0.8, 1.0]
 	Timeout       string     `json:"timeout,omitempty"`    // Go duration; default "5s"
+}
+
+// ProviderHealthCheckConfig enables periodic background health probing of
+// registered providers (ADR-014 deferred item). Absent (nil) -> probing off,
+// the v1 on-demand-only default (POST /admin/providers/test is unaffected).
+type ProviderHealthCheckConfig struct {
+	Interval string `json:"interval,omitempty"` // Go duration; no default -- required when the block is present
 }
 
 // AnalyticsConfig configures the derived analytics index (design spec §4 / D1).
@@ -438,6 +446,9 @@ func LoadRaw(path string) (*Config, error) {
 		return nil, err
 	}
 	if err := validateBudgetAlerts(cfg.BudgetAlerts); err != nil {
+		return nil, err
+	}
+	if err := validateProviderHealthCheck(cfg.ProviderHealthCheck); err != nil {
 		return nil, err
 	}
 	if err := validateModelAliases(cfg.Models); err != nil {
@@ -583,6 +594,15 @@ func validateBudgetAlerts(ba *BudgetAlertsConfig) error {
 		return err
 	}
 	return nil
+}
+
+// validateProviderHealthCheck checks the opt-in provider_health_check block
+// (ADR-014 deferred item). nil block (probing off) is valid.
+func validateProviderHealthCheck(phc *ProviderHealthCheckConfig) error {
+	if phc == nil {
+		return nil
+	}
+	return validateDurationString("provider_health_check.interval", phc.Interval, time.Millisecond)
 }
 
 // validateAnalyticsModeB checks the opt-in shared analytics store block. The
