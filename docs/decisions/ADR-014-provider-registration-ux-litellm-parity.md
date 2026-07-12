@@ -174,8 +174,20 @@ The two cards are unified behind a single guided flow (select-or-create provider
   to a provider endpoint. inferplane routes are **exact** `model → ordered
   targets`; wildcard matching is a router-engine change, not a registration-UX
   change. Explicitly out of scope for ADR-014; tracked as a follow-up.
-- **Periodic/auto health checks** — v1 is on-demand (D5); background probing is a
-  follow-up (it needs a scheduler + cardinality-bounded status storage).
+- ~~**Periodic/auto health checks** — v1 is on-demand (D5); background probing
+  is a follow-up (it needs a scheduler + cardinality-bounded status
+  storage).~~ — **implemented** (2026-07-12,
+  `docs/superpowers/plans/2026-07-12-provider-health-scheduler.md`): an opt-in
+  `provider_health_check.interval` config block (nil = off, the v1 default
+  unchanged) starts `gateway.healthProbeWorker`, a ticker that iterates the
+  CURRENT live topology (`live.Holder.Load().Providers()`, so a hot-reload/
+  UI-write is picked up automatically) and records each `HealthChecker`
+  implementer's result in a cardinality-bounded (provider-name-keyed)
+  `configapi.HealthStore`. `GET /admin/providers/health` (full-admin only,
+  same gating as the on-demand probe) serves the snapshot; the console falls
+  back to it for any provider the operator hasn't manually tested this
+  page-session. D2's on-demand `POST /admin/providers/test` draft-probe flow
+  is completely untouched.
 
 ## Consequences
 
