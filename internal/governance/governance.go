@@ -77,12 +77,13 @@ type UsageStatus struct {
 // (no live/config import) and billing a request on the same generation it
 // resolved on (ADR-006).
 type Governor struct {
-	teams        map[string]TeamPolicy
-	lookup       func(team string) (TeamPolicy, bool)              // D3/ADR-016: optional dynamic override, checked before teams
-	notifyBudget func(team string, spentMicros, limitMicros int64) // D5b/ADR-017: optional budget-alert hook, called after each team debit
-	lim          limiter.LimiterStore
-	bud          budget.BudgetStore
-	metrics      *metrics.Metrics // nil-safe: no-op when nil
+	teams           map[string]TeamPolicy
+	lookup          func(team string) (TeamPolicy, bool)                     // D3/ADR-016: optional dynamic override, checked before teams
+	notifyBudget    func(team string, spentMicros, limitMicros int64)        // D5b/ADR-017: optional budget-alert hook, called after each team debit
+	notifyKeyBudget func(team, keyID string, spentMicros, limitMicros int64) // D5b/ADR-017 per-key follow-up: optional per-key budget-alert hook, called after each key debit
+	lim             limiter.LimiterStore
+	bud             budget.BudgetStore
+	metrics         *metrics.Metrics // nil-safe: no-op when nil
 }
 
 // NewGovernor builds the Governor. m is the Prometheus metrics sink for
@@ -105,11 +106,24 @@ func (g *Governor) SetTeamLookup(f func(team string) (TeamPolicy, bool)) {
 // SetBudgetNotify installs a budget-alert hook (D5b, ADR-017): called from
 // Settle, after every team-budget debit, with the post-debit spend and the
 // team's configured limit. Scoped to team budgets only — per-key budgets are
-// not observed here (a key_id must never become a metric/alert label,
-// CLAUDE.md). Like SetTeamLookup, this is a startup-only assignment with no
-// synchronization; passing nil (the default) disables alerting.
+// not observed by THIS hook or by /metrics (a key_id must never become a
+// Prometheus label, CLAUDE.md) -- see SetKeyBudgetNotify for the dedicated
+// per-key alert path. Like SetTeamLookup, this is a startup-only assignment
+// with no synchronization; passing nil (the default) disables alerting.
 func (g *Governor) SetBudgetNotify(f func(team string, spentMicros, limitMicros int64)) {
 	g.notifyBudget = f
+}
+
+// SetKeyBudgetNotify installs a per-key budget-alert hook (ADR-017 per-key
+// follow-up): called from Settle, after every key-budget debit, with the
+// post-debit spend and the key's configured limit. This is the per-key
+// ALERT path -- key_id reaching a webhook payload body is fine (unlike a
+// Prometheus label; the /metrics cardinality rule this package's Settle
+// comment cites is untouched -- /metrics still never carries key_id). Like
+// SetTeamLookup/SetBudgetNotify, this is a startup-only assignment with no
+// synchronization; passing nil (the default) disables per-key alerting.
+func (g *Governor) SetKeyBudgetNotify(f func(team, keyID string, spentMicros, limitMicros int64)) {
+	g.notifyKeyBudget = f
 }
 
 // policyOf resolves a team's policy: a dynamic-lookup hit wins over a config
@@ -274,6 +288,10 @@ func (g *Governor) Settle(team, keyID string, kp KeyPolicy, provider, model stri
 	}
 	if kp.BudgetMicrosPerMonth > 0 {
 		g.bud.Debit("budget:key:"+keyID, costMicros, 30*24*time.Hour)
+		spent := g.bud.Spent("budget:key:"+keyID, 30*24*time.Hour)
+		if g.notifyKeyBudget != nil {
+			g.notifyKeyBudget(team, keyID, spent, kp.BudgetMicrosPerMonth)
+		}
 	}
 	// Observability metrics (approximation; the µUSD budget store is the
 	// settlement source of truth). Recorded for every settled request, even an
