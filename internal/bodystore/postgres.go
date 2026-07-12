@@ -126,6 +126,32 @@ func (s *PostgresStore) Delete(ctx context.Context, ref string) error {
 	return err
 }
 
+func (s *PostgresStore) ListWrappedKeys(ctx context.Context) ([]WrappedKeyRow, error) {
+	rows, err := s.db.Query(ctx, `SELECT ref, wrapped_key_nonce, wrapped_key_ct FROM bodies`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []WrappedKeyRow
+	for rows.Next() {
+		var r WrappedKeyRow
+		if err := rows.Scan(&r.Ref, &r.Nonce, &r.CT); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) UpdateWrappedKey(ctx context.Context, ref string, oldNonce, oldCT, newNonce, newCT []byte) (bool, error) {
+	tag, err := s.db.Exec(ctx, `UPDATE bodies SET wrapped_key_nonce=$1, wrapped_key_ct=$2 WHERE ref=$3 AND wrapped_key_nonce=$4 AND wrapped_key_ct=$5`,
+		newNonce, newCT, ref, oldNonce, oldCT)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 // Purge runs safely on every replica concurrently (idempotent deletes, no
 // lease needed — see the package/type doc).
 func (s *PostgresStore) Purge(ctx context.Context, now time.Time, maxBytes int64) (int, error) {

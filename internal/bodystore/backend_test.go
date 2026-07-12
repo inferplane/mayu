@@ -122,6 +122,71 @@ func TestBackends_PurgeTTL(t *testing.T) {
 	}
 }
 
+// TestBackends_ListAndUpdateWrappedKey pins the ADR-018 key-rotation deferred
+// item's Store contract: ListWrappedKeys projects only the wrapped-key
+// columns, and UpdateWrappedKey is a compare-and-swap keyed on the OLD bytes.
+func TestBackends_ListAndUpdateWrappedKey(t *testing.T) {
+	for name, s := range backends(t) {
+		t.Run(name, func(t *testing.T) {
+			row := testRow("ref-rewrap", 10, "2026-01-01T00:00:00Z", "2099-01-01T00:00:00Z")
+			if err := s.Put(context.Background(), row); err != nil {
+				t.Fatal(err)
+			}
+
+			list, err := s.ListWrappedKeys(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var found *WrappedKeyRow
+			for i := range list {
+				if list[i].Ref == "ref-rewrap" {
+					found = &list[i]
+				}
+			}
+			if found == nil {
+				t.Fatal("ListWrappedKeys did not return the row")
+			}
+			if string(found.Nonce) != string(row.WrappedKeyNonce) || string(found.CT) != string(row.WrappedKeyCT) {
+				t.Fatalf("ListWrappedKeys bytes = %q/%q, want %q/%q", found.Nonce, found.CT, row.WrappedKeyNonce, row.WrappedKeyCT)
+			}
+
+			newNonce, newCT := []byte("new-nonce"), []byte("new-ct")
+			matched, err := s.UpdateWrappedKey(context.Background(), "ref-rewrap", found.Nonce, found.CT, newNonce, newCT)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !matched {
+				t.Fatal("UpdateWrappedKey with the correct old bytes must match")
+			}
+
+			list2, err := s.ListWrappedKeys(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var found2 *WrappedKeyRow
+			for i := range list2 {
+				if list2[i].Ref == "ref-rewrap" {
+					found2 = &list2[i]
+				}
+			}
+			if found2 == nil || string(found2.Nonce) != "new-nonce" || string(found2.CT) != "new-ct" {
+				t.Fatalf("update did not persist: %+v", found2)
+			}
+
+			// A second CAS with the now-STALE old bytes must not match (the
+			// row already moved on) — proves the swap is keyed on the old
+			// value, not just the ref.
+			matched2, err := s.UpdateWrappedKey(context.Background(), "ref-rewrap", found.Nonce, found.CT, []byte("x"), []byte("y"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if matched2 {
+				t.Fatal("UpdateWrappedKey with stale old bytes must not match")
+			}
+		})
+	}
+}
+
 func TestBackends_PurgeSizeCapEvictsOldestFirst(t *testing.T) {
 	for name, s := range backends(t) {
 		t.Run(name, func(t *testing.T) {

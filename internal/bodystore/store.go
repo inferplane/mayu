@@ -34,6 +34,14 @@ type Row struct {
 	RespNonce, RespCT             []byte // nil = response not captured (e.g. streaming)
 }
 
+// WrappedKeyRow is a minimal projection for key rotation (ADR-018 deferred
+// item): never carries req_*/resp_* ciphertext, so a rotation pass never
+// touches or holds the actual body bytes in memory.
+type WrappedKeyRow struct {
+	Ref       string
+	Nonce, CT []byte
+}
+
 // Store is implemented by the sqlite and postgres backends.
 type Store interface {
 	Put(ctx context.Context, row Row) error
@@ -45,6 +53,15 @@ type Store interface {
 	// total body size still exceeds maxBytes — deletes the oldest remaining
 	// rows until it doesn't. Returns the number of rows deleted.
 	Purge(ctx context.Context, now time.Time, maxBytes int64) (int, error)
+	// ListWrappedKeys returns every row's wrapped-key columns only, for key
+	// rotation (ADR-018 deferred item).
+	ListWrappedKeys(ctx context.Context) ([]WrappedKeyRow, error)
+	// UpdateWrappedKey is a compare-and-swap keyed on the OLD wrapped-key
+	// bytes: matched=false (no error) means the row's wrapped-key bytes had
+	// already changed since ListWrappedKeys (purged, or rewrapped by a
+	// concurrent run) — a live fleet can keep writing during rotation with no
+	// coordination, matching this store's existing no-lease-needed posture.
+	UpdateWrappedKey(ctx context.Context, ref string, oldNonce, oldCT, newNonce, newCT []byte) (matched bool, err error)
 	Close() error
 }
 
