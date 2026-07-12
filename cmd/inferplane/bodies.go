@@ -92,28 +92,31 @@ func bodiesRewrapKey(args []string) int {
 		return 1
 	}
 
-	var rewrapped, skipped, raced int
+	// skipped is BENIGN: the given old key genuinely could not unwrap this
+	// row (wrong key, tamper, malformed length -- ErrRewrapFailed). failed is
+	// an OPERATIONAL error unrelated to key correctness (seal() failing to
+	// reseal under the new key, or a DB update error) -- these must never be
+	// folded into skipped, or an operator could mistake a row that failed
+	// for an unrelated reason as "already on the new key" and retire the old
+	// key while it's still the only key that opens it (claude-review HIGH:
+	// the initial fix only added a stderr print, which is invisible to
+	// exit-code-checking automation -- failed now also gates the exit code).
+	var rewrapped, skipped, raced, failed int
 	for _, row := range rows {
 		newNonce, newCT, rerr := bodystore.RewrapKey(oldMaster, newMaster, row.Nonce, row.CT)
 		if rerr != nil {
-			// ErrRewrapFailed means the given old key genuinely could not
-			// unwrap this row (wrong key, tamper, malformed length) -- the
-			// intended fail-closed-generic case. Anything else (e.g. seal()
-			// failing to reseal under the new key, entropy exhaustion) is an
-			// operational anomaly, not a key mismatch -- it must be visible,
-			// or an operator could mistake it for "already rotated" and
-			// retire the old key while this row is still only readable by
-			// it (claude-review HIGH: silent skip risked permanent loss).
-			if !errors.Is(rerr, bodystore.ErrRewrapFailed) {
+			if errors.Is(rerr, bodystore.ErrRewrapFailed) {
+				skipped++
+			} else {
 				fmt.Fprintln(os.Stderr, "bodies rewrap-key: reseal", row.Ref, ":", rerr)
+				failed++
 			}
-			skipped++
 			continue
 		}
 		matched, uerr := store.UpdateWrappedKey(ctx, row.Ref, row.Nonce, row.CT, newNonce, newCT)
 		if uerr != nil {
 			fmt.Fprintln(os.Stderr, "bodies rewrap-key: update", row.Ref, ":", uerr)
-			skipped++
+			failed++
 			continue
 		}
 		if matched {
@@ -123,8 +126,8 @@ func bodiesRewrapKey(args []string) int {
 		}
 	}
 
-	fmt.Printf("rewrapped=%d skipped=%d raced=%d\n", rewrapped, skipped, raced)
-	if rewrapped == 0 && skipped > 0 {
+	fmt.Printf("rewrapped=%d skipped=%d raced=%d failed=%d\n", rewrapped, skipped, raced, failed)
+	if failed > 0 || (rewrapped == 0 && skipped > 0) {
 		return 1
 	}
 	return 0

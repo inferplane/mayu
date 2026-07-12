@@ -45,21 +45,28 @@ keys catches it.
 ## Reading the output
 
 ```
-rewrapped=N skipped=M raced=K
+rewrapped=N skipped=M raced=K failed=P
 ```
 
 - `rewrapped` — rows successfully moved from the old key to the new key.
-- `skipped` — rows the given old key could not unwrap at all.
+- `skipped` — **benign**: the given old key genuinely could not unwrap this
+  row (wrong key, tamper, or malformed length).
 - `raced` — rows whose wrapped-key bytes changed between listing and updating
   (another rotation run, or a concurrent `Purge`/delete) — not an error;
   they're simply not yours to touch this run.
+- `failed` — **not benign**: an operational error unrelated to key
+  correctness (couldn't reseal under the new key, or the DB update itself
+  failed). Printed to stderr per row and non-zero `failed` always exits 1,
+  regardless of how many rows rewrapped successfully — these rows are still
+  only readable by the OLD key, so **never retire the old key after a run
+  that reported `failed>0`.**
 
 ## Exit codes
 
 | Exit | Meaning |
 |---|---|
-| `0` | At least one row was rewrapped (or the store was empty — nothing to do). |
-| `1` | **Zero rows were rewrapped, but some were skipped.** This means the given `--old-key-*` opened NOTHING in this store. |
+| `0` | `failed=0` and at least one row was rewrapped (or the store was empty — nothing to do). |
+| `1` | `failed>0` (an operational error occurred — do not retire the old key), **or** zero rows were rewrapped while some were skipped (the given `--old-key-*` opened NOTHING in this store). |
 | `2` | Usage error (bad/missing flags, malformed key hex, invalid secret ref shape). |
 
 ### ⚠ Exit 1 is ambiguous by design — read this before treating it as a failure
