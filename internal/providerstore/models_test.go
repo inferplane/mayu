@@ -14,26 +14,26 @@ func TestModelSetGetOrdered(t *testing.T) {
 		{Provider: "anthropic-prod", Model: "claude-sonnet-4-6", API: ""},
 		{Provider: "bedrock-us", Model: "anthropic.claude-sonnet-4-6-v1:0", API: "converse"},
 	}
-	if err := s.SetModel(ctx, "claude", targets); err != nil {
+	if err := s.SetModel(ctx, "claude", ModelRoute{Targets: targets}); err != nil {
 		t.Fatalf("SetModel: %v", err)
 	}
 	got, err := s.ListModels(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got["claude"], targets) {
-		t.Fatalf("model targets not round-tripped in order:\n got %+v\nwant %+v", got["claude"], targets)
+	if !reflect.DeepEqual(got["claude"].Targets, targets) {
+		t.Fatalf("model targets not round-tripped in order:\n got %+v\nwant %+v", got["claude"].Targets, targets)
 	}
 }
 
 func TestModelSetReplacesAll(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
-	_ = s.SetModel(ctx, "m", []Target{{Provider: "a", Model: "1"}, {Provider: "b", Model: "2"}, {Provider: "c", Model: "3"}})
+	_ = s.SetModel(ctx, "m", ModelRoute{Targets: []Target{{Provider: "a", Model: "1"}, {Provider: "b", Model: "2"}, {Provider: "c", Model: "3"}}})
 	// Replace with a shorter chain — the extra positions must be gone.
-	_ = s.SetModel(ctx, "m", []Target{{Provider: "x", Model: "9"}})
+	_ = s.SetModel(ctx, "m", ModelRoute{Targets: []Target{{Provider: "x", Model: "9"}}})
 	got, _ := s.ListModels(ctx)
-	if len(got["m"]) != 1 || got["m"][0].Provider != "x" {
+	if len(got["m"].Targets) != 1 || got["m"].Targets[0].Provider != "x" {
 		t.Fatalf("SetModel did not replace-all: %+v", got["m"])
 	}
 }
@@ -41,7 +41,7 @@ func TestModelSetReplacesAll(t *testing.T) {
 func TestModelDelete(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
-	_ = s.SetModel(ctx, "m", []Target{{Provider: "a", Model: "1"}})
+	_ = s.SetModel(ctx, "m", ModelRoute{Targets: []Target{{Provider: "a", Model: "1"}}})
 	if err := s.DeleteModel(ctx, "m"); err != nil {
 		t.Fatalf("DeleteModel: %v", err)
 	}
@@ -51,6 +51,68 @@ func TestModelDelete(t *testing.T) {
 	}
 	if err := s.DeleteModel(ctx, "nope"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("DeleteModel(missing) = %v, want ErrNotFound", err)
+	}
+}
+
+// TestModelAliasesRoundTrip (ADR-021 follow-up): a model's aliases are stored
+// and read back alongside its targets.
+func TestModelAliasesRoundTrip(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	route := ModelRoute{
+		Aliases: []string{"apac.anthropic.claude-sonnet-4-6", "global.claude-sonnet-4-6"},
+		Targets: []Target{{Provider: "p", Model: "claude-sonnet-4-6"}},
+	}
+	if err := s.SetModel(ctx, "claude-sonnet-4-6", route); err != nil {
+		t.Fatalf("SetModel: %v", err)
+	}
+	got, err := s.ListModels(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got["claude-sonnet-4-6"].Aliases, route.Aliases) {
+		t.Fatalf("aliases not round-tripped: got %+v want %+v", got["claude-sonnet-4-6"].Aliases, route.Aliases)
+	}
+}
+
+// TestModelSetReplacesAliases: SetModel replace-all also clears stale aliases,
+// not just targets — a shrunk alias list must not leave orphaned rows.
+func TestModelSetReplacesAliases(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_ = s.SetModel(ctx, "m", ModelRoute{
+		Aliases: []string{"old-alias-1", "old-alias-2"},
+		Targets: []Target{{Provider: "p", Model: "x"}},
+	})
+	_ = s.SetModel(ctx, "m", ModelRoute{
+		Aliases: []string{"new-alias"},
+		Targets: []Target{{Provider: "p", Model: "x"}},
+	})
+	got, _ := s.ListModels(ctx)
+	if !reflect.DeepEqual(got["m"].Aliases, []string{"new-alias"}) {
+		t.Fatalf("stale aliases not replaced: %+v", got["m"].Aliases)
+	}
+}
+
+// TestModelDeleteRemovesAliases: deleting a model route also removes its
+// aliases — an alias must not survive its model.
+func TestModelDeleteRemovesAliases(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_ = s.SetModel(ctx, "m", ModelRoute{
+		Aliases: []string{"alias-1"},
+		Targets: []Target{{Provider: "p", Model: "x"}},
+	})
+	if err := s.DeleteModel(ctx, "m"); err != nil {
+		t.Fatalf("DeleteModel: %v", err)
+	}
+	// Re-declaring the alias under a different model must succeed — it must
+	// not still be considered "in use" by the deleted model.
+	if err := s.SetModel(ctx, "n", ModelRoute{
+		Aliases: []string{"alias-1"},
+		Targets: []Target{{Provider: "p", Model: "y"}},
+	}); err != nil {
+		t.Fatalf("alias reuse after delete: %v", err)
 	}
 }
 
@@ -70,7 +132,7 @@ func TestSeedOnceDurableMarker(t *testing.T) {
 	}
 
 	provs := []ProviderRow{{Name: "p", Type: "anthropic", APIKeyRefEnv: "K"}}
-	models := map[string][]Target{"m": {{Provider: "p", Model: "claude"}}}
+	models := map[string]ModelRoute{"m": {Targets: []Target{{Provider: "p", Model: "claude"}}}}
 	did, err := s.Seed(ctx, provs, models)
 	if err != nil {
 		t.Fatalf("Seed: %v", err)
@@ -117,7 +179,7 @@ func TestSeedAtomic(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	provs := []ProviderRow{{Name: "p", Type: "anthropic"}}
-	models := map[string][]Target{"m": {{Provider: "p", Model: "claude", API: "converse"}}}
+	models := map[string]ModelRoute{"m": {Targets: []Target{{Provider: "p", Model: "claude", API: "converse"}}}}
 	if _, err := s.Seed(ctx, provs, models); err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +188,25 @@ func TestSeedAtomic(t *testing.T) {
 	if len(pl) != 1 || len(ml) != 1 {
 		t.Fatalf("seed not atomic: providers=%d models=%d", len(pl), len(ml))
 	}
-	if ml["m"][0].API != "converse" {
+	if ml["m"].Targets[0].API != "converse" {
 		t.Fatalf("seeded model api lost: %+v", ml["m"])
+	}
+}
+
+// TestSeedPreservesAliases: Seed also imports a model's aliases, not just its
+// targets.
+func TestSeedPreservesAliases(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	provs := []ProviderRow{{Name: "p", Type: "anthropic"}}
+	models := map[string]ModelRoute{
+		"m": {Aliases: []string{"m-alias"}, Targets: []Target{{Provider: "p", Model: "claude"}}},
+	}
+	if _, err := s.Seed(ctx, provs, models); err != nil {
+		t.Fatal(err)
+	}
+	ml, _ := s.ListModels(ctx)
+	if !reflect.DeepEqual(ml["m"].Aliases, []string{"m-alias"}) {
+		t.Fatalf("seed lost aliases: %+v", ml["m"])
 	}
 }

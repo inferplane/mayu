@@ -51,8 +51,11 @@ type authWrite struct {
 	Profile string `json:"profile,omitempty"`
 }
 
-// ModelWrite is the model-route DTO: an ordered target chain.
+// ModelWrite is the model-route DTO: an ordered target chain plus optional
+// aliases (ADR-021 follow-up — config-file aliases extended to the UI-write
+// DB path).
 type ModelWrite struct {
+	Aliases []string      `json:"aliases,omitempty"`
 	Targets []targetWrite `json:"targets"`
 }
 
@@ -146,25 +149,41 @@ func ParseProviderWrite(name string, body []byte) (providerstore.ProviderRow, er
 	return row, nil
 }
 
-// ParseModelWrite validates a model-route write body and returns the ordered
-// target chain. A route with no targets, or a target with no provider/model, is
-// rejected.
-func ParseModelWrite(body []byte) ([]providerstore.Target, error) {
+// ParseModelWrite validates a model-route write body and returns the aliases +
+// ordered target chain. A route with no targets, or a target with no
+// provider/model, is rejected; a duplicate alias within the same write is
+// rejected. Cross-model alias collisions (with another model's name or another
+// model's alias) can only be checked against the full topology, so that check
+// runs at the writeMutation layer (config.ValidateModelAliases on the candidate
+// effective config) — the same split ParseProviderWrite/ResolveProviders already
+// use for secret-ref shape vs. resolvability.
+func ParseModelWrite(body []byte) (providerstore.ModelRoute, error) {
+	var zero providerstore.ModelRoute
 	var w ModelWrite
 	if err := json.Unmarshal(body, &w); err != nil {
-		return nil, fmt.Errorf("invalid model body: %w", err)
+		return zero, fmt.Errorf("invalid model body: %w", err)
 	}
 	if len(w.Targets) == 0 {
-		return nil, fmt.Errorf("a model route requires at least one target")
+		return zero, fmt.Errorf("a model route requires at least one target")
 	}
-	out := make([]providerstore.Target, 0, len(w.Targets))
+	targets := make([]providerstore.Target, 0, len(w.Targets))
 	for i, t := range w.Targets {
 		if strings.TrimSpace(t.Provider) == "" || strings.TrimSpace(t.Model) == "" {
-			return nil, fmt.Errorf("target[%d] requires both provider and model", i)
+			return zero, fmt.Errorf("target[%d] requires both provider and model", i)
 		}
-		out = append(out, providerstore.Target{Provider: t.Provider, Model: t.Model, API: t.API})
+		targets = append(targets, providerstore.Target{Provider: t.Provider, Model: t.Model, API: t.API})
 	}
-	return out, nil
+	seen := make(map[string]bool, len(w.Aliases))
+	for _, alias := range w.Aliases {
+		if strings.TrimSpace(alias) == "" {
+			return zero, fmt.Errorf("alias must not be blank")
+		}
+		if seen[alias] {
+			return zero, fmt.Errorf("duplicate alias %q", alias)
+		}
+		seen[alias] = true
+	}
+	return providerstore.ModelRoute{Aliases: w.Aliases, Targets: targets}, nil
 }
 
 // Writer is the assembly-provided callback set the write handlers invoke. Each
@@ -175,7 +194,7 @@ func ParseModelWrite(body []byte) ([]providerstore.Target, error) {
 type Writer interface {
 	WriteProvider(ctx context.Context, row providerstore.ProviderRow) error
 	DeleteProvider(ctx context.Context, name string) error
-	WriteModel(ctx context.Context, name string, targets []providerstore.Target) error
+	WriteModel(ctx context.Context, name string, route providerstore.ModelRoute) error
 	DeleteModel(ctx context.Context, name string) error
 }
 
@@ -224,12 +243,12 @@ func WriteHandler(resource string, w Writer, emit func(audit.Record)) http.Handl
 				mapWriteResult(rw, werr)
 				return
 			}
-			targets, perr := ParseModelWrite(body)
+			route, perr := ParseModelWrite(body)
 			if perr != nil {
 				writeErr(rw, http.StatusBadRequest, perr.Error())
 				return
 			}
-			werr := w.WriteModel(r.Context(), name, targets)
+			werr := w.WriteModel(r.Context(), name, route)
 			if werr == nil {
 				emitEvent(emit, r, "model_route_updated", "", name)
 			}

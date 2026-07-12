@@ -196,12 +196,35 @@ func TestParseProviderWriteRejectsGuardrailIDShape(t *testing.T) {
 
 func TestParseModelWriteOrdered(t *testing.T) {
 	body := []byte(`{"targets":[{"provider":"a","model":"1"},{"provider":"b","model":"2","api":"converse"}]}`)
-	ts, err := ParseModelWrite(body)
+	route, err := ParseModelWrite(body)
 	if err != nil {
 		t.Fatal(err)
 	}
+	ts := route.Targets
 	if len(ts) != 2 || ts[0].Provider != "a" || ts[1].API != "converse" {
 		t.Fatalf("parsed targets wrong: %+v", ts)
+	}
+}
+
+// TestParseModelWriteAliases (ADR-021 follow-up): aliases parse alongside
+// targets; a duplicate alias within the same write is rejected (a cross-model
+// collision can only be checked against the full topology and is validated at
+// the writeMutation layer, not here).
+func TestParseModelWriteAliases(t *testing.T) {
+	body := []byte(`{"aliases":["apac.claude-sonnet-4-6"],"targets":[{"provider":"a","model":"1"}]}`)
+	route, err := ParseModelWrite(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(route.Aliases) != 1 || route.Aliases[0] != "apac.claude-sonnet-4-6" {
+		t.Fatalf("aliases not parsed: %+v", route.Aliases)
+	}
+
+	if _, err := ParseModelWrite([]byte(`{"aliases":["a","a"],"targets":[{"provider":"p","model":"m"}]}`)); err == nil {
+		t.Fatal("duplicate alias within one write must be rejected")
+	}
+	if _, err := ParseModelWrite([]byte(`{"aliases":[""],"targets":[{"provider":"p","model":"m"}]}`)); err == nil {
+		t.Fatal("blank alias must be rejected")
 	}
 }
 
@@ -220,7 +243,7 @@ type stubWriter struct {
 	err          error
 	lastProvider providerstore.ProviderRow
 	lastModel    string
-	lastTargets  []providerstore.Target
+	lastRoute    providerstore.ModelRoute
 	deletedProv  string
 	deletedModel string
 }
@@ -233,8 +256,8 @@ func (s *stubWriter) DeleteProvider(_ context.Context, name string) error {
 	s.deletedProv = name
 	return s.err
 }
-func (s *stubWriter) WriteModel(_ context.Context, name string, targets []providerstore.Target) error {
-	s.lastModel, s.lastTargets = name, targets
+func (s *stubWriter) WriteModel(_ context.Context, name string, route providerstore.ModelRoute) error {
+	s.lastModel, s.lastRoute = name, route
 	return s.err
 }
 func (s *stubWriter) DeleteModel(_ context.Context, name string) error {
@@ -305,8 +328,8 @@ func TestWriteHandlerModelPutDelete(t *testing.T) {
 	w := &stubWriter{}
 	h := WriteHandler("models", w, nil)
 	rec := doReq(h, "PUT", "/admin/models/claude", `{"targets":[{"provider":"p","model":"m"}]}`)
-	if rec.Code != http.StatusNoContent || w.lastModel != "claude" || len(w.lastTargets) != 1 {
-		t.Fatalf("model PUT wrong: code=%d model=%q targets=%+v", rec.Code, w.lastModel, w.lastTargets)
+	if rec.Code != http.StatusNoContent || w.lastModel != "claude" || len(w.lastRoute.Targets) != 1 {
+		t.Fatalf("model PUT wrong: code=%d model=%q route=%+v", rec.Code, w.lastModel, w.lastRoute)
 	}
 	rec = doReq(h, "DELETE", "/admin/models/claude", "")
 	if rec.Code != http.StatusNoContent || w.deletedModel != "claude" {

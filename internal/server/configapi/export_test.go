@@ -89,6 +89,30 @@ func TestExportIncludesGuardrailFields(t *testing.T) {
 	}
 }
 
+// TestExportIncludesModelAliases mirrors TestExportIncludesGuardrailFields:
+// ExportDocFrom serializes config.ModelConfig directly, which already carries
+// the json-tagged Aliases field, so a model's aliases must survive
+// export → re-parse untouched (ADR-021 follow-up).
+func TestExportIncludesModelAliases(t *testing.T) {
+	snapshot := func() ExportDoc {
+		return ExportDocFrom(nil, map[string]config.ModelConfig{
+			"claude": {Aliases: []string{"apac.claude"}, Targets: []config.Target{{Provider: "p", Model: "x"}}},
+		})
+	}
+	h := ExportHandler(snapshot)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/admin/config/export", nil))
+
+	var cfg config.Config
+	if err := json.Unmarshal(rec.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("export does not re-parse as config: %v", err)
+	}
+	mc, ok := cfg.Models["claude"]
+	if !ok || len(mc.Aliases) != 1 || mc.Aliases[0] != "apac.claude" {
+		t.Fatalf("export lost model aliases: %+v", mc)
+	}
+}
+
 func TestExportRejectsWrite(t *testing.T) {
 	h := ExportHandler(exportSnapshot)
 	rec := httptest.NewRecorder()

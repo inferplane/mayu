@@ -446,6 +446,15 @@ func LoadRaw(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// ValidateModelAliases checks that no model's alias collides with another
+// model's name or with another model's alias (one hop only). It is the shared
+// guard for both the file-config path (LoadRaw) and the providerstore UI-write
+// path (configapi.ParseModelWrite), mirroring ValidateSecretRef's role for
+// provider refs.
+func ValidateModelAliases(models map[string]ModelConfig) error {
+	return validateModelAliases(models)
+}
+
 func validateModelAliases(models map[string]ModelConfig) error {
 	seen := make(map[string]string)
 	for model, mc := range models {

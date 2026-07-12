@@ -56,6 +56,16 @@ type Target struct {
 	API      string
 }
 
+// ModelRoute is a model's alias list plus its ordered target chain — the model
+// analog of ProviderRow for a group-level (not per-target) attribute. Aliases
+// are stored per MODEL, not per target row, so they cannot be duplicated across
+// a multi-target fallback chain the way a column on model_targets would (ADR-021
+// follow-up: aliases in the providerstore/UI-write DB path).
+type ModelRoute struct {
+	Aliases []string
+	Targets []Target
+}
+
 // Store is the persistence interface for the topology. The SQLite implementation
 // ships; Postgres is the HA path (the DDL is portable).
 type Store interface {
@@ -64,11 +74,12 @@ type Store interface {
 	ListProviders(ctx context.Context) ([]ProviderRow, error)
 	DeleteProvider(ctx context.Context, name string) error
 
-	// SetModel replaces a model's ordered target chain (replace-all, in a txn).
-	SetModel(ctx context.Context, name string, targets []Target) error
-	// ListModels returns every model name → its ordered targets.
-	ListModels(ctx context.Context) (map[string][]Target, error)
-	// DeleteModel removes a model route (ErrNotFound if absent).
+	// SetModel replaces a model's aliases and ordered target chain (replace-all,
+	// in a txn).
+	SetModel(ctx context.Context, name string, route ModelRoute) error
+	// ListModels returns every model name → its aliases + ordered targets.
+	ListModels(ctx context.Context) (map[string]ModelRoute, error)
+	// DeleteModel removes a model route and its aliases (ErrNotFound if absent).
 	DeleteModel(ctx context.Context, name string) error
 
 	// Seeded reports whether the one-time file→DB seed has run (durable marker).
@@ -78,7 +89,7 @@ type Store interface {
 	// true if it seeded, false if the store was already seeded (no-op). The
 	// marker, not a row count, gates this, so deleting every provider never
 	// resurrects the file topology (ADR-008 round-2 CRITICAL).
-	Seed(ctx context.Context, providers []ProviderRow, models map[string][]Target) (bool, error)
+	Seed(ctx context.Context, providers []ProviderRow, models map[string]ModelRoute) (bool, error)
 
 	Close() error
 }
