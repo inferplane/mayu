@@ -580,6 +580,119 @@ func TestE2EBudgetAlertFires(t *testing.T) {
 	}
 }
 
+// TestE2EKeyBudgetAlertFires (ADR-017 per-key follow-up): proves the
+// gov.SetKeyBudgetNotify(notifier.ObserveKey) wiring in gateway.go actually
+// matters — if that one line were omitted, every internal/alert and
+// internal/governance unit test would still pass (they exercise Notifier and
+// Governor in isolation), but this real end-to-end request would never fire a
+// key-scoped webhook. The team carries NO team budget, proving the fire is
+// genuinely key-scoped rather than a team fire that happens to also have a
+// key_id.
+func TestE2EKeyBudgetAlertFires(t *testing.T) {
+	up := newAnthropicUpstream(t)
+
+	var mu sync.Mutex
+	var gotFires []map[string]any
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		json.NewDecoder(r.Body).Decode(&payload)
+		mu.Lock()
+		gotFires = append(gotFires, payload)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer webhook.Close()
+
+	t.Setenv("E2E_KEY_ALERT_WEBHOOK", webhook.URL)
+	dataURL, adminURL, _ := bootGateway(t, func(cfg map[string]any, dir string) {
+		withAnthropicProvider(up.srv.URL)(cfg, dir)
+		// No team budget configured for "unbudgeted" — only the KEY carries one.
+		cfg["teams"] = map[string]any{"unbudgeted": map[string]any{}}
+		cfg["pricing"] = map[string]any{
+			"overrides": map[string]any{
+				"up": map[string]any{
+					"claude-test": map[string]any{"input_per_mtok": 1000000.0, "output_per_mtok": 1000000.0},
+				},
+			},
+		}
+		cfg["budget_alerts"] = map[string]any{
+			"webhook_url_ref": map[string]any{"env": "E2E_KEY_ALERT_WEBHOOK"},
+			"thresholds":      []any{0.5, 1.0},
+			"timeout":         "2s",
+		}
+	})
+
+	// createKey's shared helper carries no budget param (other e2e tests use
+	// it and shouldn't grow an unused one) — build the create-key request
+	// inline with budget_usd_micros included.
+	body, _ := json.Marshal(map[string]any{
+		"team": "unbudgeted", "allowed_models": []string{"claude-test"},
+		"budget_usd_micros": 20_000_000, // $20 — one $15 request crosses 0.5, not 1.0
+	})
+	req, _ := http.NewRequest(http.MethodPost, adminURL+"/admin/keys", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+e2eAdminToken)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	var created struct {
+		KeyID     string `json:"key_id"`
+		Plaintext string `json:"plaintext"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatalf("create key: decode: %v", err)
+	}
+	resp.Body.Close()
+	if created.KeyID == "" || created.Plaintext == "" {
+		t.Fatalf("create key: unexpected payload %+v", created)
+	}
+
+	mresp := postMessages(t, dataURL, created.Plaintext, "claude-test")
+	io.Copy(io.Discard, mresp.Body)
+	mresp.Body.Close()
+	if mresp.StatusCode != http.StatusOK {
+		t.Fatalf("request: status %d, want 200", mresp.StatusCode)
+	}
+
+	deadline := time.Now().Add(8 * time.Second)
+	var fires []map[string]any
+	for {
+		mu.Lock()
+		if len(gotFires) > 0 || time.Now().After(deadline) {
+			fires = append([]map[string]any{}, gotFires...)
+			mu.Unlock()
+			break
+		}
+		mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(fires) != 1 {
+		t.Fatalf("webhook received %d POSTs, want 1: %+v", len(fires), fires)
+	}
+	if fires[0]["event"] != "budget_alert" || fires[0]["team"] != "unbudgeted" || fires[0]["key_id"] != created.KeyID {
+		t.Fatalf("webhook payload = %+v, want key_id=%q", fires[0], created.KeyID)
+	}
+	if got, want := fires[0]["threshold"], 0.5; got != want {
+		t.Fatalf("threshold = %v, want %v", got, want)
+	}
+
+	arecReq, _ := http.NewRequest(http.MethodGet, adminURL+"/admin/alerts/recent", nil)
+	arecReq.Header.Set("Authorization", "Bearer "+e2eAdminToken)
+	arec, err := http.DefaultClient.Do(arecReq)
+	if err != nil {
+		t.Fatalf("GET /admin/alerts/recent: %v", err)
+	}
+	defer arec.Body.Close()
+	arecBody, _ := io.ReadAll(arec.Body)
+	if arec.StatusCode != http.StatusOK {
+		t.Fatalf("GET /admin/alerts/recent: status %d: %s", arec.StatusCode, arecBody)
+	}
+	if !bytes.Contains(arecBody, []byte(`"key_id":"`+created.KeyID+`"`)) {
+		t.Fatalf("/admin/alerts/recent missing the key-scoped fire's key_id: %s", arecBody)
+	}
+}
+
 // TestE2EBodyLoggingRoundTrip (D4, ADR-018): a full-stack body-logging flow —
 // a request is captured, /admin/logs lists it with a body_ref, the body is
 // fetchable, viewing it emits a body_accessed record (carrying record_ref, no
