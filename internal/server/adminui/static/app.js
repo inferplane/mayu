@@ -995,12 +995,13 @@ async function refreshGovernance() {
       const out = await api("GET", "/admin/alerts/recent", null, true);
       const fires = (out && out !== DISABLED) ? (out.fires || []) : [];
       if (!fires.length) {
-        abody.appendChild(emptyRow(5, "no alerts fired yet"));
+        abody.appendChild(emptyRow(6, "no alerts fired yet"));
       } else {
         for (const f of fires) {
           const tr = document.createElement("tr");
           tr.appendChild(td(f.ts || ""));
           tr.appendChild(td(f.team || ""));
+          tr.appendChild(td(f.key_id || "—"));
           tr.appendChild(td(((f.threshold || 0) * 100).toFixed(0) + "%"));
           tr.appendChild(td(((f.ratio || 0) * 100).toFixed(0) + "%"));
           tr.appendChild(td(f.delivered ? "yes" : ("no" + (f.error ? " (" + f.error + ")" : ""))));
@@ -1009,7 +1010,7 @@ async function refreshGovernance() {
       }
     } catch {
       abody.textContent = "";
-      abody.appendChild(emptyRow(5, "failed to load"));
+      abody.appendChild(emptyRow(6, "failed to load"));
     }
   }
 }
