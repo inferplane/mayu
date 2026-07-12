@@ -100,6 +100,13 @@ One HTTP POST, JSON body:
 {"event":"budget_alert","team":"acme","threshold":0.8,"ratio":0.83,
  "spent_usd_micros":830000,"limit_usd_micros":1000000,"ts":"2026-07-08T12:00:00Z"}
 ```
+A key-scoped fire (ADR-017 per-key follow-up) carries the same shape plus
+`key_id`, on the SAME webhook and threshold list — no per-key destination:
+```json
+{"event":"budget_alert","team":"acme","key_id":"ik_5f2a","threshold":0.5,
+ "ratio":0.75,"spent_usd_micros":15000000,"limit_usd_micros":20000000,
+ "ts":"2026-07-12T12:00:00Z"}
+```
 No retry — a missed alert is not re-delivered; the next threshold crossing (or
 the next window) will fire again. `http.Client` has a configurable timeout
 (default 5s) so an unreachable destination cannot leak goroutines indefinitely.
@@ -164,8 +171,22 @@ operator the limit was reached, regardless of enforcement mode.
 
 ## Deferred
 
-- Per-key budget alerts (needs a per-key destination design; key_id cannot be
-  a label).
+- ~~Per-key budget alerts (needs a per-key destination design; key_id cannot
+  be a label).~~ — **implemented** (2026-07-12,
+  `docs/superpowers/plans/2026-07-12-per-key-budget-alerts.md`). The "key_id
+  cannot be a label" constraint is real but scoped to `/metrics` (a Prometheus
+  cardinality rule) — it does not forbid `key_id` in a webhook JSON payload
+  body, which `internal/alert.Notifier` never exposes to Prometheus at all.
+  This resolved the "whose webhook? whose threshold?" question with a
+  **deliberate decision**: a key-scoped alert rides the SAME webhook and
+  threshold list as its team's alerts — no per-key destination config was
+  added. `Notifier.ObserveKey` dedupes in a separate `firedKey` map (never
+  sharing state with the team-scoped `fired` map, so a team and a key can
+  never collide even if they share a string identity); `Governor.
+  SetKeyBudgetNotify` wires the per-key debit in `Settle` to it, exactly
+  mirroring `SetBudgetNotify`'s team-scoped shape. The admin console's Alerts
+  table gained a "key" column so a key-scoped fire is never misrendered as a
+  team-level one.
 - A delivery-failure metric/counter (stderr logging is the interim
   observability; add if drops are observed in practice).
 - Retry/backoff on delivery failure.
