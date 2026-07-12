@@ -24,7 +24,7 @@ backends are a swap, not a rewrite.
 | Audit anchoring | `internal/audit/s3anchor/` | opt-in WORM (S3 Object Lock) chain-head anchoring → tamper-resistant (ADR-012); refs/PII-free anchor objects |
 | Limiter store | `internal/limiter/limiter.go` | in-memory token bucket (TPM/RPM), two-phase |
 | Budget store | `internal/budget/budget.go` | in-memory microUSD budget, two-phase |
-| Body store | `internal/bodystore/` | opt-in captured-body store (D4, ADR-018), OUTSIDE the audit chain: `bodies` table (`ref` PK, `record_id`, `team`, `created_ts`, `expires_ts`, `size`, `wrapped_key_nonce`/`wrapped_key_ct`, `req_nonce`/`req_ct`, `resp_nonce`/`resp_ct` — BLOB/BYTEA ciphertext; `resp_*` nullable = streaming request-only). Envelope AEAD (per-record data key wrapped by a config-ref master key). Two backends (`sqlite.go`/`postgres.go`), TTL + size-cap `Purge`, hard-deletable per-row (GDPR erasure) |
+| Body store | `internal/bodystore/` | opt-in captured-body store (D4, ADR-018), OUTSIDE the audit chain: `bodies` table (`ref` PK, `record_id`, `team`, `created_ts`, `expires_ts`, `size`, `wrapped_key_nonce`/`wrapped_key_ct`, `req_nonce`/`req_ct`, `resp_nonce`/`resp_ct` — BLOB/BYTEA ciphertext; `resp_*` nullable = streaming request-only). Envelope AEAD (per-record data key wrapped by a config-ref master key). Two backends (`sqlite.go`/`postgres.go`), TTL + size-cap `Purge`, hard-deletable per-row (GDPR erasure). Key rotation: `inferplane bodies rewrap-key` (ADR-018 deferred item) rewraps `wrapped_key_*` only, via `Store.ListWrappedKeys`/`UpdateWrappedKey` (CAS) — never reads or rewrites `req_*`/`resp_*` |
 | Analytics index | `internal/analytics/` | derived usage read-model; `events` table gained `ts` + `body_ref` columns (D4, ADR-018) via ALTER-if-missing (SQLite) / `ADD COLUMN IF NOT EXISTS` (Postgres); backs `GET /admin/logs` |
 | ULID | `pkg/ulid/ulid.go` | monotonic record IDs (Crockford base32) |
 
@@ -80,7 +80,7 @@ backends are a swap, not a rewrite.
 | 감사 verify | `internal/audit/verify.go` | 인스턴스별 분절 체인 검증 |
 | Limiter 스토어 | `internal/limiter/limiter.go` | 인메모리 토큰 버킷(TPM/RPM), 2단계 |
 | Budget 스토어 | `internal/budget/budget.go` | 인메모리 microUSD budget, 2단계 |
-| Body 스토어 | `internal/bodystore/` | 옵트인 본문 저장소(D4, ADR-018), 감사 체인 바깥: `bodies` 테이블(`ref` PK, `record_id`, `team`, `created_ts`, `expires_ts`, `size`, `wrapped_key_*`, `req_*`, `resp_*` — BLOB/BYTEA 암호문; `resp_*` nullable = 스트리밍 요청만). 엔벨로프 AEAD(레코드별 데이터키를 config-ref 마스터키로 wrap). 두 백엔드(`sqlite.go`/`postgres.go`), TTL+사이즈캡 `Purge`, 행별 하드 삭제(GDPR 소거) |
+| Body 스토어 | `internal/bodystore/` | 옵트인 본문 저장소(D4, ADR-018), 감사 체인 바깥: `bodies` 테이블(`ref` PK, `record_id`, `team`, `created_ts`, `expires_ts`, `size`, `wrapped_key_*`, `req_*`, `resp_*` — BLOB/BYTEA 암호문; `resp_*` nullable = 스트리밍 요청만). 엔벨로프 AEAD(레코드별 데이터키를 config-ref 마스터키로 wrap). 두 백엔드(`sqlite.go`/`postgres.go`), TTL+사이즈캡 `Purge`, 행별 하드 삭제(GDPR 소거). 키 로테이션: `inferplane bodies rewrap-key`(ADR-018 deferred item)가 `Store.ListWrappedKeys`/`UpdateWrappedKey`(CAS)로 `wrapped_key_*`만 재래핑 — `req_*`/`resp_*`는 읽거나 쓰지 않음 |
 | 분석 인덱스 | `internal/analytics/` | 파생 사용량 read-model; `events` 테이블에 `ts`+`body_ref` 컬럼 추가(D4, ADR-018) — ALTER-if-missing(SQLite)/`ADD COLUMN IF NOT EXISTS`(Postgres); `GET /admin/logs` 백엔드 |
 | ULID | `pkg/ulid/ulid.go` | 단조 증가 레코드 ID(Crockford base32) |
 
