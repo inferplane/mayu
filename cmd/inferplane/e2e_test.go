@@ -693,6 +693,68 @@ func TestE2EKeyBudgetAlertFires(t *testing.T) {
 	}
 }
 
+// TestE2EProviderHealthCheckReportsCapability (ADR-014 deferred item): a
+// configured provider_health_check block flips the provider_auto_health
+// capability, mirroring TestE2ECapabilitiesReportsTeamsRecords's exact shape.
+func TestE2EProviderHealthCheckReportsCapability(t *testing.T) {
+	up := newAnthropicUpstream(t)
+	_, adminURL, _ := bootGateway(t, func(cfg map[string]any, dir string) {
+		withAnthropicProvider(up.srv.URL)(cfg, dir)
+		cfg["provider_health_check"] = map[string]any{"interval": "50ms"}
+	})
+
+	req, _ := http.NewRequest(http.MethodGet, adminURL+"/admin/capabilities", nil)
+	req.Header.Set("Authorization", "Bearer "+e2eAdminToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var caps struct {
+		ProviderAutoHealth bool `json:"provider_auto_health"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&caps); err != nil {
+		t.Fatal(err)
+	}
+	if !caps.ProviderAutoHealth {
+		t.Fatal("capabilities.provider_auto_health = false, want true (provider_health_check is configured)")
+	}
+}
+
+// TestE2EProviderHealthCheckPopulatesStatus proves the background prober
+// actually runs against the real assembled gateway (not just the isolated
+// worker unit test) -- GET /admin/providers/health must eventually carry the
+// registered provider, with a populated last_probed_at, without ANY manual
+// POST /admin/providers/test call. The fixture upstream (newAnthropicUpstream)
+// has no /v1/models handler, so the probe result itself may be ok:false (404)
+// -- this test asserts the auto-probe fired, not that it succeeded.
+func TestE2EProviderHealthCheckPopulatesStatus(t *testing.T) {
+	up := newAnthropicUpstream(t)
+	_, adminURL, _ := bootGateway(t, func(cfg map[string]any, dir string) {
+		withAnthropicProvider(up.srv.URL)(cfg, dir)
+		cfg["provider_health_check"] = map[string]any{"interval": "50ms"}
+	})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		req, _ := http.NewRequest(http.MethodGet, adminURL+"/admin/providers/health", nil)
+		req.Header.Set("Authorization", "Bearer "+e2eAdminToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if bytes.Contains(body, []byte(`"last_probed_at":"`)) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no auto-probed provider status within 5s: %s", body)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // TestE2EBodyLoggingRoundTrip (D4, ADR-018): a full-stack body-logging flow —
 // a request is captured, /admin/logs lists it with a body_ref, the body is
 // fetchable, viewing it emits a body_accessed record (carrying record_ref, no

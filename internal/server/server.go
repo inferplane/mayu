@@ -82,7 +82,7 @@ func negotiateModels(anthropicH, openaiH http.Handler) http.Handler {
 // receives admin-action audit records (key create/revoke + denials, §5.5
 // "admin API calls are audit events"); nil skips. When m is nil the /metrics
 // endpoint is omitted.
-func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier, mapping adminauth.MappingConfig, configView func() configapi.View, auditFileSinks []string, aud *audit.Writer, m *metrics.Metrics, writer configapi.Writer, configExport func() configapi.ExportDoc, capabilities func() configapi.Capabilities, analyticsQ analyticsapi.Querier, teamStore keystore.TeamStore, configTeams func() []keystore.TeamRecord, alertFires func() []alert.Fire, bodiesRec *bodystore.Recorder, probeAllowedHosts ...string) http.Handler {
+func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier, mapping adminauth.MappingConfig, configView func() configapi.View, auditFileSinks []string, aud *audit.Writer, m *metrics.Metrics, writer configapi.Writer, configExport func() configapi.ExportDoc, capabilities func() configapi.Capabilities, analyticsQ analyticsapi.Querier, teamStore keystore.TeamStore, configTeams func() []keystore.TeamRecord, alertFires func() []alert.Fire, healthSnapshot func() map[string]configapi.HealthRecord, bodiesRec *bodystore.Recorder, probeAllowedHosts ...string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
@@ -159,6 +159,13 @@ func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier,
 	if alertFires != nil {
 		mux.Handle("GET /admin/alerts/recent", AdminAuth(adminTokens, verifier, mapping, denied,
 			requireAdmin(adminapi.AlertsHandler(alertFires), emit)))
+	}
+	// Periodic provider health status (ADR-014 deferred item), FULL-ADMIN only
+	// (same gating as the on-demand probe, POST /admin/providers/test). nil
+	// healthSnapshot → omitted (provider_health_check capability off).
+	if healthSnapshot != nil {
+		mux.Handle("GET /admin/providers/health", AdminAuth(adminTokens, verifier, mapping, denied,
+			requireAdmin(configapi.HealthHandler(healthSnapshot), emit)))
 	}
 	// UI-write provider/model registration (ADR-008), behind the same AdminAuth.
 	// writer is nil when no provider store is configured → every write returns
