@@ -51,10 +51,13 @@ Steps:
       (doc-commented: nil block = probing off, the v1-on-demand-only default; no secret
       field, so no inline-secret rejection probe entry needed, unlike `budget_alerts`).
 - [ ] Add `func validateProviderHealthCheck(phc *ProviderHealthCheckConfig) error`: nil → nil;
-      otherwise `validateDurationString("provider_health_check.interval", phc.Interval, time.Second)`
-      (mirrors `validateBudgetAlerts`'s call to the same shared helper; `time.Second` floor
-      is deliberately low — an operator with few providers may want a tight interval, unlike
-      a webhook timeout which has a real cost-per-call reason to floor at 1ms).
+      otherwise `validateDurationString("provider_health_check.interval", phc.Interval,
+      time.Millisecond)` — the SAME floor `validateBudgetAlerts` already uses for
+      `budget_alerts.timeout` (not a new, stricter `time.Second` floor an earlier draft of
+      this plan proposed: that would have rejected Task 3's own e2e test config, which
+      deliberately uses a sub-second interval so the test doesn't have to wait a full
+      second per tick — plan-gate round 1, kimi-k2.5, a real self-contradiction caught
+      before implementation).
 - [ ] Wire the call into `LoadRaw`, right after the existing `validateBudgetAlerts(cfg.BudgetAlerts)`
       call.
 - [ ] Test: `TestLoadRaw_ProviderHealthCheckValidInterval`, `TestLoadRaw_ProviderHealthCheckMalformedInterval`
