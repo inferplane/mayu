@@ -497,7 +497,12 @@ fsync·체인 해시는 writer가 담당).
     "fallback_used": false,
     "fallback_chain": [],
     "partial": false,                  // 스트림 중단으로 부분 응답이면 true
-    "error": null
+    "error": null                      // null 또는 아래 닫힌 taxonomy 문자열 중 하나 (ADR-020,
+                                        // internal/audit.DenyReason): model_not_allowed |
+                                        // team_rate_limited | team_token_rate_limited |
+                                        // team_quota_exceeded | key_rate_limited |
+                                        // key_token_rate_limited | team_budget_exceeded |
+                                        // key_budget_exceeded | region_blocked — 자유 텍스트 아님
   },
   "usage": {
     "input_tokens": 1200,

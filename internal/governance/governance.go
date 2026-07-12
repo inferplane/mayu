@@ -10,6 +10,7 @@ package governance
 import (
 	"time"
 
+	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/budget"
 	"github.com/inferplane/inferplane/internal/limiter"
 	"github.com/inferplane/inferplane/internal/metrics"
@@ -140,6 +141,7 @@ type GovDecision struct {
 	Allowed bool
 	Status  int
 	Reason  string
+	Code    audit.DenyReason
 }
 
 // PreCheck enforces rate limit + quota + budget BEFORE the upstream call.
@@ -151,18 +153,18 @@ func (g *Governor) PreCheck(team, keyID string, kp KeyPolicy, estimateTokens int
 	if p, ok := g.policyOf(team); ok {
 		// rate limit (RPM): 1 request unit
 		if p.RatePerMin > 0 && !g.lim.AllowRate("rate:"+team, 1, p.RatePerMin, max64(p.RateBurst, 1)) {
-			return GovDecision{Status: 429, Reason: "rate limit exceeded"}
+			return GovDecision{Status: 429, Reason: "rate limit exceeded", Code: audit.DenyTeamRateLimited}
 		}
 		// token rate limit (TPM): charge the request estimate against a per-minute
 		// token bucket whose burst is one minute's worth of tokens.
 		if p.TokensPerMinute > 0 && !g.lim.AllowRate("tpm:"+team, estimateTokens, p.TokensPerMinute, p.TokensPerMinute) {
-			return GovDecision{Status: 429, Reason: "token rate limit exceeded"}
+			return GovDecision{Status: 429, Reason: "token rate limit exceeded", Code: audit.DenyTeamTokenRateLimited}
 		}
 		// quota (daily tokens)
 		if p.TokensPerDay > 0 {
 			if g.lim.CheckQuota("quota:"+team, estimateTokens, p.TokensPerDay, 24*time.Hour) == limiter.Block {
 				if p.QuotaExceeded != "warn" {
-					return GovDecision{Status: 429, Reason: "token quota exceeded"}
+					return GovDecision{Status: 429, Reason: "token quota exceeded", Code: audit.DenyTeamQuotaExceeded}
 				}
 			}
 		}
@@ -173,20 +175,20 @@ func (g *Governor) PreCheck(team, keyID string, kp KeyPolicy, estimateTokens int
 		if p.BudgetMicrosPerMonth > 0 {
 			if g.bud.Check("budget:"+team, 0, p.BudgetMicrosPerMonth, 30*24*time.Hour) == budget.Block {
 				if p.BudgetExceeded != "warn" {
-					return GovDecision{Status: 402, Reason: "budget exceeded"}
+					return GovDecision{Status: 402, Reason: "budget exceeded", Code: audit.DenyTeamBudgetExceeded}
 				}
 			}
 		}
 	}
 	// Per-key limits (§8 D2) — independent of team governance, always block.
 	if kp.RatePerMin > 0 && !g.lim.AllowRate("rate:key:"+keyID, 1, kp.RatePerMin, kp.RatePerMin) {
-		return GovDecision{Status: 429, Reason: "key rate limit exceeded"}
+		return GovDecision{Status: 429, Reason: "key rate limit exceeded", Code: audit.DenyKeyRateLimited}
 	}
 	if kp.TokensPerMinute > 0 && !g.lim.AllowRate("tpm:key:"+keyID, estimateTokens, kp.TokensPerMinute, kp.TokensPerMinute) {
-		return GovDecision{Status: 429, Reason: "key token rate limit exceeded"}
+		return GovDecision{Status: 429, Reason: "key token rate limit exceeded", Code: audit.DenyKeyTokenRateLimited}
 	}
 	if kp.BudgetMicrosPerMonth > 0 && g.bud.Check("budget:key:"+keyID, 0, kp.BudgetMicrosPerMonth, 30*24*time.Hour) == budget.Block {
-		return GovDecision{Status: 402, Reason: "key budget exceeded"}
+		return GovDecision{Status: 402, Reason: "key budget exceeded", Code: audit.DenyKeyBudgetExceeded}
 	}
 	return GovDecision{Allowed: true}
 }
