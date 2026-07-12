@@ -979,3 +979,12 @@ func TestLoadRaw_ProviderHealthCheckMalformedInterval(t *testing.T) {
 		t.Fatal("malformed provider_health_check.interval must be rejected")
 	}
 }
+
+func TestLoadRaw_ProviderHealthCheckEmptyIntervalRejected(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	os.WriteFile(f, []byte(`{"provider_health_check":{}}`), 0o600)
+	if _, err := Load(f); err == nil {
+		t.Fatal("present-but-empty provider_health_check.interval must be rejected (else time.NewTicker(0) panics at startup)")
+	}
+}

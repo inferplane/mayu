@@ -597,10 +597,15 @@ func validateBudgetAlerts(ba *BudgetAlertsConfig) error {
 }
 
 // validateProviderHealthCheck checks the opt-in provider_health_check block
-// (ADR-014 deferred item). nil block (probing off) is valid.
+// (ADR-014 deferred item). nil block (probing off) is valid, but a present
+// block must carry a non-empty interval -- an empty string would otherwise
+// parse to a zero time.Duration and panic the ticker the worker starts with.
 func validateProviderHealthCheck(phc *ProviderHealthCheckConfig) error {
 	if phc == nil {
 		return nil
+	}
+	if phc.Interval == "" {
+		return fmt.Errorf("config: provider_health_check.interval is required when provider_health_check is present")
 	}
 	return validateDurationString("provider_health_check.interval", phc.Interval, time.Millisecond)
 }
