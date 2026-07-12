@@ -31,6 +31,7 @@ const recentCap = 50
 type Fire struct {
 	TS          string  `json:"ts"`
 	Team        string  `json:"team"`
+	KeyID       string  `json:"key_id,omitempty"`
 	Threshold   float64 `json:"threshold"`
 	Ratio       float64 `json:"ratio"`
 	SpentMicros int64   `json:"spent_usd_micros"`
@@ -51,10 +52,14 @@ type Notifier struct {
 	client     *http.Client
 	wg         sync.WaitGroup // tracks in-flight deliver() goroutines, for graceful shutdown
 
-	mu     sync.Mutex
-	fired  map[string]float64 // team -> highest threshold fired in the current window
-	recent []Fire             // newest first, capped at recentCap
-	now    func() time.Time
+	mu sync.Mutex
+	// fired tracks the highest threshold fired per team; firedKey is the exact
+	// same shape but keyed on key ID, in an entirely separate map — a team and
+	// a key that happen to share a string value can never collide.
+	fired    map[string]float64
+	firedKey map[string]float64
+	recent   []Fire // newest first, capped at recentCap
+	now      func() time.Time
 }
 
 // New builds a Notifier. thresholds need not be sorted; empty/non-positive
@@ -75,6 +80,7 @@ func New(webhookURL string, thresholds []float64, timeout time.Duration) *Notifi
 		thresholds: ts,
 		client:     &http.Client{Timeout: timeout},
 		fired:      map[string]float64{},
+		firedKey:   map[string]float64{},
 		now:        time.Now,
 	}
 }
@@ -128,6 +134,56 @@ func (n *Notifier) Observe(team string, spentMicros, limitMicros int64) {
 	go n.deliver(fire)
 }
 
+// ObserveKey evaluates one key's post-debit spend against limit and fires the
+// highest newly-crossed threshold, if any. Called synchronously from the
+// governance Settle path — the ratio math is cheap; delivery happens on a
+// separate goroutine so a slow/unreachable webhook never adds request latency.
+func (n *Notifier) ObserveKey(team, keyID string, spentMicros, limitMicros int64) {
+	if n == nil || limitMicros <= 0 || len(n.thresholds) == 0 {
+		return
+	}
+	ratio := float64(spentMicros) / float64(limitMicros)
+
+	n.mu.Lock()
+	prev := n.firedKey[keyID]
+	// A ratio below the last-fired threshold means the budget window rolled
+	// over (or the limit was raised) since we last fired — re-arm.
+	// ponytail: ratio-drop heuristic instead of exposing windowEnd from
+	// BudgetStore; widen the interface if a real edge case needs it.
+	if ratio < prev {
+		prev = 0
+	}
+	var crossed float64
+	for _, t := range n.thresholds {
+		if ratio >= t && t > prev {
+			crossed = t
+		}
+	}
+	if crossed == 0 {
+		if prev == 0 {
+			delete(n.firedKey, keyID) // bound map size: nothing armed, no need to remember this team
+		} else {
+			n.firedKey[keyID] = prev
+		}
+		n.mu.Unlock()
+		return
+	}
+	n.firedKey[keyID] = crossed
+	n.mu.Unlock()
+
+	fire := Fire{
+		TS:          n.now().UTC().Format(time.RFC3339Nano),
+		Team:        team,
+		KeyID:       keyID,
+		Threshold:   crossed,
+		Ratio:       ratio,
+		SpentMicros: spentMicros,
+		LimitMicros: limitMicros,
+	}
+	n.wg.Add(1)
+	go n.deliver(fire)
+}
+
 // Close waits for in-flight webhook deliveries to finish (bounded by each
 // delivery's own http.Client timeout), so a graceful shutdown does not
 // silently abandon an alert POST spawned in the last window. Safe to call
@@ -141,7 +197,7 @@ func (n *Notifier) Close() {
 
 func (n *Notifier) deliver(fire Fire) {
 	defer n.wg.Done()
-	body, _ := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"event":            "budget_alert",
 		"team":             fire.Team,
 		"threshold":        fire.Threshold,
@@ -149,7 +205,11 @@ func (n *Notifier) deliver(fire Fire) {
 		"spent_usd_micros": fire.SpentMicros,
 		"limit_usd_micros": fire.LimitMicros,
 		"ts":               fire.TS,
-	})
+	}
+	if fire.KeyID != "" {
+		payload["key_id"] = fire.KeyID
+	}
+	body, _ := json.Marshal(payload)
 	req, err := http.NewRequest(http.MethodPost, n.url, bytes.NewReader(body))
 	if err == nil {
 		req.Header.Set("Content-Type", "application/json")
