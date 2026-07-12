@@ -163,7 +163,21 @@ overridable.
 
 ## Deferred
 
-- Key-rotation rewrap CLI (format fixed now; manual procedure documented above).
+- ~~Key-rotation rewrap CLI (format fixed now; manual procedure documented
+  above).~~ — **implemented** (2026-07-12,
+  `docs/superpowers/plans/2026-07-12-body-key-rotation-cli.md`): `inferplane
+  bodies rewrap-key --store <path>|--postgres-dsn-env <VAR> --old-key-env
+  <VAR>|--old-key-file <path> --new-key-env <VAR>|--new-key-file <path>`
+  rewraps every row's `wrapped_key_*` columns, never touching `req_*`/`resp_*`
+  ciphertext. `internal/bodystore.RewrapKey` fails closed (one generic
+  `ErrRewrapFailed`, same posture as `Fetch`→`ErrGone`); `Store.UpdateWrappedKey`
+  is a compare-and-swap on the old wrapped bytes (safe against a live fleet
+  writing concurrently — no lease/quiesce needed, matching this store's
+  existing no-coordination design). Exits 1 (not 0) when zero rows matched the
+  given old key, so a wrong `--old-key-*` can't silently report success — see
+  the runbook (`docs/runbooks/body-key-rotation.md`) for the operational
+  caveat that a completed rotation re-run also exits 1 (indistinguishable from
+  a wrong key by design; there is deliberately no key-version column).
 - Response-body PII masking (no seam exists; stated as a limitation, not hidden).
 - Streaming-response body capture (would require buffering — rejected outright).
 - A `audit.log_bodies` toggle in the Settings view (config is file-authoritative

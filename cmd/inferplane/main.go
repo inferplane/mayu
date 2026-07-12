@@ -40,6 +40,8 @@ func main() {
 		}
 	case "audit":
 		os.Exit(auditCmd(os.Args[2:]))
+	case "bodies":
+		os.Exit(bodiesCmd(os.Args[2:]))
 	case "report":
 		os.Exit(reportCmd(os.Args[2:]))
 	default:
@@ -55,6 +57,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  inferplane keys list --store <path>")
 	fmt.Fprintln(os.Stderr, "  inferplane keys revoke --id <key_id> --store <path>")
 	fmt.Fprintln(os.Stderr, "  inferplane audit verify --file <path>")
+	fmt.Fprintln(os.Stderr, "  inferplane bodies rewrap-key --store <path> --old-key-env <VAR>|--old-key-file <path> --new-key-env <VAR>|--new-key-file <path>")
 	fmt.Fprintln(os.Stderr, "  inferplane report --file <path> [--since <RFC3339>] [--until <RFC3339>] [--by team|team,model]")
 }
 

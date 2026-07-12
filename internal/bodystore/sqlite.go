@@ -90,6 +90,36 @@ func (s *SQLiteStore) Delete(ctx context.Context, ref string) error {
 	return err
 }
 
+func (s *SQLiteStore) ListWrappedKeys(ctx context.Context) ([]WrappedKeyRow, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT ref, wrapped_key_nonce, wrapped_key_ct FROM bodies`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []WrappedKeyRow
+	for rows.Next() {
+		var r WrappedKeyRow
+		if err := rows.Scan(&r.Ref, &r.Nonce, &r.CT); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) UpdateWrappedKey(ctx context.Context, ref string, oldNonce, oldCT, newNonce, newCT []byte) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE bodies SET wrapped_key_nonce=?, wrapped_key_ct=? WHERE ref=? AND wrapped_key_nonce=? AND wrapped_key_ct=?`,
+		newNonce, newCT, ref, oldNonce, oldCT)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // Purge deletes expired rows (TTL), then — if still over maxBytes — the
 // oldest remaining rows until it isn't. See Store.Purge's doc.
 func (s *SQLiteStore) Purge(ctx context.Context, now time.Time, maxBytes int64) (int, error) {
