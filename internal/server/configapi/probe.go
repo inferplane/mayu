@@ -13,9 +13,9 @@ import (
 	"github.com/inferplane/inferplane/providers"
 )
 
-// probeTimeout bounds one connection probe end to end. It is a var (not const)
+// ProbeTimeout bounds one connection probe end to end. It is a var (not const)
 // so tests can shorten it.
-var probeTimeout = 8 * time.Second
+var ProbeTimeout = 8 * time.Second
 
 // blockedProbeIPs are addresses no legitimate LLM upstream uses; the SSRF guard
 // rejects them at dial time (on the resolved IP) so DNS rebinding cannot bypass
@@ -90,7 +90,7 @@ func ProbeHandler(storeEnabled bool, allowedHosts []string) http.Handler {
 			writeProbeJSON(rw, ProbeResult{OK: false, Detail: "probe unsupported for this provider type"})
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), probeTimeout)
+		ctx, cancel := context.WithTimeout(r.Context(), ProbeTimeout)
 		defer cancel()
 		res := hc.HealthCheck(ctx)
 		writeProbeJSON(rw, ProbeResult{OK: res.OK, LatencyMS: res.LatencyMS, Detail: res.Detail})
@@ -109,9 +109,9 @@ func writeProbeJSON(rw http.ResponseWriter, v ProbeResult) {
 // pinned to the validated IP (dialing it directly, not re-resolving), so DNS
 // rebinding (TOCTOU) cannot bypass the guard.
 func guardedClient(allow map[string]bool) *http.Client {
-	base := &net.Dialer{Timeout: probeTimeout}
+	base := &net.Dialer{Timeout: ProbeTimeout}
 	return &http.Client{
-		Timeout: probeTimeout,
+		Timeout: ProbeTimeout,
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				host, port, err := net.SplitHostPort(addr)

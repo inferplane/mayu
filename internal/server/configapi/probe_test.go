@@ -154,9 +154,9 @@ func TestProbe_AllowlistViolationBlocked(t *testing.T) {
 }
 
 func TestProbe_TimeoutHonored(t *testing.T) {
-	old := probeTimeout
-	probeTimeout = 20 * time.Millisecond
-	defer func() { probeTimeout = old }()
+	old := ProbeTimeout
+	ProbeTimeout = 20 * time.Millisecond
+	defer func() { ProbeTimeout = old }()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(200 * time.Millisecond)
 		w.WriteHeader(http.StatusOK)

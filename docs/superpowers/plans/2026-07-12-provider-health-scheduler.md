@@ -70,15 +70,25 @@ Steps:
 **Files:**
 - Create: `internal/server/configapi/health.go`
 - Modify: `internal/server/configapi/probe.go`
+- Modify: `internal/server/configapi/probe_test.go`
 - Modify: `internal/server/configapi/capabilities.go`
 - Test: `internal/server/configapi/health_test.go`
 - Test: `internal/server/configapi/capabilities_test.go`
 
 Steps:
-- [ ] `probe.go`: export the existing package-private `probeTimeout` constant as
-      `ProbeTimeout` (single rename, one usage site in this same file) — so
-      `healthProbeWorker` (Task 3) reuses the identical 8s bound instead of a second,
-      independently-drifting constant.
+- [ ] `probe.go`: export the existing package-private `probeTimeout` var as
+      `ProbeTimeout` (one usage site in this same file, `ProbeHandler`'s
+      `context.WithTimeout` call) — so `healthProbeWorker` (Task 3) reuses the identical
+      8s bound instead of a second, independently-drifting constant.
+      **Correction (caught mid-implementation, before landing):** the ORIGINAL draft of
+      this step said "single rename, one usage site" — wrong. `probe_test.go`'s
+      `TestProbe_TimeoutHonored` also reads/writes the package var DIRECTLY
+      (`old := probeTimeout; probeTimeout = 20 * time.Millisecond; defer func() {
+      probeTimeout = old }()`), since it's an in-package test (`package configapi`, not
+      `configapi_test`). Renaming the var without updating those two references breaks
+      that pre-existing test's compile. `probe_test.go` is added to this task's file list
+      above specifically for this two-line mechanical rename (no behavior change, no new
+      assertions) — do NOT touch anything else in that file.
 - [ ] `health.go`: define
       ```go
       type HealthRecord struct {
