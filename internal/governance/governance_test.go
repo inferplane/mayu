@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/budget"
 	"github.com/inferplane/inferplane/internal/limiter"
 	"github.com/inferplane/inferplane/internal/metrics"
@@ -33,6 +34,9 @@ func TestGovernorQuotaBlocks(t *testing.T) {
 	}
 	if dec.Status != 429 {
 		t.Fatalf("quota block status = %d, want 429", dec.Status)
+	}
+	if dec.Code != audit.DenyTeamQuotaExceeded {
+		t.Fatalf("quota block code = %q, want %q", dec.Code, audit.DenyTeamQuotaExceeded)
 	}
 }
 
@@ -72,8 +76,33 @@ func TestGovernorTPMBlocks(t *testing.T) {
 	if d := g.PreCheck("t", "", KeyPolicy{}, 800); !d.Allowed {
 		t.Fatalf("first: %+v", d)
 	}
-	if d := g.PreCheck("t", "", KeyPolicy{}, 800); d.Allowed {
+	d := g.PreCheck("t", "", KeyPolicy{}, 800)
+	if d.Allowed {
 		t.Fatalf("TPM should block second: %+v", d)
+	}
+	if d.Status != 429 {
+		t.Fatalf("TPM block status = %d, want 429", d.Status)
+	}
+	if d.Code != audit.DenyTeamTokenRateLimited {
+		t.Fatalf("TPM block code = %q, want %q", d.Code, audit.DenyTeamTokenRateLimited)
+	}
+}
+
+func TestGovernorTeamRPMBlocks(t *testing.T) {
+	teams := map[string]TeamPolicy{"t": {RatePerMin: 1, RateBurst: 1}}
+	g := NewGovernor(teams, limiter.NewMemory(), budget.NewMemory(), nil)
+	if d := g.PreCheck("t", "", KeyPolicy{}, 0); !d.Allowed {
+		t.Fatalf("first request under team RPM=1 must pass: %+v", d)
+	}
+	d := g.PreCheck("t", "", KeyPolicy{}, 0)
+	if d.Allowed {
+		t.Fatalf("second request must block on the team's RPM limit: %+v", d)
+	}
+	if d.Status != 429 {
+		t.Fatalf("team rate block status = %d, want 429", d.Status)
+	}
+	if d.Code != audit.DenyTeamRateLimited {
+		t.Fatalf("team rate block code = %q, want %q", d.Code, audit.DenyTeamRateLimited)
 	}
 }
 
@@ -108,6 +137,9 @@ func TestGovernorKeyRPMBlocksIndependentlyOfTeam(t *testing.T) {
 	if d := g.PreCheck("t", "k1", kp, 0); d.Status != 429 {
 		t.Fatalf("key rate block status = %d, want 429", d.Status)
 	}
+	if d := g.PreCheck("t", "k1", kp, 0); d.Code != audit.DenyKeyRateLimited {
+		t.Fatalf("key rate block code = %q, want %q", d.Code, audit.DenyKeyRateLimited)
+	}
 	// A different key on the same team has its own independent bucket.
 	if d := g.PreCheck("t", "k2", kp, 0); !d.Allowed {
 		t.Fatalf("a different key's bucket must be independent: %+v", d)
@@ -120,8 +152,15 @@ func TestGovernorKeyTPMBlocks(t *testing.T) {
 	if d := g.PreCheck("t", "k1", kp, 800); !d.Allowed {
 		t.Fatalf("first: %+v", d)
 	}
-	if d := g.PreCheck("t", "k1", kp, 800); d.Allowed {
+	d := g.PreCheck("t", "k1", kp, 800)
+	if d.Allowed {
 		t.Fatalf("key TPM should block second: %+v", d)
+	}
+	if d.Status != 429 {
+		t.Fatalf("key TPM block status = %d, want 429", d.Status)
+	}
+	if d.Code != audit.DenyKeyTokenRateLimited {
+		t.Fatalf("key TPM block code = %q, want %q", d.Code, audit.DenyKeyTokenRateLimited)
 	}
 }
 
@@ -141,6 +180,9 @@ func TestGovernorKeyBudgetBlocksAndDebitsIndependentlyOfTeam(t *testing.T) {
 	}
 	if d := g.PreCheck("t", "k1", kp, 0); d.Status != 402 {
 		t.Fatalf("key budget block status = %d, want 402", d.Status)
+	}
+	if d := g.PreCheck("t", "k1", kp, 0); d.Code != audit.DenyKeyBudgetExceeded {
+		t.Fatalf("key budget block code = %q, want %q", d.Code, audit.DenyKeyBudgetExceeded)
 	}
 	// A different key is unaffected by k1's spend.
 	if d := g.PreCheck("t", "k2", kp, 0); !d.Allowed {
@@ -173,8 +215,15 @@ func TestGovernorCountersIndependentOfTable(t *testing.T) {
 		t.Fatalf("800k < 1M cap should still allow: %+v", d)
 	}
 	g.Settle("t", "", KeyPolicy{}, "p", "m", pricing.Usage{Input: 400_000}, tbl) // 1.2M > cap
-	if d := g.PreCheck("t", "", KeyPolicy{}, 0); d.Allowed {
+	d := g.PreCheck("t", "", KeyPolicy{}, 0)
+	if d.Allowed {
 		t.Fatal("budget counter did not accumulate across Settle calls (table-independent state expected)")
+	}
+	if d.Status != 402 {
+		t.Fatalf("team budget block status = %d, want 402", d.Status)
+	}
+	if d.Code != audit.DenyTeamBudgetExceeded {
+		t.Fatalf("team budget block code = %q, want %q", d.Code, audit.DenyTeamBudgetExceeded)
 	}
 }
 
