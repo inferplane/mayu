@@ -26,7 +26,7 @@ func TestOverlayReplacesTopologyKeepsRest(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	_ = s.UpsertProvider(ctx, ProviderRow{Name: "db-prov", Type: "anthropic", BaseURL: "https://db", APIKeyRefEnv: "DB_KEY"})
-	_ = s.SetModel(ctx, "db-model", []Target{{Provider: "db-prov", Model: "y", API: "converse"}})
+	_ = s.SetModel(ctx, "db-model", ModelRoute{Targets: []Target{{Provider: "db-prov", Model: "y", API: "converse"}}})
 
 	eff, err := Overlay(fileCfg(), s)
 	if err != nil {
@@ -137,6 +137,67 @@ func TestGuardrailRoundTripsThroughRowConversion(t *testing.T) {
 	}
 }
 
+// TestModelRouteRoundTripsThroughRouteConversion mirrors
+// TestAuthHeaderRoundTripsThroughRowConversion for the model side: a file
+// model's aliases must survive routeFromModelConfig → (DB) →
+// modelConfigFromRoute (ADR-021 follow-up: providerstore alias support).
+func TestModelRouteRoundTripsThroughRouteConversion(t *testing.T) {
+	mc := config.ModelConfig{
+		Aliases: []string{"apac.anthropic.claude-sonnet-4-6"},
+		Targets: []config.Target{{Provider: "ant", Model: "claude-sonnet-4-6"}},
+	}
+	route := routeFromModelConfig(mc)
+	if len(route.Aliases) != 1 || route.Aliases[0] != "apac.anthropic.claude-sonnet-4-6" {
+		t.Fatalf("routeFromModelConfig dropped aliases: %+v", route)
+	}
+	back := modelConfigFromRoute(route)
+	if len(back.Aliases) != 1 || back.Aliases[0] != "apac.anthropic.claude-sonnet-4-6" {
+		t.Fatalf("modelConfigFromRoute dropped aliases: %+v", back)
+	}
+}
+
+// TestOverlayPreservesModelAliases is the same guarantee at the overlay level:
+// a DB-registered model's aliases survive Overlay (SQLite → config.ModelConfig).
+func TestOverlayPreservesModelAliases(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_ = s.UpsertProvider(ctx, ProviderRow{Name: "db-prov", Type: "anthropic"})
+	_ = s.SetModel(ctx, "db-model", ModelRoute{
+		Aliases: []string{"apac.db-model"},
+		Targets: []Target{{Provider: "db-prov", Model: "y"}},
+	})
+	eff, err := Overlay(fileCfg(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := eff.Models["db-model"].Aliases; len(got) != 1 || got[0] != "apac.db-model" {
+		t.Fatalf("overlay lost model aliases: %+v", eff.Models["db-model"])
+	}
+}
+
+// TestSeedIfEmptyPreservesModelAliases is the seed-path regression test
+// analogous to TestSeedIfEmptyPreservesGuardrail: a config-file-declared
+// model's aliases must survive SeedIfEmpty's file→DB import.
+func TestSeedIfEmptyPreservesModelAliases(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	cfg := fileCfg()
+	cfg.Models["file-model"] = config.ModelConfig{
+		Aliases: []string{"file-model-alias"},
+		Targets: []config.Target{{Provider: "file-prov", Model: "x"}},
+	}
+	if err := SeedIfEmpty(ctx, s, cfg); err != nil {
+		t.Fatal(err)
+	}
+	ml, err := s.ListModels(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ml["file-model"].Aliases; len(got) != 1 || got[0] != "file-model-alias" {
+		t.Fatalf("seed lost model aliases: %+v", ml["file-model"])
+	}
+}
+
 // TestSeedIfEmptyPreservesGuardrail is the regression test for the bug this
 // plan fixes: rowFromProviderConfig previously dropped GuardrailID/Version
 // entirely, so a config-file-declared bedrock provider's guardrail was
@@ -170,7 +231,7 @@ func TestSeedIfEmptySeedsOnceFromFile(t *testing.T) {
 	if len(pl) != 1 || pl[0].Name != "file-prov" {
 		t.Fatalf("seed did not import file providers: %+v", pl)
 	}
-	if len(ml) != 1 || len(ml["file-model"]) != 1 {
+	if len(ml) != 1 || len(ml["file-model"].Targets) != 1 {
 		t.Fatalf("seed did not import file models: %+v", ml)
 	}
 	if pl[0].APIKeyRefEnv != "FILE_KEY" {

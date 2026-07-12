@@ -86,7 +86,7 @@ func TestWriteProviderAndModelAppliesTopology(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("WriteProvider: %v", err)
 	}
-	if err := g.WriteModel(ctx, "m2", []providerstore.Target{{Provider: "up2", Model: "m2up"}}); err != nil {
+	if err := g.WriteModel(ctx, "m2", providerstore.ModelRoute{Targets: []providerstore.Target{{Provider: "up2", Model: "m2up"}}}); err != nil {
 		t.Fatalf("WriteModel: %v", err)
 	}
 	chain, _, err := g.router.ResolveChain("m2")
@@ -114,7 +114,7 @@ func TestWriteProviderAuthHeaderBearerWiredToUpstream(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("WriteProvider: %v", err)
 	}
-	if err := g.WriteModel(ctx, "m-bearer", []providerstore.Target{{Provider: "or", Model: "claude-test"}}); err != nil {
+	if err := g.WriteModel(ctx, "m-bearer", providerstore.ModelRoute{Targets: []providerstore.Target{{Provider: "or", Model: "claude-test"}}}); err != nil {
 		t.Fatalf("WriteModel: %v", err)
 	}
 
@@ -137,13 +137,52 @@ func TestWriteProviderAuthHeaderBearerWiredToUpstream(t *testing.T) {
 func TestWriteInvalidTopologyNothingPersisted(t *testing.T) {
 	g := newPstoreGateway(t)
 	ctx := context.Background()
-	err := g.WriteModel(ctx, "bad", []providerstore.Target{{Provider: "ghost", Model: "x"}})
+	err := g.WriteModel(ctx, "bad", providerstore.ModelRoute{Targets: []providerstore.Target{{Provider: "ghost", Model: "x"}}})
 	if !errors.Is(err, configapi.ErrInvalidTopology) {
 		t.Fatalf("route to missing provider = %v, want ErrInvalidTopology", err)
 	}
 	models, _ := g.pstore.ListModels(ctx)
 	if _, ok := models["bad"]; ok {
 		t.Fatal("invalid model route must NOT be persisted")
+	}
+}
+
+// TestWriteModelAliasCollisionRejected (ADR-021 follow-up): a UI-written
+// model's alias colliding with an existing model NAME is rejected at
+// writeMutation (config.ValidateModelAliases on the candidate effective
+// config), matching the file-config path's validateModelAliases guard —
+// nothing is persisted on rejection.
+func TestWriteModelAliasCollisionRejected(t *testing.T) {
+	g := newPstoreGateway(t)
+	ctx := context.Background()
+	// pstoreConfig seeds model "m" — an alias equal to "m" must collide.
+	err := g.WriteModel(ctx, "n", providerstore.ModelRoute{
+		Aliases: []string{"m"},
+		Targets: []providerstore.Target{{Provider: "up", Model: "x"}},
+	})
+	if !errors.Is(err, configapi.ErrInvalidTopology) {
+		t.Fatalf("alias colliding with a model name = %v, want ErrInvalidTopology", err)
+	}
+	models, _ := g.pstore.ListModels(ctx)
+	if _, ok := models["n"]; ok {
+		t.Fatal("model with a colliding alias must NOT be persisted")
+	}
+}
+
+// TestWriteModelAliasAppliesTopology: a UI write registers a model alias, and
+// the alias resolves to the canonical model through the live topology
+// (Router.Canonical), the same path a config-file alias takes.
+func TestWriteModelAliasAppliesTopology(t *testing.T) {
+	g := newPstoreGateway(t)
+	ctx := context.Background()
+	if err := g.WriteModel(ctx, "m2", providerstore.ModelRoute{
+		Aliases: []string{"apac.m2"},
+		Targets: []providerstore.Target{{Provider: "up", Model: "m2up"}},
+	}); err != nil {
+		t.Fatalf("WriteModel: %v", err)
+	}
+	if got := g.router.Canonical("apac.m2"); got != "m2" {
+		t.Fatalf("Canonical(apac.m2) = %q, want %q", got, "m2")
 	}
 }
 

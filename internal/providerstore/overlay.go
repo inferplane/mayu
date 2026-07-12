@@ -42,15 +42,15 @@ func Overlay(rawFileCfg *config.Config, store Store) (*config.Config, error) {
 // It is shared by Overlay (boot/reload reads the store) and the write path
 // (which builds a candidate from the current store PLUS the pending mutation, so
 // the validated generation is the one published — build-once-swap-once).
-func OverlayFrom(rawFileCfg *config.Config, provs []ProviderRow, models map[string][]Target) *config.Config {
+func OverlayFrom(rawFileCfg *config.Config, provs []ProviderRow, models map[string]ModelRoute) *config.Config {
 	eff := *rawFileCfg // shallow copy; Providers/Models are replaced with fresh maps below
 	eff.Providers = make(map[string]config.ProviderConfig, len(provs))
 	for _, p := range provs {
 		eff.Providers[p.Name] = providerConfigFromRow(p)
 	}
 	eff.Models = make(map[string]config.ModelConfig, len(models))
-	for name, targets := range models {
-		eff.Models[name] = config.ModelConfig{Targets: targetsToConfig(targets)}
+	for name, route := range models {
+		eff.Models[name] = modelConfigFromRoute(route)
 	}
 	return &eff
 }
@@ -71,9 +71,9 @@ func SeedIfEmpty(ctx context.Context, store Store, rawFileCfg *config.Config) er
 		}
 		provs = append(provs, rowFromProviderConfig(name, pc))
 	}
-	models := make(map[string][]Target, len(rawFileCfg.Models))
+	models := make(map[string]ModelRoute, len(rawFileCfg.Models))
 	for name, mc := range rawFileCfg.Models {
-		models[name] = targetsFromConfig(mc.Targets)
+		models[name] = routeFromModelConfig(mc)
 	}
 	did, err := store.Seed(ctx, provs, models)
 	if err != nil {
@@ -112,6 +112,24 @@ func rowFromProviderConfig(name string, pc config.ProviderConfig) ProviderRow {
 		r.APIKeyRefFile = pc.APIKeyRef.File
 	}
 	return r
+}
+
+// modelConfigFromRoute maps a DB ModelRoute to a config.ModelConfig — the model
+// analog of providerConfigFromRow.
+func modelConfigFromRoute(r ModelRoute) config.ModelConfig {
+	return config.ModelConfig{
+		Aliases: append([]string(nil), r.Aliases...),
+		Targets: targetsToConfig(r.Targets),
+	}
+}
+
+// routeFromModelConfig maps a file ModelConfig to a DB ModelRoute — the model
+// analog of rowFromProviderConfig.
+func routeFromModelConfig(mc config.ModelConfig) ModelRoute {
+	return ModelRoute{
+		Aliases: append([]string(nil), mc.Aliases...),
+		Targets: targetsFromConfig(mc.Targets),
+	}
 }
 
 func targetsToConfig(ts []Target) []config.Target {

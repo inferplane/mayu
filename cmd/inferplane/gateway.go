@@ -602,7 +602,7 @@ func (g *gateway) reloadLocked() error {
 // ErrInvalidTopology is returned (→ 400); (2) persists the mutation; (3) swaps
 // the ALREADY-VALIDATED generation. The state published is byte-for-byte the one
 // validated, so the DB can never hold a row that fails to build.
-func (g *gateway) writeMutation(ctx context.Context, persist func(context.Context) error, mutate func(provs map[string]providerstore.ProviderRow, models map[string][]providerstore.Target)) error {
+func (g *gateway) writeMutation(ctx context.Context, persist func(context.Context) error, mutate func(provs map[string]providerstore.ProviderRow, models map[string]providerstore.ModelRoute)) error {
 	g.reloadMu.Lock()
 	defer g.reloadMu.Unlock()
 
@@ -629,6 +629,10 @@ func (g *gateway) writeMutation(ctx context.Context, persist func(context.Contex
 		provSlice = append(provSlice, p)
 	}
 	eff := providerstore.OverlayFrom(raw, provSlice, models)
+	if err := config.ValidateModelAliases(eff.Models); err != nil {
+		fmt.Fprintln(os.Stderr, "inferplane: rejected UI write (aliases):", err)
+		return configapi.ErrInvalidTopology
+	}
 	if err := config.ResolveProviders(eff); err != nil {
 		// Log the detail server-side; the client gets a fixed, sanitized 400 so a
 		// ref / build detail never leaks in the response (P4 M1).
@@ -655,7 +659,7 @@ func (g *gateway) writeMutation(ctx context.Context, persist func(context.Contex
 func (g *gateway) WriteProvider(ctx context.Context, row providerstore.ProviderRow) error {
 	return g.writeMutation(ctx,
 		func(ctx context.Context) error { return g.pstore.UpsertProvider(ctx, row) },
-		func(provs map[string]providerstore.ProviderRow, _ map[string][]providerstore.Target) {
+		func(provs map[string]providerstore.ProviderRow, _ map[string]providerstore.ModelRoute) {
 			provs[row.Name] = row
 		},
 	)
@@ -664,17 +668,17 @@ func (g *gateway) WriteProvider(ctx context.Context, row providerstore.ProviderR
 func (g *gateway) DeleteProvider(ctx context.Context, name string) error {
 	return g.writeMutation(ctx,
 		func(ctx context.Context) error { return g.pstore.DeleteProvider(ctx, name) },
-		func(provs map[string]providerstore.ProviderRow, _ map[string][]providerstore.Target) {
+		func(provs map[string]providerstore.ProviderRow, _ map[string]providerstore.ModelRoute) {
 			delete(provs, name)
 		},
 	)
 }
 
-func (g *gateway) WriteModel(ctx context.Context, name string, targets []providerstore.Target) error {
+func (g *gateway) WriteModel(ctx context.Context, name string, route providerstore.ModelRoute) error {
 	return g.writeMutation(ctx,
-		func(ctx context.Context) error { return g.pstore.SetModel(ctx, name, targets) },
-		func(_ map[string]providerstore.ProviderRow, models map[string][]providerstore.Target) {
-			models[name] = targets
+		func(ctx context.Context) error { return g.pstore.SetModel(ctx, name, route) },
+		func(_ map[string]providerstore.ProviderRow, models map[string]providerstore.ModelRoute) {
+			models[name] = route
 		},
 	)
 }
@@ -682,7 +686,7 @@ func (g *gateway) WriteModel(ctx context.Context, name string, targets []provide
 func (g *gateway) DeleteModel(ctx context.Context, name string) error {
 	return g.writeMutation(ctx,
 		func(ctx context.Context) error { return g.pstore.DeleteModel(ctx, name) },
-		func(_ map[string]providerstore.ProviderRow, models map[string][]providerstore.Target) {
+		func(_ map[string]providerstore.ProviderRow, models map[string]providerstore.ModelRoute) {
 			delete(models, name)
 		},
 	)

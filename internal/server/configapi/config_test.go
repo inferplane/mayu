@@ -97,6 +97,19 @@ func TestViewFromEchoesGuardrailFields(t *testing.T) {
 	}
 }
 
+// TestViewFromEchoesModelAliases: aliases are not secrets (same category as
+// GuardrailID) and must be echoed back for the console to prefill an edit
+// (ADR-021 follow-up).
+func TestViewFromEchoesModelAliases(t *testing.T) {
+	models := map[string]config.ModelConfig{
+		"claude": {Aliases: []string{"apac.claude"}, Targets: []config.Target{{Provider: "p", Model: "x"}}},
+	}
+	v := ViewFrom(nil, models)
+	if len(v.Models) != 1 || len(v.Models[0].Aliases) != 1 || v.Models[0].Aliases[0] != "apac.claude" {
+		t.Fatalf("model aliases not echoed: %+v", v.Models)
+	}
+}
+
 func TestViewProvidersAndModelsSorted(t *testing.T) {
 	// Deterministic order (maps are unordered) so the console renders stably.
 	providers := map[string]config.ProviderConfig{"zeta": {Type: "anthropic"}, "alpha": {Type: "bedrock"}}

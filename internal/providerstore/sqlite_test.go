@@ -210,6 +210,67 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 	}
 }
 
+// TestMigrationAddsModelAliasesTable opens a store whose DB predates the
+// model_aliases table (created with a schema that already has the guardrail
+// columns, mirroring a real deployment mid-upgrade) and confirms OpenSQLite
+// creates it (CREATE TABLE IF NOT EXISTS — no ALTER-TABLE needed for a brand
+// new table, unlike a new column on an existing one) rather than failing, and
+// that the store is immediately usable with model aliases (ADR-021 follow-up).
+func TestMigrationAddsModelAliasesTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const oldSchema = `
+CREATE TABLE providers (
+    name             TEXT PRIMARY KEY,
+    type             TEXT NOT NULL,
+    base_url         TEXT NOT NULL DEFAULT '',
+    region           TEXT NOT NULL DEFAULT '',
+    auth_mode        TEXT NOT NULL DEFAULT '',
+    auth_profile     TEXT NOT NULL DEFAULT '',
+    api_key_ref_env  TEXT NOT NULL DEFAULT '',
+    api_key_ref_file TEXT NOT NULL DEFAULT '',
+    auth_header      TEXT NOT NULL DEFAULT '',
+    guardrail_id      TEXT NOT NULL DEFAULT '',
+    guardrail_version TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE model_targets (model TEXT, position INTEGER, provider TEXT, model_id TEXT, api TEXT, PRIMARY KEY (model, position));
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+`
+	if _, err := old.Exec(oldSchema); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`INSERT INTO model_targets (model, position, provider, model_id, api) VALUES ('pre-existing', 0, 'p', 'x', '')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("OpenSQLite on pre-migration schema: %v", err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+
+	if err := s.SetModel(ctx, "new", ModelRoute{Aliases: []string{"new-alias"}, Targets: []Target{{Provider: "p", Model: "y"}}}); err != nil {
+		t.Fatalf("SetModel after migration: %v", err)
+	}
+	ml, err := s.ListModels(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ml["new"].Aliases; len(got) != 1 || got[0] != "new-alias" {
+		t.Fatalf("post-migration alias write: %+v", ml["new"])
+	}
+	if len(ml["pre-existing"].Targets) != 1 {
+		t.Fatalf("pre-existing model_targets row lost across migration: %+v", ml["pre-existing"])
+	}
+}
+
 func TestProviderUpsertReplaces(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

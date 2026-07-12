@@ -32,10 +32,13 @@ type TargetView struct {
 	API      string `json:"api,omitempty"`
 }
 
-// ModelView lists a model's targets in priority order (target[0] is primary,
-// the rest are the fallback chain).
+// ModelView lists a model's aliases and targets in priority order (target[0]
+// is primary, the rest are the fallback chain). Aliases are non-secret (same
+// category as a provider's Region/GuardrailID) — echoed so the console can
+// prefill an edit (ADR-021 follow-up).
 type ModelView struct {
 	Name    string       `json:"name"`
+	Aliases []string     `json:"aliases,omitempty"`
 	Targets []TargetView `json:"targets"`
 }
 
@@ -68,7 +71,7 @@ func ViewFrom(providers map[string]config.ProviderConfig, models map[string]conf
 	sort.Slice(v.Providers, func(i, j int) bool { return v.Providers[i].Name < v.Providers[j].Name })
 
 	for name, mc := range models {
-		mv := ModelView{Name: name, Targets: make([]TargetView, 0, len(mc.Targets))}
+		mv := ModelView{Name: name, Aliases: mc.Aliases, Targets: make([]TargetView, 0, len(mc.Targets))}
 		for _, t := range mc.Targets {
 			mv.Targets = append(mv.Targets, TargetView{Provider: t.Provider, Model: t.Model, API: t.API})
 		}

@@ -45,6 +45,10 @@ CREATE TABLE IF NOT EXISTS model_targets (
     api      TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (model, position)
 );
+CREATE TABLE IF NOT EXISTS model_aliases (
+    model TEXT NOT NULL,
+    alias TEXT PRIMARY KEY
+);
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
