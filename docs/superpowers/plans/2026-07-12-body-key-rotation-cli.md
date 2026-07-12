@@ -79,6 +79,12 @@ Steps:
       succeeds (recovers the SAME req/resp bytes) while the old key no longer opens it.
       `TestRewrapKey_WrongOldKeyFails` — call with a master key that never wrapped this row;
       `RewrapKey` returns `ErrRewrapFailed` (never a corrupted-but-succeeding rewrap).
+      `TestRewrapKey_MalformedDataKeyLengthFails` (pins the round-1 CRITICAL fix, plan-gate
+      round-2 NIT): `seal(testKey(t,1), []byte("not-32-bytes"))` directly (bypassing
+      `sealEnvelope`, to construct a wrapped-key blob whose plaintext is authentic under
+      `testKey(t,1)` but the wrong length) → `RewrapKey(testKey(t,1), testKey(t,2), that
+      sealed's nonce/ct)` must return `ErrRewrapFailed`, not a "successful" reseal of the
+      malformed bytes.
 
 ### Task 2: `Store` gains row-iteration + wrapped-key update
 
@@ -141,11 +147,26 @@ plan-gate's earlier claim that this would be *inconsistent* with `auditCmd`.
 most: an operator passing the WRONG `--old-key-env` gets 0 rewrapped, N skipped, exit 0 — and
 walks away believing rotation succeeded, while every row is still only readable by the (never
 actually retired) old key. Fix: exit 1 when the store was non-empty AND zero rows were
-rewrapped (nothing matched the given old key at all — almost certainly a wrong key, not
-"already fully rotated," since a fully-rotated store would still let you re-run harmlessly
-with 0 rewrapped/0 skipped, no rows to visit). A run with SOME rewrapped and some skipped
-(the "resuming an interrupted prior rotation" case) still exits 0 — partial progress on a
-plausible key is not the failure mode being guarded against.
+rewrapped (nothing matched the given old key at all).
+
+**Round-2 correction (plan-gate round 2, opus + codex, both confirmed against the actual
+code):** the round-1 draft above justified this by claiming a re-run against an
+already-fully-rotated store would harmlessly report "0 rewrapped/0 skipped, no rows to
+visit." That is factually wrong and contradicts this plan's OWN Out-of-scope note: rewrap
+never deletes rows (`UpdateWrappedKey` only overwrites `wrapped_key_*`), and there is
+deliberately no key-version column, so re-running the exact same `oldKey→newKey` command
+against a store that `oldKey` already fully rotated OUT of will find every row still present,
+try to unwrap each with `oldKey`, fail every time (they're now wrapped with `newKey`), and hit
+the identical `rewrapped==0 && skipped>0 → exit 1` path as a genuinely wrong key. **This is not
+a bug to fix — it is the same "cannot distinguish wrong-key from already-rotated" limitation
+already stated in Out-of-scope, and exit 1 is still the correct, honest signal for
+either case** (staying silent/exit-0 on either would be the actual fail-open risk). The
+runbook (below) must say so explicitly rather than promising a harmless 0/0 re-run: an
+operator who sees `rewrapped=0 skipped=N exit=1` on a re-run should read it as "nothing
+needed doing here" if they're confident about the key, not as a hard failure to alarm on. A
+run with SOME rewrapped and some skipped (the "resuming an interrupted prior rotation" case)
+still exits 0 — partial progress on a plausible key is not the failure mode being guarded
+against.
 
 Steps:
 - [ ] `main.go`: add a `"bodies"` case to the subcommand dispatch (mirrors the `"audit"` case
@@ -203,8 +224,13 @@ Steps:
 - `docs/reference/data.md`: add one clause to the existing "Body store"/"Body 스토어" row
   noting the `bodies rewrap-key` CLI rotates `wrapped_key_*` without touching `req_*`/`resp_*`.
 - `docs/runbooks/body-key-rotation.md` (new): operator-facing procedure — when to rotate,
-  the exact command invocation, what "skipped" in the summary output means, and the
-  explicit non-goal (this does not migrate `req_*`/`resp_*` ciphertext, only the wrap).
+  the exact command invocation, what "skipped"/"raced" in the summary output mean, the
+  explicit non-goal (this does not migrate `req_*`/`resp_*` ciphertext, only the wrap), and
+  the round-2-corrected exit-code note: `exit 1` with `rewrapped=0` means "the given old key
+  opened nothing in this store" — either the key is wrong, or this store was already fully
+  rotated to what you're calling the new key; the two are indistinguishable by design
+  (no key-version column). Re-running the exact same command a second time is expected to
+  also exit 1 once rotation has genuinely completed — that is not a failure to page on.
 
 ## Out of scope
 
