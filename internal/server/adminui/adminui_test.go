@@ -380,6 +380,22 @@ func TestAdminUI_budgetAlertsWired(t *testing.T) {
 	}
 }
 
+// TestAdminUI_alertsTableShowsKeyColumn (ADR-017 per-key follow-up): without
+// this, a key-scoped fire renders indistinguishable from a team-level one in
+// the console (same columns, Team still populated) — a real console-
+// correctness gap, not cosmetic.
+func TestAdminUI_alertsTableShowsKeyColumn(t *testing.T) {
+	_, html := get(t, "/index.html")
+	if !strings.Contains(html, "<th>key</th>") {
+		t.Error("index.html alerts-table missing the <th>key</th> column")
+	}
+
+	_, js := get(t, "/app.js")
+	if !strings.Contains(js, "f.key_id") {
+		t.Error("app.js alerts render loop missing f.key_id")
+	}
+}
+
 // TestAdminUI_guardrailFieldsWired (D6, ADR-019): the team form carries the
 // guardrail override inputs, submits them through the existing token-gated
 // PUT /admin/teams/{name} call (no new endpoint), and states the no-opt-out

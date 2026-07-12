@@ -273,6 +273,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 		}
 		notifier = alert.New(ba.WebhookURL, ba.Thresholds, timeout)
 		gov.SetBudgetNotify(notifier.Observe)
+		gov.SetKeyBudgetNotify(notifier.ObserveKey)
 		fmt.Println("inferplane: budget alerts enabled")
 	}
 

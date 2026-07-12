@@ -261,8 +261,9 @@ func TestGovernorSettleBudgetNotify_UnbudgetedTeamSkipped(t *testing.T) {
 }
 
 func TestGovernorSettleBudgetNotify_KeyBudgetExcluded(t *testing.T) {
-	// Per-key budgets must never reach the notify hook: key_id can't be a
-	// metric/alert label (CLAUDE.md).
+	// Per-key budgets must never reach the TEAM notify hook: key_id can't be a
+	// metric/TEAM-alert label (CLAUDE.md). A dedicated per-key hook exists
+	// separately — see TestGovernorSettleKeyBudgetNotify.
 	teams := map[string]TeamPolicy{"t": {}} // no TEAM budget
 	g := NewGovernor(teams, limiter.NewMemory(), budget.NewMemory(), nil)
 	calls := 0
@@ -272,6 +273,66 @@ func TestGovernorSettleBudgetNotify_KeyBudgetExcluded(t *testing.T) {
 	g.Settle("t", "k1", kp, "p", "m", pricing.Usage{Input: 400_000}, tbl)
 	if calls != 0 {
 		t.Fatalf("key-budget debit must not invoke the team budget-notify hook, got %d calls", calls)
+	}
+}
+
+func TestGovernorSettleKeyBudgetNotify(t *testing.T) {
+	g := NewGovernor(map[string]TeamPolicy{"t": {}}, limiter.NewMemory(), budget.NewMemory(), nil)
+	var gotTeam, gotKeyID string
+	var gotSpent, gotLimit int64
+	calls := 0
+	g.SetKeyBudgetNotify(func(team, keyID string, spent, limit int64) {
+		calls++
+		gotTeam, gotKeyID, gotSpent, gotLimit = team, keyID, spent, limit
+	})
+	kp := KeyPolicy{BudgetMicrosPerMonth: 1_000_000}
+	tbl := testTable()
+	g.Settle("t", "k1", kp, "p", "m", pricing.Usage{Input: 400_000}, tbl) // 400k µUSD
+
+	if calls != 1 {
+		t.Fatalf("expected exactly one key-notify call, got %d", calls)
+	}
+	if gotTeam != "t" || gotKeyID != "k1" || gotSpent != 400_000 || gotLimit != 1_000_000 {
+		t.Fatalf("keyNotify(team=%q, keyID=%q, spent=%d, limit=%d), want (t, k1, 400000, 1000000)", gotTeam, gotKeyID, gotSpent, gotLimit)
+	}
+}
+
+func TestGovernorSettleKeyBudgetNotify_UnbudgetedKeySkipped(t *testing.T) {
+	g := NewGovernor(map[string]TeamPolicy{"t": {}}, limiter.NewMemory(), budget.NewMemory(), nil)
+	calls := 0
+	g.SetKeyBudgetNotify(func(string, string, int64, int64) { calls++ })
+	tbl := testTable()
+	g.Settle("t", "k1", KeyPolicy{}, "p", "m", pricing.Usage{Input: 400_000}, tbl) // no key budget configured
+	if calls != 0 {
+		t.Fatalf("unbudgeted key must not invoke the key-notify hook, got %d calls", calls)
+	}
+}
+
+// TestGovernorSettleBothBudgetHooksFireIndependently proves the two hooks
+// never cross-talk: a request with BOTH a team budget and a key budget
+// configured fires each hook exactly once, with its own figures.
+func TestGovernorSettleBothBudgetHooksFireIndependently(t *testing.T) {
+	teams := map[string]TeamPolicy{"t": {BudgetMicrosPerMonth: 10_000_000, BudgetExceeded: "block"}}
+	g := NewGovernor(teams, limiter.NewMemory(), budget.NewMemory(), nil)
+	var teamCalls, keyCalls int
+	var teamSpent, keySpent int64
+	g.SetBudgetNotify(func(team string, spent, limit int64) {
+		teamCalls++
+		teamSpent = spent
+	})
+	g.SetKeyBudgetNotify(func(team, keyID string, spent, limit int64) {
+		keyCalls++
+		keySpent = spent
+	})
+	kp := KeyPolicy{BudgetMicrosPerMonth: 1_000_000}
+	tbl := testTable()
+	g.Settle("t", "k1", kp, "p", "m", pricing.Usage{Input: 400_000}, tbl) // 400k µUSD both dimensions
+
+	if teamCalls != 1 || keyCalls != 1 {
+		t.Fatalf("expected exactly one call to each hook, got team=%d key=%d", teamCalls, keyCalls)
+	}
+	if teamSpent != 400_000 || keySpent != 400_000 {
+		t.Fatalf("expected each hook to see its own dimension's spend, got team=%d key=%d", teamSpent, keySpent)
 	}
 }
 

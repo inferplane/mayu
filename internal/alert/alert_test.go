@@ -212,6 +212,125 @@ func TestClose_NilSafe(t *testing.T) {
 	n.Close() // must not panic
 }
 
+// --- per-key budget alerts (ADR-017 deferred item) ---
+
+func TestObserveKey_CrossesThresholdFiresWithKeyID(t *testing.T) {
+	var mu sync.Mutex
+	var received []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		json.NewDecoder(r.Body).Decode(&payload)
+		mu.Lock()
+		received = append(received, payload)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	n := New(srv.URL, []float64{0.8}, time.Second)
+	n.ObserveKey("acme", "ik_over", 850_000, 1_000_000)
+	fires := waitForFires(t, n, 1)
+	if fires[0].Team != "acme" || fires[0].KeyID != "ik_over" || !fires[0].Delivered {
+		t.Fatalf("expected delivered key-scoped fire, got %+v", fires[0])
+	}
+
+	mu.Lock()
+	payload := received[0]
+	mu.Unlock()
+	if payload["key_id"] != "ik_over" {
+		t.Fatalf("webhook payload missing key_id, got %+v", payload)
+	}
+}
+
+func TestObserveKey_DedupeAndRearm(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	n := New(srv.URL, []float64{0.8}, time.Second)
+	n.ObserveKey("acme", "ik_over", 900_000, 1_000_000) // crosses 0.8
+	waitForFires(t, n, 1)
+
+	// Same ratio again: dedupe, no second fire.
+	n.ObserveKey("acme", "ik_over", 900_000, 1_000_000)
+	time.Sleep(20 * time.Millisecond)
+	if len(n.Recent()) != 1 {
+		t.Fatalf("expected dedupe at same ratio, got %d fires", len(n.Recent()))
+	}
+
+	// Ratio drop re-arms.
+	n.ObserveKey("acme", "ik_over", 100_000, 1_000_000)
+	time.Sleep(20 * time.Millisecond)
+	if len(n.Recent()) != 1 {
+		t.Fatalf("expected no fire on ratio drop, got %d", len(n.Recent()))
+	}
+	n.ObserveKey("acme", "ik_over", 900_000, 1_000_000)
+	waitForFires(t, n, 2)
+}
+
+// TestObserveKey_TeamNamedLikeKeyIDDoesNotCollide pins the plan-gate round-1
+// fix: fired (team) and firedKey (key) are separate maps, so a team and a key
+// can share the exact same string identity without corrupting each other's
+// dedupe state.
+func TestObserveKey_TeamNamedLikeKeyIDDoesNotCollide(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	n := New(srv.URL, []float64{0.8}, time.Second)
+	n.Observe("ik_abc", 900_000, 1_000_000)                  // a TEAM literally named "ik_abc"
+	n.ObserveKey("other-team", "ik_abc", 900_000, 1_000_000) // a KEY with the same string identity
+	fires := waitForFires(t, n, 2)
+
+	var sawTeamFire, sawKeyFire bool
+	for _, f := range fires {
+		if f.Team == "ik_abc" && f.KeyID == "" {
+			sawTeamFire = true
+		}
+		if f.Team == "other-team" && f.KeyID == "ik_abc" {
+			sawKeyFire = true
+		}
+	}
+	if !sawTeamFire || !sawKeyFire {
+		t.Fatalf("expected both an independent team fire and key fire, got %+v", fires)
+	}
+
+	n.mu.Lock()
+	_, inFired := n.fired["ik_abc"]
+	_, inFiredKey := n.firedKey["ik_abc"]
+	n.mu.Unlock()
+	if !inFired || !inFiredKey {
+		t.Fatalf("both fired[%q] and firedKey[%q] must be tracked independently: fired=%v firedKey=%v", "ik_abc", "ik_abc", inFired, inFiredKey)
+	}
+}
+
+func TestDeliver_KeyIDOmittedForTeamFire(t *testing.T) {
+	var mu sync.Mutex
+	var received []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload map[string]any
+		json.NewDecoder(r.Body).Decode(&payload)
+		mu.Lock()
+		received = append(received, payload)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	n := New(srv.URL, []float64{0.8}, time.Second)
+	n.Observe("acme", 850_000, 1_000_000)
+	waitForFires(t, n, 1)
+
+	mu.Lock()
+	_, hasKeyID := received[0]["key_id"]
+	mu.Unlock()
+	if hasKeyID {
+		t.Fatalf("a team-level fire's webhook payload must not carry a key_id key at all, got %+v", received[0])
+	}
+}
+
 func TestDeliver_ErrorNeverLeaksURL(t *testing.T) {
 	// A URL with an embedded token pointing at a closed port -> connection error.
 	secretURL := "http://127.0.0.1:1/webhook?token=super-secret-token"
