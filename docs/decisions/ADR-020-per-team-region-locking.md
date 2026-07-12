@@ -117,9 +117,20 @@ is what makes it real.
 
 ## Deferred
 
-- Audit deny-reason taxonomy: `region_blocked` is set as a plain string on
+- ~~Audit deny-reason taxonomy: `region_blocked` is set as a plain string on
   `OutcomeRef.Error`; a broader enum/taxonomy across all deny reasons
-  (allow-list, quota, budget, region) is a larger, separate cleanup.
+  (allow-list, quota, budget, region) is a larger, separate cleanup.~~ —
+  **implemented** (2026-07-12, `docs/superpowers/plans/2026-07-12-audit-deny-reason-taxonomy.md`):
+  `internal/audit.DenyReason` is a closed 9-value string type
+  (`DenyModelNotAllowed`, `DenyTeamRateLimited`, `DenyTeamTokenRateLimited`,
+  `DenyTeamQuotaExceeded`, `DenyKeyRateLimited`, `DenyKeyTokenRateLimited`,
+  `DenyTeamBudgetExceeded`, `DenyKeyBudgetExceeded`, `DenyRegionBlocked`).
+  `OutcomeRef.Error` keeps its existing `*string` JSON shape (no wire-format
+  break against the documented schema) — the taxonomy only constrains which
+  values are ever written into it. `governance.GovDecision` gained a `Code`
+  field set alongside its existing `Reason` string at all 7 `PreCheck` deny
+  sites; both ingress handlers now populate `Error` for allow-list, region,
+  and governance denies alike (previously only region-block did).
 - Config-file validation of `allowed_regions` entries (shape/charset) — the
   admin-API path (`validateAllowedRegions`) is the only validated write path
   today, matching D3's existing precedent that config-declared teams get no
