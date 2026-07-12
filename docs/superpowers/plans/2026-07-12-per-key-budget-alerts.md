@@ -29,11 +29,6 @@ plainly in the ADR update, not something to imply was always obviously true.
 subsystem is on," not "team-only" — riding the per-key path on the same flag
 is consistent with its existing meaning).
 
-**Zero new config surface.** No new `config.*` fields, no new capability flag
-(`configapi.Capabilities.BudgetAlerts` already means "the budget-alerts
-subsystem is on," not "team-only" — riding the per-key path on the same flag
-is consistent with its existing meaning).
-
 **Confirmed via direct code read:** `Settle`'s per-key debit block
 (`governance.go`, `if kp.BudgetMicrosPerMonth > 0 { g.bud.Debit("budget:key:"+keyID, ...) }`)
 has no `Spent` read-back today (unlike the team block, which reads back
@@ -68,7 +63,10 @@ Steps:
       Go maps make a collision structurally impossible, not just improbable — no prefix
       scheme, no shared namespace. Sets `Fire{Team: team, KeyID: keyID, ...}` instead of
       just `Team`. Do not touch `Observe`/`fired` — team-level fires and their dedupe state
-      are completely unaffected.
+      are completely unaffected. **Round-2 nit (opus), must not be skipped:** `New()`
+      initializes `fired: map[string]float64{}` today — add the parallel
+      `firedKey: map[string]float64{}` there too, or `ObserveKey`'s
+      `n.firedKey[keyID] = crossed` write panics on a nil map the first time it runs.
 - [ ] `deliver`'s hand-built payload map literal (it does NOT derive from `Fire`'s JSON
       tags today) gains a conditional `"key_id"` entry: only set when `fire.KeyID != ""`,
       so a team-level fire's outbound webhook body is byte-identical to before.
@@ -146,12 +144,17 @@ Steps:
       same poll-with-deadline pattern) but: the team carries NO team budget (proves the
       fire is genuinely key-scoped, not a team fire that happens to also have a key_id);
       the key is created with `budget_usd_micros` set in the create-key POST body (the
-      admin API's `ProviderWrite`-sibling key-create DTO already accepts
-      `"budget_usd_micros"` — `internal/server/adminapi/keys.go`'s create handler, confirmed
-      field name) sized so one request crosses the 0.5 threshold, mirroring the existing
-      test's $15-cost-against-$20-budget ratio math. Assert the received webhook payload's
-      decoded JSON map contains `"key_id"` equal to the created key's ID, and that
-      `GET /admin/alerts/recent` also returns a fire with a non-empty `key_id`.
+      key-create handler's DTO already accepts `"budget_usd_micros"` —
+      `internal/server/adminapi/keys.go`, confirmed field name) sized so one request
+      crosses the 0.5 threshold, mirroring the existing test's $15-cost-against-$20-budget
+      ratio math. **Round-2 note (opus):** the existing `createKey(t, adminURL, team,
+      models)` test helper only marshals `{team, allowed_models}` — it has no budget
+      parameter. Don't extend that shared helper (other e2e tests call it and shouldn't
+      grow an unused param); this new test builds its own inline `POST /admin/keys` body
+      with `budget_usd_micros` included, same auth/decode pattern as `createKey`'s body.
+      Assert the received webhook payload's decoded JSON map contains `"key_id"` equal to
+      the created key's ID, and that `GET /admin/alerts/recent` also returns a fire with a
+      non-empty `key_id`.
 
 ### Task 4: admin console shows the key on a key-scoped fire
 
