@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -95,6 +96,17 @@ func bodiesRewrapKey(args []string) int {
 	for _, row := range rows {
 		newNonce, newCT, rerr := bodystore.RewrapKey(oldMaster, newMaster, row.Nonce, row.CT)
 		if rerr != nil {
+			// ErrRewrapFailed means the given old key genuinely could not
+			// unwrap this row (wrong key, tamper, malformed length) -- the
+			// intended fail-closed-generic case. Anything else (e.g. seal()
+			// failing to reseal under the new key, entropy exhaustion) is an
+			// operational anomaly, not a key mismatch -- it must be visible,
+			// or an operator could mistake it for "already rotated" and
+			// retire the old key while this row is still only readable by
+			// it (claude-review HIGH: silent skip risked permanent loss).
+			if !errors.Is(rerr, bodystore.ErrRewrapFailed) {
+				fmt.Fprintln(os.Stderr, "bodies rewrap-key: reseal", row.Ref, ":", rerr)
+			}
 			skipped++
 			continue
 		}
