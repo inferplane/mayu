@@ -41,16 +41,23 @@ type fakeConverser struct {
 	streamEv   []ConverseStreamEvent
 	gotReq     ConverseRequest
 	gotModelID string
+	err        error
 }
 
 func (f *fakeConverser) Converse(_ context.Context, modelID string, req ConverseRequest) (ConverseResponse, error) {
 	f.gotModelID = modelID
 	f.gotReq = req
+	if f.err != nil {
+		return ConverseResponse{}, f.err
+	}
 	return f.resp, nil
 }
 func (f *fakeConverser) ConverseStream(_ context.Context, modelID string, req ConverseRequest) (iter.Seq2[ConverseStreamEvent, error], error) {
 	f.gotModelID = modelID
 	f.gotReq = req
+	if f.err != nil {
+		return nil, f.err
+	}
 	return func(yield func(ConverseStreamEvent, error) bool) {
 		for _, e := range f.streamEv {
 			if !yield(e, nil) {

@@ -40,7 +40,10 @@ func (p *provider) completeInvoke(ctx context.Context, req *providers.ProxyReque
 	}
 	respBody, err := p.inv.Invoke(ctx, req.Upstream, body, p.guardrailFor(req))
 	if err != nil {
-		return nil, fmt.Errorf("bedrock: invoke: %w", err)
+		// Classify the SDK error into its real upstream status (429 for a
+		// throttled model, 503 unavailable, ...) instead of letting it fall
+		// through to the ingress's generic 502 — see errors.go.
+		return nil, upstreamError(err)
 	}
 	out := &providers.ProxyResponse{StatusCode: 200, RawBody: respBody}
 	var parsed schema.ChatResponse
@@ -57,7 +60,9 @@ func (p *provider) streamInvoke(ctx context.Context, req *providers.ProxyRequest
 	}
 	payloads, err := p.inv.InvokeStream(ctx, req.Upstream, body, p.guardrailFor(req))
 	if err != nil {
-		return nil, fmt.Errorf("bedrock: invoke stream: %w", err)
+		// Pre-TTFT: the stream never opened (e.g. ThrottlingException before
+		// any bytes), so its real status can still be teed to the client.
+		return nil, upstreamError(err)
 	}
 	return func(yield func(*providers.StreamEvent, error) bool) {
 		for payload, perr := range payloads {

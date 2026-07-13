@@ -3,9 +3,11 @@ package bedrock
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
+	brtypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 	"github.com/inferplane/inferplane/pkg/schema"
 	"github.com/inferplane/inferplane/providers"
 )
@@ -223,6 +225,41 @@ func TestProviderCompleteConverse(t *testing.T) {
 	}
 	if resp.Parsed == nil || resp.Parsed.Usage == nil || *resp.Parsed.Usage.OutputTokens != 3 {
 		t.Fatalf("usage: %+v", resp.Parsed)
+	}
+}
+
+// TestCompleteConverseThrottledSurfacesUpstreamError pins the bug fix: a
+// throttled Converse call must surface as a *providers.UpstreamError with the
+// real status (429), not a bare error the ingress can only turn into a
+// generic 502.
+func TestCompleteConverseThrottledSurfacesUpstreamError(t *testing.T) {
+	fc := &fakeConverser{err: &brtypes.ThrottlingException{}}
+	p := &provider{conv: fc, modelAPI: map[string]string{"moonshot.kimi-k2": "converse"}}
+	raw := []byte(`{"model":"kimi-k2","messages":[{"role":"user","content":"q"}]}`)
+	_, err := p.Complete(context.Background(), &providers.ProxyRequest{Model: "kimi-k2", Upstream: "moonshot.kimi-k2", RawBody: raw})
+	var ue *providers.UpstreamError
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *UpstreamError, got %v", err)
+	}
+	if ue.StatusCode != 429 {
+		t.Fatalf("status = %d, want 429", ue.StatusCode)
+	}
+}
+
+// TestStreamConversePreTTFTErrorSurfacesUpstreamError: ConverseStream never
+// opened (AccessDeniedException before any bytes) — its real status must
+// still reach the ingress's UpstreamError tee.
+func TestStreamConversePreTTFTErrorSurfacesUpstreamError(t *testing.T) {
+	fc := &fakeConverser{err: &brtypes.AccessDeniedException{}}
+	p := &provider{conv: fc, modelAPI: map[string]string{"moonshot.kimi-k2": "converse"}}
+	raw := []byte(`{"model":"kimi-k2","stream":true,"messages":[{"role":"user","content":"q"}]}`)
+	_, err := p.Stream(context.Background(), &providers.ProxyRequest{Model: "kimi-k2", Upstream: "moonshot.kimi-k2", RawBody: raw, Stream: true})
+	var ue *providers.UpstreamError
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *UpstreamError, got %v", err)
+	}
+	if ue.StatusCode != 403 {
+		t.Fatalf("status = %d, want 403", ue.StatusCode)
 	}
 }
 

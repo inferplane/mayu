@@ -200,6 +200,64 @@ func TestMessagesStreamingUpstreamErrorTeed(t *testing.T) {
 	}
 }
 
+// errCompleteProvider mirrors errStreamProvider for the non-streaming path —
+// pins the serveComplete/serveStream parity fix: a provider whose Complete
+// returns an *UpstreamError (as bedrock's now does) must have its real
+// status/body teed to the client instead of falling through to a generic 502.
+type errCompleteProvider struct{}
+
+func (errCompleteProvider) Name() string               { return "errcomplete" }
+func (errCompleteProvider) Models() []schema.ModelInfo { return nil }
+func (errCompleteProvider) Complete(context.Context, *providers.ProxyRequest) (*providers.ProxyResponse, error) {
+	return nil, &providers.UpstreamError{StatusCode: 429, Body: []byte(`{"type":"error","error":{"type":"rate_limit_error"}}`)}
+}
+func (errCompleteProvider) Stream(context.Context, *providers.ProxyRequest) (iter.Seq2[*providers.StreamEvent, error], error) {
+	return nil, errors.New("unused")
+}
+
+func TestMessagesNonStreamingUpstreamErrorTeed(t *testing.T) {
+	provs := map[string]providers.Provider{"p": errCompleteProvider{}}
+	models := map[string]config.ModelConfig{"m": {Targets: []config.Target{{Provider: "p", Model: "m"}}}}
+	h := NewMessagesHandler(router.New(holderFor(provs, models)))
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{"model":"m","messages":[]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, allowAll(req))
+	if rec.Code != 429 {
+		t.Fatalf("expected upstream 429 teed, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "rate_limit_error") {
+		t.Fatalf("upstream error body not teed: %s", rec.Body.String())
+	}
+}
+
+// TestMessagesNonStreamingUpstreamErrorFallsBackWhenNotLast: an UpstreamError
+// on a non-last target still falls back to the next target — the tee only
+// applies on the last target (mirrors TestMessagesNonStreamingFallsBackPreTTFT
+// but with a typed UpstreamError instead of a bare transport error).
+func TestMessagesNonStreamingUpstreamErrorFallsBackWhenNotLast(t *testing.T) {
+	provs := map[string]providers.Provider{
+		"bad":  errCompleteProvider{},
+		"good": mockprovider.New("claude-sonnet-4-6"),
+	}
+	models := map[string]config.ModelConfig{
+		"claude-sonnet-4-6": {Targets: []config.Target{
+			{Provider: "bad", Model: "m1"},
+			{Provider: "good", Model: "claude-sonnet-4-6"},
+		}},
+	}
+	h := NewMessagesHandler(router.New(holderFor(provs, models)))
+	req := httptest.NewRequest("POST", "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-4-6","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, allowAll(req))
+	if rec.Code != 200 {
+		t.Fatalf("fallback to healthy provider should yield 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Inferplane-Fallback"); got != "good" {
+		t.Fatalf("x-inferplane-fallback header = %q, want %q", got, "good")
+	}
+}
+
 type headerProvider struct{}
 
 func (headerProvider) Name() string               { return "hdr" }

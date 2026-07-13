@@ -3,9 +3,12 @@ package bedrock
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
+	brtypes "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 	"github.com/inferplane/inferplane/providers"
 )
 
@@ -84,6 +87,39 @@ func TestProviderCompleteInvoke(t *testing.T) {
 	}
 	if string(sent["anthropic_version"]) != `"bedrock-2023-05-31"` {
 		t.Fatal("sent body missing anthropic_version")
+	}
+}
+
+// TestCompleteInvokeThrottledSurfacesUpstreamError pins the bug fix: a
+// throttled InvokeModel call must surface as a *providers.UpstreamError with
+// the real status (429), not a bare error the ingress can only turn into a
+// generic 502.
+func TestCompleteInvokeThrottledSurfacesUpstreamError(t *testing.T) {
+	fi := &fakeInvoker{err: fmt.Errorf("bedrock: invoke model %q: %w", "m", &brtypes.ThrottlingException{})}
+	p := &provider{inv: fi, modelAPI: map[string]string{}}
+	_, err := p.Complete(context.Background(), &providers.ProxyRequest{Upstream: "anthropic.claude-sonnet-4-6-v1:0", RawBody: []byte(`{"messages":[]}`)})
+	var ue *providers.UpstreamError
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *UpstreamError, got %v", err)
+	}
+	if ue.StatusCode != 429 {
+		t.Fatalf("status = %d, want 429", ue.StatusCode)
+	}
+}
+
+// TestStreamInvokePreTTFTErrorSurfacesUpstreamError: the stream never opened
+// (ServiceUnavailableException before any bytes) — its real status must
+// still reach the ingress's UpstreamError tee.
+func TestStreamInvokePreTTFTErrorSurfacesUpstreamError(t *testing.T) {
+	fi := &fakeInvoker{err: fmt.Errorf("bedrock: invoke model stream %q: %w", "m", &brtypes.ServiceUnavailableException{})}
+	p := &provider{inv: fi, modelAPI: map[string]string{}}
+	_, err := p.Stream(context.Background(), &providers.ProxyRequest{Upstream: "anthropic.claude-sonnet-4-6-v1:0", RawBody: []byte(`{"stream":true,"messages":[]}`), Stream: true})
+	var ue *providers.UpstreamError
+	if !errors.As(err, &ue) {
+		t.Fatalf("expected *UpstreamError, got %v", err)
+	}
+	if ue.StatusCode != 503 {
+		t.Fatalf("status = %d, want 503", ue.StatusCode)
 	}
 }
 
