@@ -1,0 +1,37 @@
+inferplane is deploying.
+
+1. Wait for the pod to become ready:
+   kubectl get pods -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }} -w
+
+2. Reach it:
+{{- if .Values.ingress.enabled }}
+{{- if .Values.ingress.data.host }}
+   Data plane:  http://{{ .Values.ingress.data.host }}{{ .Values.ingress.data.path }}
+{{- end }}
+{{- if and .Values.ingress.admin.enabled .Values.ingress.admin.host }}
+   Admin plane: http://{{ .Values.ingress.admin.host }}{{ .Values.ingress.admin.path }}
+{{- else }}
+   Admin plane: ingress is off for /admin/* by default (governance/key-issuance
+   surface) — port-forward it instead:
+   kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "inferplane.fullname" . }} 9090:{{ .Values.service.adminPort }}
+{{- end }}
+{{- else }}
+   No Ingress configured (ingress.enabled=false). Port-forward both planes:
+   kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "inferplane.fullname" . }} 8080:{{ .Values.service.dataPort }} 9090:{{ .Values.service.adminPort }}
+{{- end }}
+
+3. Issue your first virtual key (never recoverable after this — copy it now):
+   kubectl exec -n {{ .Release.Namespace }} deploy/{{ include "inferplane.fullname" . }} -- \
+     inferplane keys create --team demo --models '*' --store /var/lib/inferplane/keys.db
+
+4. Point Claude Code at it:
+   export ANTHROPIC_BASE_URL=http://localhost:8080   # or your Ingress host
+   export ANTHROPIC_API_KEY=ik_...
+   claude
+
+5. Watch it work:
+   curl -s http://localhost:9090/metrics | grep inferplane_requests_total
+   Admin console: http://localhost:9090/admin/ui/ (paste the token from secret
+   "{{ .Values.secrets.existingSecret }}", key INFERPLANE_ADMIN_TOKEN)
+
+Full walkthrough: README.md "Usage" · docs/runbooks/ · deploy/grafana/inferplane.json
