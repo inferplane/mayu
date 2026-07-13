@@ -129,6 +129,27 @@ minimal admin key console at `http://localhost:9090/admin/ui/` — ADR-001).
 For a self-hosted-only setup (Ollama/vLLM, no cloud key), start from
 [`examples/config.selfhosted.json`](examples/config.selfhosted.json).
 
+**Or, on Kubernetes, with the bundled Helm chart:**
+
+```bash
+kubectl create secret generic inferplane-secrets \
+  --from-literal=ANTHROPIC_API_KEY=sk-ant-... \
+  --from-literal=INFERPLANE_ADMIN_TOKEN=admin-secret
+
+helm install inferplane charts/inferplane \
+  --set image.repository=<your-registry>/inferplane \
+  --set-json 'config={"server":{"listen":":8080","admin_listen":":9090"},"providers":{"anthropic-direct":{"type":"anthropic","base_url":"https://api.anthropic.com","api_key_ref":{"env":"ANTHROPIC_API_KEY"}}},"models":{"claude-sonnet-4-6":{"targets":[{"provider":"anthropic-direct","model":"claude-sonnet-4-6"}]}}}'
+```
+
+The chart never creates secrets (§7) — `inferplane-secrets` above is the same
+`existingSecret` the on-demand probe and Bedrock IRSA paths expect. `helm install`
+prints next steps (port-forward, first key, pointing Claude Code at it) via
+`NOTES.txt`. Set `ingress.enabled=true` (plus `ingress.data.host`) for an
+externally reachable data plane; the admin plane stays off Ingress by default —
+opt in explicitly with `ingress.admin.enabled=true` since it carries key-issuance
+and governance actions. See [`charts/inferplane/values.yaml`](charts/inferplane/values.yaml)
+for every option.
+
 ### 3. Issue a virtual key
 
 ```bash
@@ -393,6 +414,26 @@ docker run -d --name inferplane \
 
 셀프호스팅 전용 구성(Ollama/vLLM, 클라우드 키 불필요)은
 [`examples/config.selfhosted.json`](examples/config.selfhosted.json)에서 시작하세요.
+
+**또는 Kubernetes에서, 함께 제공되는 Helm 차트로:**
+
+```bash
+kubectl create secret generic inferplane-secrets \
+  --from-literal=ANTHROPIC_API_KEY=sk-ant-... \
+  --from-literal=INFERPLANE_ADMIN_TOKEN=admin-secret
+
+helm install inferplane charts/inferplane \
+  --set image.repository=<your-registry>/inferplane \
+  --set-json 'config={"server":{"listen":":8080","admin_listen":":9090"},"providers":{"anthropic-direct":{"type":"anthropic","base_url":"https://api.anthropic.com","api_key_ref":{"env":"ANTHROPIC_API_KEY"}}},"models":{"claude-sonnet-4-6":{"targets":[{"provider":"anthropic-direct","model":"claude-sonnet-4-6"}]}}}'
+```
+
+차트는 시크릿을 절대 생성하지 않습니다(§7) — 위 `inferplane-secrets`가 온디맨드
+프로브와 Bedrock IRSA 경로가 기대하는 동일한 `existingSecret`입니다. `helm install`
+직후 `NOTES.txt`가 다음 단계(포트포워드, 첫 키 발급, Claude Code 연결)를 안내합니다.
+외부에서 데이터 플레인에 접근하려면 `ingress.enabled=true`와 `ingress.data.host`를
+설정하세요 — 관리 플레인은 키 발급·거버넌스 작업을 다루므로 기본적으로 Ingress에
+노출되지 않으며, `ingress.admin.enabled=true`로 명시적으로 켜야 합니다. 전체 옵션은
+[`charts/inferplane/values.yaml`](charts/inferplane/values.yaml) 참고.
 
 ### 3. 가상 키 발급
 

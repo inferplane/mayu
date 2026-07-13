@@ -1,6 +1,6 @@
 image:
   repository: inferplane
-  tag: "0.1.0"
+  tag: "0.2.0"
   pullPolicy: IfNotPresent
 replicaCount: 1   # single replica: SQLite key store + instance-local governance (multi-replica HA = Postgres, v0.2)
 service:
@@ -10,7 +10,29 @@ serviceAccount:
   create: true
   name: ""
   annotations: {}   # e.g. eks.amazonaws.com/role-arn for Bedrock IRSA
-# Secrets are referenced, never created by this chart (§7). Provide via existingSecret.
+# Off by default: the data plane needs a host to be genuinely useful, and the
+# admin plane defaults to OFF even when ingress.enabled is true (see admin.enabled
+# below) because it carries key-issuance/governance actions and should stay on a
+# restricted path (kubectl port-forward, a VPN-only Ingress class, etc.) unless
+# you've deliberately decided otherwise.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  data:
+    host: ""            # e.g. inferplane.example.com
+    path: /
+    pathType: Prefix
+  admin:
+    enabled: false       # opt in explicitly to expose /admin/* beyond the cluster
+    host: ""             # e.g. inferplane-admin.example.com
+    path: /
+    pathType: Prefix
+  tls: []                 # [{ secretName: inferplane-tls, hosts: [inferplane.example.com] }]
+# Secrets are referenced, never created by this chart (§7). Provide via existingSecret:
+#   kubectl create secret generic inferplane-secrets \
+#     --from-literal=ANTHROPIC_API_KEY=sk-ant-... \
+#     --from-literal=INFERPLANE_ADMIN_TOKEN=admin-secret
 secrets:
   existingSecret: inferplane-secrets   # must contain ANTHROPIC_API_KEY, INFERPLANE_ADMIN_TOKEN, ...
 # config.json rendered into a ConfigMap. Secrets use api_key_ref env: from existingSecret.
