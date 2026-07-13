@@ -291,6 +291,23 @@ func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request
 		if !last {
 			return true // transport error → fall back
 		}
+		// Tee a non-2xx upstream error verbatim (status/body) so the client
+		// sees the real rate-limit/error response, not a fabricated one —
+		// mirrors serveStream's tee below (parity fix: bedrock's non-streaming
+		// path can return an UpstreamError just like its streaming path does).
+		var ue *providers.UpstreamError
+		if errors.As(err, &ue) {
+			copyUpstreamHeaders(w.Header(), ue.Header)
+			if w.Header().Get("Content-Type") == "" {
+				w.Header().Set("Content-Type", "application/json")
+			}
+			w.WriteHeader(ue.StatusCode)
+			w.Write(ue.Body)
+			h.auditCompleted(ulid.New(), p, model, upstream, ue.StatusCode, nil, nil, tracing.TraceID(req.Context()), "", pr.GuardrailID, pr.GuardrailVersion)
+			recordSpanResponse(req, prov.Name(), upstream, nil, false) // terminal
+			h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, ue.StatusCode, time.Since(start).Seconds(), 0)
+			return false
+		}
 		writeErr(w, 502, "api_error", "upstream error")
 		h.auditCompleted(ulid.New(), p, model, upstream, 502, nil, nil, tracing.TraceID(req.Context()), "", pr.GuardrailID, pr.GuardrailVersion)
 		recordSpanResponse(req, prov.Name(), upstream, nil, false) // terminal

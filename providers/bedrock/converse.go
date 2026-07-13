@@ -221,7 +221,8 @@ func (p *provider) completeConverse(ctx context.Context, req *providers.ProxyReq
 	cr.Guardrail = p.guardrailFor(req)
 	cresp, err := p.conv.Converse(ctx, req.Upstream, cr)
 	if err != nil {
-		return nil, fmt.Errorf("bedrock: converse: %w", err)
+		// Classify the SDK error into its real upstream status — see errors.go.
+		return nil, upstreamError(err)
 	}
 	stop := cresp.StopReason
 	in, out := cresp.InputTokens, cresp.OutputTokens
@@ -255,7 +256,9 @@ func (p *provider) streamConverse(ctx context.Context, req *providers.ProxyReque
 	cr.Guardrail = p.guardrailFor(req)
 	evs, err := p.conv.ConverseStream(ctx, req.Upstream, cr)
 	if err != nil {
-		return nil, fmt.Errorf("bedrock: converse stream: %w", err)
+		// Pre-TTFT: the stream never opened, so its real status can still be
+		// teed to the client (see errors.go).
+		return nil, upstreamError(err)
 	}
 	return func(yield func(*providers.StreamEvent, error) bool) {
 		emit := func(c *schema.ChatChunk) bool {
