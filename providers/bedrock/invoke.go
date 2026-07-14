@@ -16,11 +16,15 @@ const bedrockAnthropicVersion = `"bedrock-2023-05-31"`
 // toInvokeBody rewrites an Anthropic Messages request body for Bedrock
 // InvokeModel: drop top-level "model" (it goes in the URL) and "stream"
 // (Bedrock rejects it as an extra input — streaming is selected by the
-// InvokeModelWithResponseStream OPERATION), and inject "anthropic_version".
-// Parsing only the TOP LEVEL into json.RawMessage keeps every
-// system/messages/tools VALUE byte-identical, so the prompt-cache prefix
-// is preserved (§4.4). Top-level key order is irrelevant to the cache.
-func toInvokeBody(raw []byte) ([]byte, error) {
+// InvokeModelWithResponseStream OPERATION), inject "anthropic_version", and —
+// only for models on legacyThinkingBrokenModels (thinking.go) — rewrite a
+// legacy `thinking: {"type":"enabled",...}` into the adaptive-thinking shape
+// those models require instead of rejecting with a 400. Parsing only the TOP
+// LEVEL into json.RawMessage keeps every system/messages/tools VALUE
+// byte-identical, so the prompt-cache prefix is preserved (§4.4) even with
+// the thinking rewrite added — it only touches other top-level keys.
+// Top-level key order is irrelevant to the cache.
+func toInvokeBody(raw []byte, upstream string) ([]byte, error) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &top); err != nil {
 		return nil, err
@@ -30,11 +34,14 @@ func toInvokeBody(raw []byte) ([]byte, error) {
 	if _, has := top["anthropic_version"]; !has {
 		top["anthropic_version"] = json.RawMessage(bedrockAnthropicVersion)
 	}
+	if needsAdaptiveRewrite(upstream) {
+		rewriteLegacyThinking(top)
+	}
 	return json.Marshal(top)
 }
 
 func (p *provider) completeInvoke(ctx context.Context, req *providers.ProxyRequest) (*providers.ProxyResponse, error) {
-	body, err := toInvokeBody(req.RawBody)
+	body, err := toInvokeBody(req.RawBody, req.Upstream)
 	if err != nil {
 		return nil, fmt.Errorf("bedrock: invoke body: %w", err)
 	}
@@ -54,7 +61,7 @@ func (p *provider) completeInvoke(ctx context.Context, req *providers.ProxyReque
 }
 
 func (p *provider) streamInvoke(ctx context.Context, req *providers.ProxyRequest) (iter.Seq2[*providers.StreamEvent, error], error) {
-	body, err := toInvokeBody(req.RawBody)
+	body, err := toInvokeBody(req.RawBody, req.Upstream)
 	if err != nil {
 		return nil, fmt.Errorf("bedrock: invoke body: %w", err)
 	}
