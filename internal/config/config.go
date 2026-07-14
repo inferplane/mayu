@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/inferplane/inferplane/internal/adminauth"
 )
@@ -239,6 +240,18 @@ type TeamConfig struct {
 	AllowedRegions []string `json:"allowed_regions,omitempty"`
 }
 
+type VirtualKeyConfig struct {
+	Team              string            `json:"team"`
+	KeyRef            *SecretRef        `json:"key_ref"`
+	AllowedModels     []string          `json:"allowed_models"`
+	RPM               int64             `json:"rpm,omitempty"`
+	TPM               int64             `json:"tpm,omitempty"`
+	BudgetUSDPerMonth float64           `json:"budget_usd_per_month,omitempty"`
+	Owner             string            `json:"owner,omitempty"`
+	Metadata          map[string]string `json:"metadata,omitempty"`
+	Key               string            `json:"-"`
+}
+
 // RateConfig holds per-MTok rates as human USD floats in config, converted to
 // µUSD-per-MTok int64 at load.
 type RateConfig struct {
@@ -293,6 +306,7 @@ type Config struct {
 	Analytics           AnalyticsConfig            `json:"analytics,omitempty"`
 	BudgetAlerts        *BudgetAlertsConfig        `json:"budget_alerts,omitempty"`
 	ProviderHealthCheck *ProviderHealthCheckConfig `json:"provider_health_check,omitempty"`
+	VirtualKeys         []VirtualKeyConfig         `json:"virtual_keys,omitempty"`
 }
 
 // BudgetAlertsConfig enables webhook budget alerts (D5b, ADR-017): a team's
@@ -396,7 +410,8 @@ func LoadRaw(path string) (*Config, error) {
 		Audit struct {
 			LogBodies map[string]json.RawMessage `json:"log_bodies"`
 		} `json:"audit"`
-		BudgetAlerts map[string]json.RawMessage `json:"budget_alerts"`
+		BudgetAlerts map[string]json.RawMessage   `json:"budget_alerts"`
+		VirtualKeys  []map[string]json.RawMessage `json:"virtual_keys"`
 	}
 	if err := json.Unmarshal(data, &probe); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
@@ -417,6 +432,11 @@ func LoadRaw(path string) (*Config, error) {
 	}
 	if _, bad := probe.BudgetAlerts["webhook_url"]; bad {
 		return nil, fmt.Errorf("config: budget_alerts has inline webhook_url; use webhook_url_ref (§7)")
+	}
+	for i, vk := range probe.VirtualKeys {
+		if _, bad := vk["key"]; bad {
+			return nil, fmt.Errorf("config: virtual_keys[%d] has inline key; use key_ref (§7)", i)
+		}
 	}
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
@@ -454,6 +474,9 @@ func LoadRaw(path string) (*Config, error) {
 	if err := validateModelAliases(cfg.Models); err != nil {
 		return nil, err
 	}
+	if err := validateVirtualKeys(cfg.VirtualKeys); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
 }
 
@@ -480,6 +503,51 @@ func validateModelAliases(models map[string]ModelConfig) error {
 		}
 	}
 	return nil
+}
+
+func validateVirtualKeys(vks []VirtualKeyConfig) error {
+	seenPlaintexts := make(map[string]int)
+	for i := range vks {
+		if vks[i].Team == "" {
+			return fmt.Errorf("config: virtual_keys[%d].team is required", i)
+		}
+		if vks[i].KeyRef == nil {
+			return fmt.Errorf("config: virtual_keys[%d].key_ref is required", i)
+		}
+		if err := ValidateSecretRef(vks[i].KeyRef); err != nil {
+			return fmt.Errorf("config: virtual_keys[%d].key_ref: %w", i, err)
+		}
+		plaintext, err := ResolveSecretRef(vks[i].KeyRef)
+		if err != nil {
+			return fmt.Errorf("config: virtual_keys[%d]: %w", i, err)
+		}
+		if len(plaintext) < 16 {
+			return fmt.Errorf("config: virtual_keys[%d].key_ref resolves to a value under the 16 character minimum", i)
+		}
+		if len(vks[i].AllowedModels) == 0 {
+			return fmt.Errorf("config: virtual_keys[%d].allowed_models is required (use [\"*\"] for all)", i)
+		}
+		for j, model := range vks[i].AllowedModels {
+			if model == "" || strings.Contains(model, ",") || containsControl(model) {
+				return fmt.Errorf("config: virtual_keys[%d].allowed_models[%d] is invalid", i, j)
+			}
+		}
+		if prev, ok := seenPlaintexts[plaintext]; ok {
+			return fmt.Errorf("config: virtual_keys[%d] resolves to the same plaintext as virtual_keys[%d]", i, prev)
+		}
+		seenPlaintexts[plaintext] = i
+		vks[i].Key = plaintext
+	}
+	return nil
+}
+
+func containsControl(s string) bool {
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // validateBodyLog checks the opt-in audit.log_bodies block (D4, ADR-018).
