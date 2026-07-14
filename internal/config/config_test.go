@@ -1078,6 +1078,26 @@ func TestLoadRejectsVirtualKey_EmptyAllowedModels(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsVirtualKey_NegativeLimits pins an H4 code-gate finding: a
+// negative rpm/tpm/budget_usd_per_month must be rejected, not silently
+// treated as "unlimited" (governance.go only enforces limits > 0).
+func TestLoadRejectsVirtualKey_NegativeLimits(t *testing.T) {
+	cases := []string{
+		`{"team":"demo","key_ref":{"env":"INFERPLANE_VKEY_NEG"},"allowed_models":["*"],"rpm":-1}`,
+		`{"team":"demo","key_ref":{"env":"INFERPLANE_VKEY_NEG"},"allowed_models":["*"],"tpm":-1}`,
+		`{"team":"demo","key_ref":{"env":"INFERPLANE_VKEY_NEG"},"allowed_models":["*"],"budget_usd_per_month":-5}`,
+	}
+	for _, entry := range cases {
+		dir := t.TempDir()
+		f := filepath.Join(dir, "bad.json")
+		t.Setenv("INFERPLANE_VKEY_NEG", "sk-declarative-key-0123456789")
+		os.WriteFile(f, []byte(`{"teams":{"demo":{"allowed_models":["*"]}},"virtual_keys":[`+entry+`]}`), 0o600)
+		if _, err := Load(f); err == nil {
+			t.Fatalf("a negative limit must be rejected: %s", entry)
+		}
+	}
+}
+
 func TestLoadRejectsVirtualKey_AdversarialModelName(t *testing.T) {
 	cases := [][]string{
 		{""},

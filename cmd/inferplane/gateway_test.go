@@ -230,3 +230,43 @@ func TestGateway_AcceptsVirtualKeyForDBOnlyTeam(t *testing.T) {
 		t.Fatal("declared virtual key for a DB-only team did not authenticate")
 	}
 }
+
+// TestGateway_RevokedDeclaredKeyStaysRevokedAcrossReboot pins an H4 code-gate
+// finding: EnsureKey's upsert never un-revokes a row (decision #2), so a
+// declared key that was revoked out-of-band must still fail to authenticate
+// after a reboot re-declares it — the boot bootstrap must not resurrect it.
+func TestGateway_RevokedDeclaredKeyStaysRevokedAcrossReboot(t *testing.T) {
+	t.Setenv("INFERPLANE_VKEY_REVOKED", "sk-declarative-key-0123456789")
+	cfgPath := writeTestConfig(t, func(cfg map[string]any, dir string) {
+		cfg["teams"] = map[string]any{"demo": map[string]any{"allowed_models": []string{"*"}}}
+		cfg["virtual_keys"] = []map[string]any{{
+			"team": "demo", "key_ref": map[string]string{"env": "INFERPLANE_VKEY_REVOKED"}, "allowed_models": []string{"*"},
+		}}
+	})
+
+	g1, err := newGateway(cfgPath)
+	if err != nil {
+		t.Fatalf("newGateway (boot 1): %v", err)
+	}
+	bootAndStop(t, g1)
+	if got := authedGet(t, "http://"+g1.DataAddr()+"/v1/models", "sk-declarative-key-0123456789"); got != http.StatusOK {
+		t.Fatalf("boot 1: declared key did not authenticate: status %d", got)
+	}
+
+	p, err := g1.store.Resolve(context.Background(), "sk-declarative-key-0123456789")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g1.store.Revoke(context.Background(), p.KeyID); err != nil {
+		t.Fatal(err)
+	}
+
+	g2, err := newGateway(cfgPath)
+	if err != nil {
+		t.Fatalf("newGateway (boot 2, after revoke): %v", err)
+	}
+	bootAndStop(t, g2)
+	if got := authedGet(t, "http://"+g2.DataAddr()+"/v1/models", "sk-declarative-key-0123456789"); got == http.StatusOK {
+		t.Fatal("a revoked declared key must not be resurrected by config re-declaration on reboot")
+	}
+}

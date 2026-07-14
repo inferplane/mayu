@@ -129,7 +129,17 @@ func newGateway(cfgPath string) (*gateway, error) {
 			store.Close()
 			return nil, fmt.Errorf("virtual_keys[%d]: %w", i, err)
 		}
-		fmt.Printf("inferplane: virtual key %s managed by config for team %s\n", p.KeyID, vk.Team)
+		// EnsureKey's upsert deliberately never un-revokes a row (decision #2 —
+		// revocation must survive a store-wipe/re-declare cycle), so a
+		// previously-revoked key stays inert here even though the upsert
+		// itself succeeds. Check via Resolve so the boot log never claims an
+		// inert key is "active" — Resolve is the same fail-closed path
+		// KeyAuth uses.
+		if _, resolveErr := store.Resolve(context.Background(), vk.Key); resolveErr != nil {
+			fmt.Printf("inferplane: virtual key %s for team %s is REVOKED — declared in config but will not authenticate (rotate the secret to reactivate)\n", p.KeyID, vk.Team)
+		} else {
+			fmt.Printf("inferplane: virtual key %s managed by config for team %s\n", p.KeyID, vk.Team)
+		}
 	}
 
 	// Audit writer: build sinks from config, then the single-writer chain.

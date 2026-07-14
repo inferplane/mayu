@@ -514,6 +514,20 @@ func validateVirtualKeys(vks []VirtualKeyConfig) error {
 		if vks[i].KeyRef == nil {
 			return fmt.Errorf("config: virtual_keys[%d].key_ref is required", i)
 		}
+		// A negative limit must be rejected, not silently treated as
+		// "unlimited" — governance.go only enforces limits > 0, so a
+		// negative value here would grant unlimited RPM/TPM/budget instead
+		// of erroring, the opposite of a typo'd negative operator intent
+		// (same non-negative guard the admin API applies in adminapi/keys.go).
+		if vks[i].RPM < 0 {
+			return fmt.Errorf("config: virtual_keys[%d].rpm must be >= 0", i)
+		}
+		if vks[i].TPM < 0 {
+			return fmt.Errorf("config: virtual_keys[%d].tpm must be >= 0", i)
+		}
+		if vks[i].BudgetUSDPerMonth < 0 {
+			return fmt.Errorf("config: virtual_keys[%d].budget_usd_per_month must be >= 0", i)
+		}
 		if err := ValidateSecretRef(vks[i].KeyRef); err != nil {
 			return fmt.Errorf("config: virtual_keys[%d].key_ref: %w", i, err)
 		}
