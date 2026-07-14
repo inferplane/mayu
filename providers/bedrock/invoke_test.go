@@ -14,7 +14,7 @@ import (
 
 func TestToInvokeBodyStripsModelAddsVersionPreservesCachePrefix(t *testing.T) {
 	in := []byte(`{"model":"claude-sonnet-4-6","max_tokens":1024,"system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`)
-	out, err := toInvokeBody(in)
+	out, err := toInvokeBody(in, "anthropic.claude-sonnet-4-6-v1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +43,7 @@ func TestToInvokeBodyStripsStream(t *testing.T) {
 	// InvokeModelWithResponseStream OPERATION, not the body). Verified against
 	// the live service 2026-06-12; leaving it in 502s every streaming request.
 	in := []byte(`{"model":"m","stream":true,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
-	out, err := toInvokeBody(in)
+	out, err := toInvokeBody(in, "anthropic.claude-sonnet-4-6-v1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,11 +57,82 @@ func TestToInvokeBodyStripsStream(t *testing.T) {
 func TestToInvokeBodyKeepsExistingAnthropicVersion(t *testing.T) {
 	// if a client already set anthropic_version, don't clobber a beta the user chose
 	in := []byte(`{"model":"m","anthropic_version":"bedrock-2023-05-31","messages":[]}`)
-	out, _ := toInvokeBody(in)
+	out, _ := toInvokeBody(in, "anthropic.claude-sonnet-4-6-v1:0")
 	var m map[string]json.RawMessage
 	json.Unmarshal(out, &m)
 	if string(m["anthropic_version"]) != `"bedrock-2023-05-31"` {
 		t.Fatalf("version: %s", m["anthropic_version"])
+	}
+}
+
+// TestToInvokeBodyLeavesLegacyThinkingUntouchedOnWorkingModels is the
+// regression-prevention pin: a model NOT on legacyThinkingBrokenModels (here,
+// the one that's already known to work) must get its "thinking" field back
+// byte-identical — the rewrite must never touch a model that isn't confirmed
+// broken.
+func TestToInvokeBodyLeavesLegacyThinkingUntouchedOnWorkingModels(t *testing.T) {
+	in := []byte(`{"model":"m","max_tokens":4096,"thinking":{"type":"enabled","budget_tokens":1024},"messages":[{"role":"user","content":"hi"}]}`)
+	out, err := toInvokeBody(in, "anthropic.claude-sonnet-4-6-v1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m, inMap map[string]json.RawMessage
+	json.Unmarshal(out, &m)
+	json.Unmarshal(in, &inMap)
+	if string(m["thinking"]) != string(inMap["thinking"]) {
+		t.Fatalf("thinking must be byte-identical for a working model:\n got: %s\nwant: %s", m["thinking"], inMap["thinking"])
+	}
+}
+
+// TestToInvokeBodyRewritesLegacyThinkingForBrokenModels confirms the bug fix:
+// a model on legacyThinkingBrokenModels gets its legacy thinking shape
+// rewritten to adaptive+effort, while the cache-relevant system/messages
+// bytes stay exactly as TestToInvokeBodyStripsModelAddsVersionPreservesCachePrefix
+// already pins.
+func TestToInvokeBodyRewritesLegacyThinkingForBrokenModels(t *testing.T) {
+	in := []byte(`{"model":"claude-opus-4-8","max_tokens":4096,"thinking":{"type":"enabled","budget_tokens":1024},"system":[{"type":"text","text":"sys","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]}]}`)
+	out, err := toInvokeBody(in, "global.anthropic.claude-opus-4-8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m, inMap map[string]json.RawMessage
+	json.Unmarshal(out, &m)
+	json.Unmarshal(in, &inMap)
+	if string(m["thinking"]) != `{"type":"adaptive"}` {
+		t.Fatalf("thinking not rewritten: %s", m["thinking"])
+	}
+	var oc struct{ Effort string }
+	if err := json.Unmarshal(m["output_config"], &oc); err != nil || oc.Effort != "low" {
+		t.Fatalf("output_config = %s (err=%v)", m["output_config"], err)
+	}
+	// cache invariant: system/messages bytes untouched by the thinking rewrite.
+	if string(m["system"]) != string(inMap["system"]) {
+		t.Fatalf("system bytes mutated:\n got: %s\nwant: %s", m["system"], inMap["system"])
+	}
+	if string(m["messages"]) != string(inMap["messages"]) {
+		t.Fatalf("messages bytes mutated:\n got: %s\nwant: %s", m["messages"], inMap["messages"])
+	}
+}
+
+// TestProviderCompleteInvokeRewritesThinkingForBrokenModel is the provider-
+// level round trip (mirrors TestProviderCompleteInvoke): the rewritten
+// thinking must actually reach the upstream call, not just toInvokeBody's
+// return value.
+func TestProviderCompleteInvokeRewritesThinkingForBrokenModel(t *testing.T) {
+	fi := &fakeInvoker{respBody: []byte(`{"id":"msg_b","type":"message","role":"assistant","model":"claude-opus-4-8","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":7,"output_tokens":2}}`)}
+	p := &provider{inv: fi, modelAPI: map[string]string{}}
+	raw := []byte(`{"model":"claude-opus-4-8","max_tokens":4096,"thinking":{"type":"enabled","budget_tokens":1024},"messages":[{"role":"user","content":"hi"}]}`)
+	_, err := p.Complete(context.Background(), &providers.ProxyRequest{Model: "claude-opus-4-8", Upstream: "global.anthropic.claude-opus-4-8", RawBody: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sent map[string]json.RawMessage
+	json.Unmarshal(fi.gotBody, &sent)
+	if string(sent["thinking"]) != `{"type":"adaptive"}` {
+		t.Fatalf("upstream did not receive the rewritten thinking: %s", sent["thinking"])
+	}
+	if _, has := sent["output_config"]; !has {
+		t.Fatal("upstream did not receive output_config")
 	}
 }
 
