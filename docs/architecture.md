@@ -114,13 +114,13 @@ Client -> KeyAuth(RBAC) -> Governor.PreCheck -> Router(fallback+breaker) -> Prov
 
 ### Deployment
 - Container: multi-stage build, `CGO_ENABLED=0` static binary → `distroless/static:nonroot`.
-- Kubernetes: Helm chart at `charts/inferplane` (ConfigMap-rendered config, optional IRSA ServiceAccount for Bedrock, `existingSecret` reference — the chart never creates secrets). Optional `Ingress` (off by default); the admin plane stays off Ingress even when enabled unless `ingress.admin.enabled` is set explicitly, since it carries key-issuance/governance actions. `NOTES.txt` prints post-install next steps (port-forward/Ingress host, first key, pointing a client at it).
+- Kubernetes: Helm chart at `charts/inferplane` (ConfigMap-rendered config, optional IRSA ServiceAccount for Bedrock, `existingSecret` reference — the chart never creates secrets). Optional `Ingress` (off by default); the admin plane stays off Ingress even when enabled unless `ingress.admin.enabled` is set explicitly, since it carries key-issuance/governance actions. Optional PVC for the key store (`persistence.enabled`, default off, ADR-023) — without it `/var/lib/inferplane` is an `emptyDir` and the key store/audit WAL are wiped on every restart; declaring `virtual_keys` in config gives clients a restart-durable key without needing the PVC. `NOTES.txt` prints post-install next steps (port-forward/Ingress host, first key, pointing a client at it).
 
 ### Modules / Resources
 | Component | Path | Description |
 |-----------|------|-------------|
 | Binary | `cmd/inferplane` | serve / keys / audit subcommands |
-| Helm chart | `charts/inferplane` | Deployment, Service (data+admin), ServiceAccount, ConfigMap, optional Ingress, NOTES.txt |
+| Helm chart | `charts/inferplane` | Deployment, Service (data+admin), ServiceAccount, ConfigMap, optional Ingress, optional PVC (ADR-023), NOTES.txt |
 | Dashboard | `deploy/grafana/inferplane.json` | 9-panel Prometheus dashboard |
 
 ### Deployed Endpoints
@@ -274,13 +274,13 @@ Client -> KeyAuth(RBAC) -> Governor.PreCheck -> Router(폴백+브레이커) -> P
 
 ### 배포
 - 컨테이너: 멀티스테이지 빌드, `CGO_ENABLED=0` 정적 바이너리 → `distroless/static:nonroot`.
-- Kubernetes: `charts/inferplane` Helm 차트(ConfigMap 렌더링 config, Bedrock용 선택 IRSA ServiceAccount, `existingSecret` 참조 — 차트는 시크릿을 생성하지 않음). 선택적 `Ingress`(기본 off) — 관리 플레인은 키 발급/거버넌스 작업을 다루므로 Ingress를 켜도 `ingress.admin.enabled`를 명시적으로 설정하지 않으면 계속 비공개로 남습니다. `NOTES.txt`가 설치 직후 다음 단계(포트포워드/Ingress 호스트, 첫 키, 클라이언트 연결)를 안내합니다.
+- Kubernetes: `charts/inferplane` Helm 차트(ConfigMap 렌더링 config, Bedrock용 선택 IRSA ServiceAccount, `existingSecret` 참조 — 차트는 시크릿을 생성하지 않음). 선택적 `Ingress`(기본 off) — 관리 플레인은 키 발급/거버넌스 작업을 다루므로 Ingress를 켜도 `ingress.admin.enabled`를 명시적으로 설정하지 않으면 계속 비공개로 남습니다. 키 스토어용 선택적 PVC(`persistence.enabled`, 기본 off, ADR-023) — 켜지 않으면 `/var/lib/inferplane`은 `emptyDir`이라 재시작마다 키 스토어/감사 WAL이 초기화되며, config에 `virtual_keys`를 선언하면 PVC 없이도 클라이언트 키가 재시작을 견딥니다. `NOTES.txt`가 설치 직후 다음 단계(포트포워드/Ingress 호스트, 첫 키, 클라이언트 연결)를 안내합니다.
 
 ### 모듈 / 리소스
 | 구성요소 | 경로 | 설명 |
 |-----------|------|-------------|
 | 바이너리 | `cmd/inferplane` | serve / keys / audit 서브커맨드 |
-| Helm 차트 | `charts/inferplane` | Deployment, Service(data+admin), ServiceAccount, ConfigMap, 선택적 Ingress, NOTES.txt |
+| Helm 차트 | `charts/inferplane` | Deployment, Service(data+admin), ServiceAccount, ConfigMap, 선택적 Ingress, 선택적 PVC(ADR-023), NOTES.txt |
 | 대시보드 | `deploy/grafana/inferplane.json` | 9패널 Prometheus 대시보드 |
 
 ### 배포 엔드포인트
