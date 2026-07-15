@@ -70,6 +70,14 @@ func (h *CountTokensHandler) count(req *http.Request, raw []byte) int64 {
 		return estimateTokens(innerBody)
 	}
 
+	// RBAC: a key must not trigger a real upstream CountTokens call for a
+	// model outside its allow-list — fall back to the local estimate instead
+	// (still 200; the never-non-200 mandate holds, but the upstream never
+	// sees content the key isn't entitled to send it).
+	if p, ok := principal.From(req.Context()); ok && !h.r.Allows(p, model) {
+		return estimateTokens(innerBody)
+	}
+
 	if p, ok := principal.From(req.Context()); ok && h.mask.Enabled(p.Team) {
 		masked, n, err := maskBody(innerBody, h.mask.Filter)
 		if err != nil {

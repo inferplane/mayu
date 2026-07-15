@@ -1,15 +1,21 @@
 package bedrockapi
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"iter"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/inferplane/inferplane/internal/config"
+	"github.com/inferplane/inferplane/internal/keystore"
+	"github.com/inferplane/inferplane/internal/principal"
 	"github.com/inferplane/inferplane/internal/router"
+	"github.com/inferplane/inferplane/pkg/schema"
 	"github.com/inferplane/inferplane/providers"
 )
 
@@ -103,4 +109,68 @@ func TestCountTokensNoPrincipalStill200(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, countTokensReq("claude-x", countTokensBody(t, `{"messages":[{"role":"user","content":"hi"}]}`)))
 	assert200InputTokens(t, rec)
+}
+
+// tcProvider implements providers.TokenCounter with a distinctive count so
+// tests can tell a real upstream count (777) from the local estimate.
+type tcProvider struct{ called bool }
+
+func (t *tcProvider) Name() string               { return "mock" }
+func (t *tcProvider) Models() []schema.ModelInfo { return nil }
+func (t *tcProvider) Complete(context.Context, *providers.ProxyRequest) (*providers.ProxyResponse, error) {
+	return nil, errors.New("unused")
+}
+func (t *tcProvider) Stream(context.Context, *providers.ProxyRequest) (iter.Seq2[*providers.StreamEvent, error], error) {
+	return nil, errors.New("unused")
+}
+func (t *tcProvider) CountTokens(context.Context, *providers.ProxyRequest) (int64, error) {
+	t.called = true
+	return 777, nil
+}
+
+// A key must not trigger a real upstream CountTokens call for a model outside
+// its allow-list (CI review HIGH finding): the handler falls back to the local
+// estimate — still 200 — and the upstream counter is never called.
+func TestCountTokensDisallowedModelSkipsUpstream(t *testing.T) {
+	tc := &tcProvider{}
+	provs := map[string]providers.Provider{"p": tc}
+	models := map[string]config.ModelConfig{
+		"claude-x": {Targets: []config.Target{{Provider: "p", Model: "up"}}},
+	}
+	h := holderFor(provs, models)
+	handler := NewCountTokensHandler(router.New(h), h)
+
+	req := countTokensReq("claude-x", countTokensBody(t, `{"messages":[{"role":"user","content":"hi"}]}`))
+	req = req.WithContext(principal.With(req.Context(),
+		keystore.Principal{AllowedModels: []string{"some-other-model"}}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	got := assert200InputTokens(t, rec)
+	if tc.called {
+		t.Fatal("upstream CountTokens must not be called for a model outside the key's allow-list")
+	}
+	if got == 777 {
+		t.Fatal("response leaked the upstream count for a disallowed model")
+	}
+}
+
+// The allowed-key path still reaches the real upstream counter.
+func TestCountTokensAllowedModelUsesUpstream(t *testing.T) {
+	tc := &tcProvider{}
+	provs := map[string]providers.Provider{"p": tc}
+	models := map[string]config.ModelConfig{
+		"claude-x": {Targets: []config.Target{{Provider: "p", Model: "up"}}},
+	}
+	h := holderFor(provs, models)
+	handler := NewCountTokensHandler(router.New(h), h)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, allowAll(countTokensReq("claude-x", countTokensBody(t, `{"messages":[{"role":"user","content":"hi"}]}`))))
+	if got := assert200InputTokens(t, rec); got != 777 {
+		t.Fatalf("allowed key should get the upstream count 777, got %d", got)
+	}
+	if !tc.called {
+		t.Fatal("upstream CountTokens was not called for an allowed model")
+	}
 }
