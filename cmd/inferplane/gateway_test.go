@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -268,5 +269,109 @@ func TestGateway_RevokedDeclaredKeyStaysRevokedAcrossReboot(t *testing.T) {
 	bootAndStop(t, g2)
 	if got := authedGet(t, "http://"+g2.DataAddr()+"/v1/models", "sk-declarative-key-0123456789"); got == http.StatusOK {
 		t.Fatal("a revoked declared key must not be resurrected by config re-declaration on reboot")
+	}
+}
+
+// --- Bedrock passthrough ingress (ADR-024): route registration e2e ---
+
+// TestGateway_BedrockRoutesMounted proves the three /model/{modelId}/... routes
+// are mounted and reach the bedrockapi handlers: an AUTHENTICATED request for
+// an unknown model must get the handler's AWS-shaped error (X-Amzn-ErrorType
+// present), not the mux's default plain-text 404. (An unauthenticated probe
+// can't prove this — KeyAuth 401s every path, mounted or not.)
+func TestGateway_BedrockRoutesMounted(t *testing.T) {
+	var keysDBPath string
+	cfgPath := writeTestConfig(t, func(cfg map[string]any, dir string) {
+		keysDBPath = cfg["key_store"].(map[string]any)["path"].(string)
+	})
+	pre, err := keystore.OpenSQLite(keysDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext, _, err := pre.Create(context.Background(), "demo", []string{"*"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pre.Close()
+
+	g, err := newGateway(cfgPath)
+	if err != nil {
+		t.Fatalf("newGateway: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- g.serve(ctx) }()
+	waitHTTP(t, "http://"+g.AdminAddr()+"/healthz", http.StatusOK)
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	for _, path := range []string{
+		"/model/never-registered-v1:0/invoke",
+		"/model/never-registered-v1:0/invoke-with-response-stream",
+	} {
+		req, _ := http.NewRequest("POST", "http://"+g.DataAddr()+path, strings.NewReader(`{"messages":[]}`))
+		req.Header.Set("x-api-key", plaintext)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s: got %d, want 404 for an unknown model", path, resp.StatusCode)
+		}
+		if resp.Header.Get("X-Amzn-ErrorType") == "" {
+			t.Fatalf("%s: 404 lacks X-Amzn-ErrorType — the route is not reaching the bedrockapi handler (plain mux 404)", path)
+		}
+	}
+}
+
+// TestGateway_BedrockCountTokensNeverFails: with a valid key, count-tokens
+// must return 200 {"inputTokens":N} even for an unknown model and a garbage
+// body — Claude Code's /context crashes on any non-200.
+func TestGateway_BedrockCountTokensNeverFails(t *testing.T) {
+	var keysDBPath string
+	cfgPath := writeTestConfig(t, func(cfg map[string]any, dir string) {
+		keysDBPath = cfg["key_store"].(map[string]any)["path"].(string)
+	})
+	pre, err := keystore.OpenSQLite(keysDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext, _, err := pre.Create(context.Background(), "demo", []string{"*"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pre.Close()
+
+	g, err := newGateway(cfgPath)
+	if err != nil {
+		t.Fatalf("newGateway: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- g.serve(ctx) }()
+	waitHTTP(t, "http://"+g.AdminAddr()+"/healthz", http.StatusOK)
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	req, _ := http.NewRequest("POST", "http://"+g.DataAddr()+"/model/never-registered/count-tokens", strings.NewReader(`{broken json`))
+	req.Header.Set("x-api-key", plaintext)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("count-tokens returned %d — any non-200 crashes Claude Code's /context", resp.StatusCode)
+	}
+	var out struct {
+		InputTokens *int64 `json:"inputTokens"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || out.InputTokens == nil || *out.InputTokens < 1 {
+		t.Fatalf("response not {\"inputTokens\">=1}: err=%v out=%+v", err, out)
 	}
 }
