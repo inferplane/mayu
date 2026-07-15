@@ -249,3 +249,82 @@ func TestStreamInvokeReserializesToAnthropicSSE(t *testing.T) {
 		t.Fatalf("thinking must precede text in SSE output")
 	}
 }
+
+// Bedrock rejects a body carrying context_management unless the matching beta
+// is enabled via the body's anthropic_beta array (the direct Anthropic API
+// takes it as an anthropic-beta HTTP header instead, which InvokeModel has no
+// equivalent of). Claude Code >=2.1.x always sends context_management, so
+// without this injection every request 400s with ValidationException —
+// verified against the live service 2026-07-15. Same fix family as ADR-022.
+func TestToInvokeBodyInjectsContextManagementBeta(t *testing.T) {
+	in := []byte(`{"model":"m","max_tokens":16,"context_management":{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]},"messages":[{"role":"user","content":"hi"}]}`)
+	out, err := toInvokeBody(in, "global.anthropic.claude-fable-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m struct {
+		Betas []string        `json:"anthropic_beta"`
+		CM    json.RawMessage `json:"context_management"`
+	}
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.CM == nil {
+		t.Fatal("context_management must pass through, not be stripped")
+	}
+	found := false
+	for _, b := range m.Betas {
+		if b == "context-management-2025-06-27" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("anthropic_beta must gain context-management-2025-06-27, got %v", m.Betas)
+	}
+}
+
+func TestToInvokeBodyMergesContextManagementBetaIntoExistingList(t *testing.T) {
+	in := []byte(`{"model":"m","anthropic_beta":["some-other-beta"],"context_management":{"edits":[]},"messages":[]}`)
+	out, err := toInvokeBody(in, "global.anthropic.claude-fable-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m struct {
+		Betas []string `json:"anthropic_beta"`
+	}
+	json.Unmarshal(out, &m)
+	if len(m.Betas) != 2 || m.Betas[0] != "some-other-beta" || m.Betas[1] != "context-management-2025-06-27" {
+		t.Fatalf("existing betas must be preserved and the new one appended: %v", m.Betas)
+	}
+}
+
+func TestToInvokeBodyNoBetaInjectionWithoutContextManagement(t *testing.T) {
+	// no context_management in the body → no anthropic_beta appears (don't send
+	// beta names Bedrock might not recognize; it 400s on unknown betas —
+	// verified live 2026-07-15 with Claude Code's full 8-beta header list)
+	in := []byte(`{"model":"m","max_tokens":16,"messages":[]}`)
+	out, err := toInvokeBody(in, "global.anthropic.claude-fable-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]json.RawMessage
+	json.Unmarshal(out, &m)
+	if _, has := m["anthropic_beta"]; has {
+		t.Fatal("anthropic_beta must not be injected when no body feature needs it")
+	}
+}
+
+func TestToInvokeBodyContextManagementBetaAlreadyPresentNotDuplicated(t *testing.T) {
+	in := []byte(`{"model":"m","anthropic_beta":["context-management-2025-06-27"],"context_management":{"edits":[]},"messages":[]}`)
+	out, err := toInvokeBody(in, "global.anthropic.claude-fable-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m struct {
+		Betas []string `json:"anthropic_beta"`
+	}
+	json.Unmarshal(out, &m)
+	if len(m.Betas) != 1 {
+		t.Fatalf("beta must not be duplicated: %v", m.Betas)
+	}
+}
