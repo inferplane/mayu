@@ -11,6 +11,7 @@ import (
 	"github.com/inferplane/inferplane/internal/filter"
 	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
+	"github.com/inferplane/inferplane/internal/live"
 	"github.com/inferplane/inferplane/internal/metrics"
 	"github.com/inferplane/inferplane/internal/principal"
 	"github.com/inferplane/inferplane/internal/router"
@@ -19,23 +20,26 @@ import (
 	"github.com/inferplane/inferplane/internal/server/analyticsapi"
 	"github.com/inferplane/inferplane/internal/server/anthropicapi"
 	"github.com/inferplane/inferplane/internal/server/auditapi"
+	"github.com/inferplane/inferplane/internal/server/bedrockapi"
 	"github.com/inferplane/inferplane/internal/server/configapi"
 	"github.com/inferplane/inferplane/internal/server/openaiapi"
 	"github.com/inferplane/inferplane/internal/server/usageapi"
 	"github.com/inferplane/inferplane/pkg/ulid"
 )
 
-// DataMux builds the data-plane (:8080) handler: Anthropic ingress endpoints
-// behind virtual-key auth (M3). All endpoints resolve a Principal via the key
-// store before reaching the router. aud is the audit writer (may be nil) used
-// for the two-phase request_started/request_completed records on /v1/messages.
+// DataMux builds the data-plane (:8080) handler: Anthropic, Bedrock, and OpenAI
+// ingress endpoints behind virtual-key auth (M3). holder provides the live
+// configuration snapshot used by Bedrock model-ID resolution. All endpoints
+// resolve a Principal via the key store before reaching the router. aud is the
+// audit writer (may be nil) used for the two-phase request_started/request_completed
+// records on generation endpoints.
 // gov is the governance pipeline (rate/quota/budget + cost); when non-nil the
-// /v1/messages handler enforces it, when nil governance is bypassed. m is the
+// generation handlers enforce it, when nil governance is bypassed. m is the
 // Prometheus metrics sink threaded into the ingress handlers (nil → no-op).
 // teamPolicy is a fresh-per-request team-record lookup (D6/D7, ADR-016
 // posture — no caching); nil disables per-team overrides entirely. bodies is
 // the opt-in body-capture recorder (D4, ADR-018); nil disables it.
-func DataMux(r *router.Router, store keystore.Store, aud *audit.Writer, gov *governance.Governor, m *metrics.Metrics, mask *filter.Masking, teamPolicy func(team string) (keystore.TeamRecord, bool), bodies *bodystore.Recorder) http.Handler {
+func DataMux(r *router.Router, holder *live.Holder, store keystore.Store, aud *audit.Writer, gov *governance.Governor, m *metrics.Metrics, mask *filter.Masking, teamPolicy func(team string) (keystore.TeamRecord, bool), bodies *bodystore.Recorder) http.Handler {
 	mux := http.NewServeMux()
 	msgs := anthropicapi.NewMessagesHandlerMetrics(r, aud, gov, m)
 	msgs.SetMasking(mask) // PII masking for configured teams (ADR-009); nil = off
@@ -51,6 +55,20 @@ func DataMux(r *router.Router, store keystore.Store, aud *audit.Writer, gov *gov
 	chat.SetTeamPolicy(teamPolicy)
 	chat.SetBodyRecorder(bodies)
 	mux.Handle("POST /v1/chat/completions", chat)
+	invoke := bedrockapi.NewInvokeHandlerMetrics(r, holder, aud, gov, m, false)
+	invoke.SetMasking(mask)
+	invoke.SetTeamPolicy(teamPolicy)
+	invoke.SetBodyRecorder(bodies)
+	mux.Handle("POST /model/{modelId}/invoke", invoke)
+	stream := bedrockapi.NewInvokeHandlerMetrics(r, holder, aud, gov, m, true)
+	stream.SetMasking(mask)
+	stream.SetTeamPolicy(teamPolicy)
+	stream.SetBodyRecorder(bodies)
+	mux.Handle("POST /model/{modelId}/invoke-with-response-stream", stream)
+	bct := bedrockapi.NewCountTokensHandler(r, holder)
+	bct.SetMasking(mask)
+	bct.SetTeamPolicy(teamPolicy)
+	mux.Handle("POST /model/{modelId}/count-tokens", bct)
 	// Both the Anthropic (Claude Code) and OpenAI (OpenCode) clients hit the
 	// same GET /v1/models path but expect different response shapes, so we
 	// content-negotiate: Anthropic clients send an `anthropic-version` header,
