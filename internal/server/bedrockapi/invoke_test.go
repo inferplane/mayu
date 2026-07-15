@@ -2,6 +2,7 @@ package bedrockapi
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"iter"
@@ -253,5 +254,87 @@ func TestInvokeUpstreamErrorRewrappedAWSShape(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), `"type":"error"`) || strings.Contains(rec.Body.String(), "rate_limit_error") {
 		t.Fatalf("anthropic-shaped upstream body teed verbatim: %s", rec.Body.String())
+	}
+}
+
+// streamProvider yields a realistic chunk sequence including one nil-Chunk
+// event (a keepalive/unparseable payload per providers/provider.go), which
+// the eventstream writer must SKIP rather than emit as base64("null").
+type streamProvider struct{}
+
+func (streamProvider) Name() string               { return "mock" }
+func (streamProvider) Models() []schema.ModelInfo { return nil }
+func (streamProvider) Complete(context.Context, *providers.ProxyRequest) (*providers.ProxyResponse, error) {
+	return nil, errors.New("unused")
+}
+func (streamProvider) Stream(context.Context, *providers.ProxyRequest) (iter.Seq2[*providers.StreamEvent, error], error) {
+	in, out := int64(10), int64(5)
+	events := []*providers.StreamEvent{
+		{Raw: []byte("event: message_start\ndata: {\"type\":\"message_start\"}\n\n"), Chunk: &schema.ChatChunk{Type: "message_start"}},
+		{Raw: []byte(": keepalive\n\n"), Chunk: nil}, // must be skipped
+		{Raw: []byte("event: message_delta\ndata: {\"type\":\"message_delta\"}\n\n"), Chunk: &schema.ChatChunk{Type: "message_delta", Usage: &schema.Usage{InputTokens: &in, OutputTokens: &out}}},
+		{Raw: []byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"), Chunk: &schema.ChatChunk{Type: "message_stop"}},
+	}
+	return func(yield func(*providers.StreamEvent, error) bool) {
+		for _, ev := range events {
+			if !yield(ev, nil) {
+				return
+			}
+		}
+	}, nil
+}
+
+func TestInvokeStreamingEmitsEventstream(t *testing.T) {
+	provs := map[string]providers.Provider{"p": streamProvider{}}
+	models := map[string]config.ModelConfig{
+		"claude-x": {Targets: []config.Target{{Provider: "p", Model: "global.anthropic.claude-x-v1:0"}}},
+	}
+	h := holderFor(provs, models)
+	handler := NewInvokeHandler(router.New(h), h, true)
+
+	req := httptest.NewRequest("POST", "/model/claude-x/invoke-with-response-stream", strings.NewReader(`{"anthropic_version":"bedrock-2023-05-31","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	req.SetPathValue("modelId", "claude-x")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, allowAll(req))
+
+	if rec.Code != 200 {
+		t.Fatalf("status %d body %q", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/vnd.amazon.eventstream" {
+		t.Fatalf("Content-Type = %q — a Bedrock-mode client rejects anything else", got)
+	}
+	if got := rec.Header().Get("X-Amzn-Bedrock-Content-Type"); got != "application/json" {
+		t.Fatalf("X-Amzn-Bedrock-Content-Type = %q", got)
+	}
+	msgs := decodeAll(t, rec.Body)
+	if len(msgs) != 3 {
+		t.Fatalf("%d frames, want 3 (nil-Chunk keepalive must be skipped)", len(msgs))
+	}
+	var types []string
+	for _, m := range msgs {
+		if got := headerStr(t, m, ":event-type"); got != "chunk" {
+			t.Fatalf(":event-type = %q", got)
+		}
+		var payload struct {
+			Bytes string `json:"bytes"`
+		}
+		if err := json.Unmarshal(m.Payload, &payload); err != nil {
+			t.Fatalf("payload: %v", err)
+		}
+		decoded, err := base64.StdEncoding.DecodeString(payload.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(decoded), "event:") || strings.Contains(string(decoded), "data:") {
+			t.Fatalf("SSE text leaked into frame payload: %s", decoded)
+		}
+		var c schema.ChatChunk
+		if err := json.Unmarshal(decoded, &c); err != nil {
+			t.Fatalf("frame payload is not a bare event JSON: %s", decoded)
+		}
+		types = append(types, c.Type)
+	}
+	if strings.Join(types, ",") != "message_start,message_delta,message_stop" {
+		t.Fatalf("frame order: %v", types)
 	}
 }
