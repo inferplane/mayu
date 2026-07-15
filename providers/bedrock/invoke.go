@@ -37,7 +37,52 @@ func toInvokeBody(raw []byte, upstream string) ([]byte, error) {
 	if needsAdaptiveRewrite(upstream) {
 		rewriteLegacyThinking(top)
 	}
+	injectRequiredBetas(top)
 	return json.Marshal(top)
+}
+
+// featureBetas maps a top-level body feature to the beta Bedrock requires for
+// it in the body's anthropic_beta array. The direct Anthropic API takes betas
+// as an anthropic-beta HTTP header, which InvokeModel has no equivalent of —
+// so a client that thinks it talks to the direct API (Claude Code behind the
+// gateway) sends the feature field but no body beta, and Bedrock 400s with
+// ValidationException. Only betas for features ACTUALLY present in the body
+// are injected: forwarding a client's full beta header list wholesale also
+// 400s, because Bedrock rejects beta names it doesn't recognize (both
+// behaviors verified against the live service 2026-07-15).
+var featureBetas = map[string]string{
+	"context_management": "context-management-2025-06-27",
+}
+
+func injectRequiredBetas(top map[string]json.RawMessage) {
+	var betas []string
+	if raw, has := top["anthropic_beta"]; has {
+		if json.Unmarshal(raw, &betas) != nil {
+			return // client sent a non-list shape; leave it untouched
+		}
+	}
+	added := false
+	for feature, beta := range featureBetas {
+		if _, has := top[feature]; !has {
+			continue
+		}
+		present := false
+		for _, b := range betas {
+			if b == beta {
+				present = true
+				break
+			}
+		}
+		if !present {
+			betas = append(betas, beta)
+			added = true
+		}
+	}
+	if added {
+		if b, err := json.Marshal(betas); err == nil {
+			top["anthropic_beta"] = b
+		}
+	}
 }
 
 func (p *provider) completeInvoke(ctx context.Context, req *providers.ProxyRequest) (*providers.ProxyResponse, error) {
