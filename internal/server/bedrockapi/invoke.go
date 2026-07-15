@@ -325,6 +325,7 @@ func (h *InvokeHandler) serveStream(w http.ResponseWriter, req *http.Request, pr
 
 	h.r.RecordResult(providerName, identity, true)
 	w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
+	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Amzn-Bedrock-Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 
@@ -332,28 +333,35 @@ func (h *InvokeHandler) serveStream(w http.ResponseWriter, req *http.Request, pr
 	var usage *audit.UsageRef
 	var lastUsage *schema.Usage
 	var ttft float64
+	// partialFinish records a stream that broke mid-flight: 200 is already
+	// committed, so the failure surfaces as an exception frame on the wire
+	// and a Partial audit record — mirroring anthropicapi's
+	// auditCompletedPartial path, never a clean 200 completion record.
+	partialFinish := func() bool {
+		if writeExceptionFrame(w, enc, "internalServerException", "stream interrupted") == nil {
+			flusher.Flush()
+		}
+		h.auditCompletedPartial(p, model, upstream, usage, tracing.TraceID(req.Context()))
+		recordSpanResponse(req, prov.Name(), upstream, usage, true) // committed (partial)
+		h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, http.StatusOK, time.Since(start).Seconds(), ttft)
+		return false
+	}
 	for ev, err := range seq {
 		if err != nil {
-			if writeExceptionFrame(w, enc, "internalServerException", "stream interrupted") == nil {
-				flusher.Flush()
-			}
-			break
+			return partialFinish()
 		}
 		if ev == nil || ev.Chunk == nil {
 			continue
 		}
 		chunkJSON, err := json.Marshal(ev.Chunk)
 		if err != nil {
-			if writeExceptionFrame(w, enc, "internalServerException", "stream interrupted") == nil {
-				flusher.Flush()
-			}
-			break
+			return partialFinish()
 		}
 		if ttft == 0 {
 			ttft = time.Since(start).Seconds()
 		}
 		if err := writeChunkFrame(w, enc, chunkJSON); err != nil {
-			break
+			return partialFinish()
 		}
 		flusher.Flush()
 		if ev.Chunk.Usage != nil {
@@ -479,6 +487,29 @@ func (h *InvokeHandler) auditCompleted(id string, p keystore.Principal, model, u
 	}
 	if guardrailVersion != "" {
 		rec.GuardrailVersion = &guardrailVersion
+	}
+	h.aud.Append(rec)
+}
+
+// auditCompletedPartial records a stream that broke mid-flight: status 200 was
+// already sent to the client, but the response is partial (mirrors
+// anthropicapi's helper of the same name).
+func (h *InvokeHandler) auditCompletedPartial(p keystore.Principal, model, upstream string, usage *audit.UsageRef, traceID string) {
+	if h.aud == nil {
+		return
+	}
+	rec := audit.Record{
+		SchemaVersion: 1,
+		Event:         "request_completed",
+		ID:            ulid.New(),
+		TS:            time.Now().UTC().Format(time.RFC3339Nano),
+		Principal:     audit.PrincipalRef{KeyID: p.KeyID, Team: p.Team},
+		Request:       audit.RequestRef{Ingress: "bedrock", ModelRequested: model, ModelResolved: upstream, Stream: h.streaming},
+		Outcome:       &audit.OutcomeRef{Status: 200, Partial: true},
+		Usage:         usage,
+	}
+	if traceID != "" {
+		rec.TraceID = &traceID
 	}
 	h.aud.Append(rec)
 }

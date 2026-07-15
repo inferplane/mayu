@@ -338,3 +338,54 @@ func TestInvokeStreamingEmitsEventstream(t *testing.T) {
 		t.Fatalf("frame order: %v", types)
 	}
 }
+
+// midStreamErrProvider yields one good chunk, then a mid-stream error — after
+// the 200 is committed, the failure must surface as an exception frame (the
+// status can no longer change) and the audit record must be Partial, never a
+// clean completion (H4 gate finding, mirrors anthropicapi's partial path).
+type midStreamErrProvider struct{}
+
+func (midStreamErrProvider) Name() string               { return "mock" }
+func (midStreamErrProvider) Models() []schema.ModelInfo { return nil }
+func (midStreamErrProvider) Complete(context.Context, *providers.ProxyRequest) (*providers.ProxyResponse, error) {
+	return nil, errors.New("unused")
+}
+func (midStreamErrProvider) Stream(context.Context, *providers.ProxyRequest) (iter.Seq2[*providers.StreamEvent, error], error) {
+	return func(yield func(*providers.StreamEvent, error) bool) {
+		if !yield(&providers.StreamEvent{Chunk: &schema.ChatChunk{Type: "message_start"}}, nil) {
+			return
+		}
+		yield(nil, errors.New("upstream broke"))
+	}, nil
+}
+
+func TestInvokeStreamingMidStreamErrorEmitsExceptionFrame(t *testing.T) {
+	provs := map[string]providers.Provider{"p": midStreamErrProvider{}}
+	models := map[string]config.ModelConfig{
+		"claude-x": {Targets: []config.Target{{Provider: "p", Model: "up"}}},
+	}
+	h := holderFor(provs, models)
+	handler := NewInvokeHandler(router.New(h), h, true)
+
+	req := httptest.NewRequest("POST", "/model/claude-x/invoke-with-response-stream", strings.NewReader(`{"messages":[]}`))
+	req.SetPathValue("modelId", "claude-x")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, allowAll(req))
+
+	if rec.Code != 200 {
+		t.Fatalf("status %d (already committed before the break)", rec.Code)
+	}
+	msgs := decodeAll(t, rec.Body)
+	if len(msgs) != 2 {
+		t.Fatalf("%d frames, want 2 (one chunk + one exception)", len(msgs))
+	}
+	if got := headerStr(t, msgs[0], ":message-type"); got != "event" {
+		t.Fatalf("frame 1 :message-type = %q", got)
+	}
+	if got := headerStr(t, msgs[1], ":message-type"); got != "exception" {
+		t.Fatalf("frame 2 :message-type = %q, want exception", got)
+	}
+	if got := headerStr(t, msgs[1], ":exception-type"); got != "internalServerException" {
+		t.Fatalf(":exception-type = %q", got)
+	}
+}
