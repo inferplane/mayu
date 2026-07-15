@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
 	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/bodystore"
 	"github.com/inferplane/inferplane/internal/filter"
@@ -186,13 +187,6 @@ func (h *InvokeHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	h.audit(p, model, chain[0].Upstream, nil, piiMasked, traceID)
-	if h.streaming {
-		writeErr(w, http.StatusInternalServerError, "streaming not implemented yet")
-		h.auditCompleted(ulid.New(), p, model, chain[0].Upstream, http.StatusInternalServerError, nil, nil, traceID, "", teamRec.GuardrailID, teamRec.GuardrailVersion)
-		h.metrics.ObserveRequest(ingressName, model, chain[0].ProviderName, p.Team, http.StatusInternalServerError, time.Since(start).Seconds(), 0)
-		tracing.SetStatus(span, false, "streaming not implemented")
-		return
-	}
 
 	for i, ct := range chain {
 		upHeaders := req.Header.Clone()
@@ -208,7 +202,13 @@ func (h *InvokeHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		if i > 0 {
 			w.Header().Set("x-inferplane-fallback", ct.ProviderName)
 		}
-		if !h.serveComplete(w, req, ct.Provider, pr, p, model, ct.ProviderName, ct.Identity, ct.Upstream, last, start, table) {
+		var retriable bool
+		if h.streaming {
+			retriable = h.serveStream(w, req, ct.Provider, pr, p, model, ct.ProviderName, ct.Identity, ct.Upstream, last, start, table)
+		} else {
+			retriable = h.serveComplete(w, req, ct.Provider, pr, p, model, ct.ProviderName, ct.Identity, ct.Upstream, last, start, table)
+		}
+		if !retriable {
 			return
 		}
 		h.r.RecordResult(ct.ProviderName, ct.Identity, false)
@@ -290,6 +290,88 @@ func (h *InvokeHandler) serveComplete(w http.ResponseWriter, req *http.Request, 
 	h.auditCompleted(recID, p, model, upstream, resp.StatusCode, usage, cost, tracing.TraceID(req.Context()), bodyRef, pr.GuardrailID, pr.GuardrailVersion)
 	recordSpanResponse(req, prov.Name(), upstream, usage, true)
 	h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, resp.StatusCode, time.Since(start).Seconds(), 0)
+	return false
+}
+
+func (h *InvokeHandler) serveStream(w http.ResponseWriter, req *http.Request, prov providers.Provider, pr *providers.ProxyRequest, p keystore.Principal, model, providerName, identity, upstream string, last bool, start time.Time, table *pricing.Table) (retriable bool) {
+	seq, err := prov.Stream(req.Context(), pr)
+	if err != nil {
+		if !last {
+			return true
+		}
+		var ue *providers.UpstreamError
+		if errors.As(err, &ue) {
+			writeErr(w, ue.StatusCode, "bedrock upstream error")
+			h.auditCompleted(ulid.New(), p, model, upstream, ue.StatusCode, nil, nil, tracing.TraceID(req.Context()), "", pr.GuardrailID, pr.GuardrailVersion)
+			recordSpanResponse(req, prov.Name(), upstream, nil, false)
+			h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, ue.StatusCode, time.Since(start).Seconds(), 0)
+			return false
+		}
+		writeErr(w, http.StatusBadGateway, "bedrock upstream error")
+		h.auditCompleted(ulid.New(), p, model, upstream, http.StatusBadGateway, nil, nil, tracing.TraceID(req.Context()), "", pr.GuardrailID, pr.GuardrailVersion)
+		recordSpanResponse(req, prov.Name(), upstream, nil, false)
+		h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, http.StatusBadGateway, time.Since(start).Seconds(), 0)
+		return false
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeErr(w, http.StatusInternalServerError, "streaming unsupported")
+		h.auditCompleted(ulid.New(), p, model, upstream, http.StatusInternalServerError, nil, nil, tracing.TraceID(req.Context()), "", pr.GuardrailID, pr.GuardrailVersion)
+		recordSpanResponse(req, prov.Name(), upstream, nil, false)
+		h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, http.StatusInternalServerError, time.Since(start).Seconds(), 0)
+		return false
+	}
+
+	h.r.RecordResult(providerName, identity, true)
+	w.Header().Set("Content-Type", "application/vnd.amazon.eventstream")
+	w.Header().Set("X-Amzn-Bedrock-Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	enc := eventstream.NewEncoder()
+	var usage *audit.UsageRef
+	var lastUsage *schema.Usage
+	var ttft float64
+	for ev, err := range seq {
+		if err != nil {
+			if writeExceptionFrame(w, enc, "internalServerException", "stream interrupted") == nil {
+				flusher.Flush()
+			}
+			break
+		}
+		if ev == nil || ev.Chunk == nil {
+			continue
+		}
+		chunkJSON, err := json.Marshal(ev.Chunk)
+		if err != nil {
+			if writeExceptionFrame(w, enc, "internalServerException", "stream interrupted") == nil {
+				flusher.Flush()
+			}
+			break
+		}
+		if ttft == 0 {
+			ttft = time.Since(start).Seconds()
+		}
+		if err := writeChunkFrame(w, enc, chunkJSON); err != nil {
+			break
+		}
+		flusher.Flush()
+		if ev.Chunk.Usage != nil {
+			usage = usageRef(ev.Chunk.Usage)
+			lastUsage = ev.Chunk.Usage
+		}
+	}
+
+	cost := h.settle(p, providerName, model, upstream, lastUsage, table)
+	h.observeTokens(model, providerName, p.Team, lastUsage)
+	recID := ulid.New()
+	var bodyRef string
+	if h.bodies != nil {
+		bodyRef = h.bodies.Capture(recID, p.Team, pr.RawBody, nil)
+	}
+	h.auditCompleted(recID, p, model, upstream, http.StatusOK, usage, cost, tracing.TraceID(req.Context()), bodyRef, pr.GuardrailID, pr.GuardrailVersion)
+	recordSpanResponse(req, prov.Name(), upstream, usage, true)
+	h.metrics.ObserveRequest(ingressName, model, providerName, p.Team, http.StatusOK, time.Since(start).Seconds(), ttft)
 	return false
 }
 
