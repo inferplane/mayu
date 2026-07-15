@@ -93,6 +93,13 @@ type TeamStore interface {
 	DeleteTeam(ctx context.Context, name string) error
 }
 
+// KeyEnsurer upserts a virtual key from a caller-supplied plaintext (ADR-023
+// declarative bootstrap), as opposed to Create/CreateWithOptions which generate
+// a new random plaintext. Revocation and created_at are never touched.
+type KeyEnsurer interface {
+	EnsureKey(ctx context.Context, plaintext, team string, allowedModels []string, opts KeyOptions) (Principal, error)
+}
+
 var b32 = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
 
 // generateKey returns a high-entropy virtual key ("ik_" + 32 random bytes in

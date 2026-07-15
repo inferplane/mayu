@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -986,5 +987,174 @@ func TestLoadRaw_ProviderHealthCheckEmptyIntervalRejected(t *testing.T) {
 	os.WriteFile(f, []byte(`{"provider_health_check":{}}`), 0o600)
 	if _, err := Load(f); err == nil {
 		t.Fatal("present-but-empty provider_health_check.interval must be rejected (else time.NewTicker(0) panics at startup)")
+	}
+}
+
+// ADR-023: declarative virtual keys. The plaintext is always referenced
+// (env/file), never inline; only the resolved value is ever used, and it is
+// never marshaled back out.
+
+func TestLoadResolvesVirtualKeyRef(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "ok.json")
+	t.Setenv("INFERPLANE_VKEY", "sk-declarative-key-0123456789")
+	os.WriteFile(f, []byte(`{"teams":{"demo":{"allowed_models":["*"]}},"virtual_keys":[
+		{"team":"demo","key_ref":{"env":"INFERPLANE_VKEY"},"allowed_models":["*"]}
+	]}`), 0o600)
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.VirtualKeys) != 1 {
+		t.Fatalf("virtual_keys not parsed: %+v", cfg.VirtualKeys)
+	}
+	if got := cfg.VirtualKeys[0].Key; got != "sk-declarative-key-0123456789" {
+		t.Fatalf("key_ref not resolved: %q", got)
+	}
+}
+
+func TestLoadRejectsVirtualKey_InlineKey(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	os.WriteFile(f, []byte(`{"teams":{"demo":{"allowed_models":["*"]}},"virtual_keys":[
+		{"team":"demo","key":"sk-plaintext-should-never-be-accepted","allowed_models":["*"]}
+	]}`), 0o600)
+	_, err := Load(f)
+	if err == nil {
+		t.Fatal("inline virtual_keys[].key (not key_ref) must be rejected — the plaintext must never sit in the config file (§7)")
+	}
+	if strings.Contains(err.Error(), "sk-plaintext-should-never-be-accepted") {
+		t.Fatalf("error must never echo the inline value: %v", err)
+	}
+}
+
+func TestLoadRejectsVirtualKey_MissingKeyRef(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	os.WriteFile(f, []byte(`{"teams":{"demo":{"allowed_models":["*"]}},"virtual_keys":[
+		{"team":"demo","allowed_models":["*"]}
+	]}`), 0o600)
+	if _, err := Load(f); err == nil {
+		t.Fatal("virtual_keys[].key_ref is required")
+	}
+}
+
+func TestLoadRejectsVirtualKey_UnsetEnv(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	os.WriteFile(f, []byte(`{"teams":{"demo":{"allowed_models":["*"]}},"virtual_keys":[
+		{"team":"demo","key_ref":{"env":"INFERPLANE_VKEY_UNSET_XYZ"},"allowed_models":["*"]}
+	]}`), 0o600)
+	if _, err := Load(f); err == nil {
+		t.Fatal("an unresolvable key_ref must fail closed (boot refused), not silently skip the key")
+	}
+}
+
+func TestLoadRejectsVirtualKey_TooShort(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	t.Setenv("INFERPLANE_VKEY_SHORT", "short")
+	os.WriteFile(f, []byte(`{"teams":{"demo":{"allowed_models":["*"]}},"virtual_keys":[
+		{"team":"demo","key_ref":{"env":"INFERPLANE_VKEY_SHORT"},"allowed_models":["*"]}
+	]}`), 0o600)
+	_, err := Load(f)
+	if err == nil {
+		t.Fatal("a resolved plaintext shorter than 16 characters must be rejected (entropy floor)")
+	}
+	if strings.Contains(err.Error(), "short") {
+		t.Fatalf("error must never echo the resolved value: %v", err)
+	}
+}
+
+func TestLoadRejectsVirtualKey_EmptyAllowedModels(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	t.Setenv("INFERPLANE_VKEY_EMPTYMODELS", "sk-declarative-key-0123456789")
+	os.WriteFile(f, []byte(`{"teams":{"demo":{"allowed_models":["*"]}},"virtual_keys":[
+		{"team":"demo","key_ref":{"env":"INFERPLANE_VKEY_EMPTYMODELS"},"allowed_models":[]}
+	]}`), 0o600)
+	if _, err := Load(f); err == nil {
+		t.Fatal("empty allowed_models means deny-all (Principal.Allows) and must be rejected — the operator must write [\"*\"] explicitly")
+	}
+}
+
+// TestLoadRejectsVirtualKey_NegativeLimits pins an H4 code-gate finding: a
+// negative rpm/tpm/budget_usd_per_month must be rejected, not silently
+// treated as "unlimited" (governance.go only enforces limits > 0).
+func TestLoadRejectsVirtualKey_NegativeLimits(t *testing.T) {
+	cases := []string{
+		`{"team":"demo","key_ref":{"env":"INFERPLANE_VKEY_NEG"},"allowed_models":["*"],"rpm":-1}`,
+		`{"team":"demo","key_ref":{"env":"INFERPLANE_VKEY_NEG"},"allowed_models":["*"],"tpm":-1}`,
+		`{"team":"demo","key_ref":{"env":"INFERPLANE_VKEY_NEG"},"allowed_models":["*"],"budget_usd_per_month":-5}`,
+	}
+	for _, entry := range cases {
+		dir := t.TempDir()
+		f := filepath.Join(dir, "bad.json")
+		t.Setenv("INFERPLANE_VKEY_NEG", "sk-declarative-key-0123456789")
+		os.WriteFile(f, []byte(`{"teams":{"demo":{"allowed_models":["*"]}},"virtual_keys":[`+entry+`]}`), 0o600)
+		if _, err := Load(f); err == nil {
+			t.Fatalf("a negative limit must be rejected: %s", entry)
+		}
+	}
+}
+
+func TestLoadRejectsVirtualKey_AdversarialModelName(t *testing.T) {
+	cases := [][]string{
+		{""},
+		{"safe,other"},
+		{"safe\x00other"},
+	}
+	for _, models := range cases {
+		dir := t.TempDir()
+		f := filepath.Join(dir, "bad.json")
+		t.Setenv("INFERPLANE_VKEY_ADV", "sk-declarative-key-0123456789")
+		b, _ := json.Marshal(map[string]any{
+			"teams": map[string]any{"demo": map[string]any{"allowed_models": []string{"*"}}},
+			"virtual_keys": []map[string]any{{
+				"team": "demo", "key_ref": map[string]string{"env": "INFERPLANE_VKEY_ADV"}, "allowed_models": models,
+			}},
+		})
+		os.WriteFile(f, b, 0o600)
+		if _, err := Load(f); err == nil {
+			t.Fatalf("allowed_models %q must be rejected (empty entry / embedded comma / control char corrupts the CSV storage round-trip)", models)
+		}
+	}
+}
+
+func TestLoadRejectsVirtualKey_DuplicatePlaintext(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "bad.json")
+	t.Setenv("INFERPLANE_VKEY_A", "sk-same-declarative-key-01234")
+	t.Setenv("INFERPLANE_VKEY_B", "sk-same-declarative-key-01234")
+	os.WriteFile(f, []byte(`{"teams":{"demo":{"allowed_models":["*"]}},"virtual_keys":[
+		{"team":"demo","key_ref":{"env":"INFERPLANE_VKEY_A"},"allowed_models":["*"]},
+		{"team":"demo","key_ref":{"env":"INFERPLANE_VKEY_B"},"allowed_models":["*"]}
+	]}`), 0o600)
+	_, err := Load(f)
+	if err == nil {
+		t.Fatal("two virtual_keys entries resolving to the same plaintext must be rejected")
+	}
+	if strings.Contains(err.Error(), "sk-same-declarative-key-01234") {
+		t.Fatalf("error must never echo the resolved value, only indices: %v", err)
+	}
+}
+
+func TestConfigMarshalNeverLeaksVirtualKeyPlaintext(t *testing.T) {
+	dir := t.TempDir()
+	f := filepath.Join(dir, "ok.json")
+	t.Setenv("INFERPLANE_VKEY_MARSHAL", "sk-declarative-key-0123456789")
+	os.WriteFile(f, []byte(`{"teams":{"demo":{"allowed_models":["*"]}},"virtual_keys":[
+		{"team":"demo","key_ref":{"env":"INFERPLANE_VKEY_MARSHAL"},"allowed_models":["*"]}
+	]}`), 0o600)
+	cfg, err := Load(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "sk-declarative-key-0123456789") {
+		t.Fatal("marshaling the loaded config must never emit a virtual key's resolved plaintext")
 	}
 }

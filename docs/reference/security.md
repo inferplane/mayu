@@ -19,7 +19,7 @@ are non-negotiable invariants (see CLAUDE.md → Security mandates).
 | OIDC verify | `internal/adminauth/` | shared `IsOIDCBearerShape`, groups→team `Resolve`, go-oidc verifier (alg pin, aud/azp, ±60s skew, JWKS negative cache) |
 | Config view | `internal/server/configapi/` | secret-free topology projection (ADR-005): view type cannot hold a secret; auth string from ref name / IAM mode only, never the resolved key |
 | RBAC | `internal/keystore/keystore.go` | `Principal.Allows()` (team + allowed models) |
-| Key hashing | `internal/keystore/sqlite.go` | SHA-256 at rest; plaintext shown once |
+| Key hashing | `internal/keystore/sqlite.go` | SHA-256 at rest; plaintext shown once (or, for a declaratively-bootstrapped key, ADR-023, referenced via `virtual_keys[].key_ref` — never inline, same §7 posture as a provider's `api_key_ref`) |
 | TLS validation | `internal/server/tls.go` | rejects half-specified cert/key pairs |
 | Secret refs | `internal/config/config.go` | `env:`/`file:`/`secret:` only; inline `api_key` rejected |
 | Metrics safety | `internal/metrics/metrics.go` | no `key_id`/secret labels; `_rejected` sentinel bounds cardinality |
@@ -55,7 +55,7 @@ are non-negotiable invariants (see CLAUDE.md → Security mandates).
 | OIDC 검증 | `internal/adminauth/` | 공유 `IsOIDCBearerShape`, groups→team `Resolve`, go-oidc 검증기 (alg 고정, aud/azp, ±60s 스큐, JWKS negative cache) |
 | Config 뷰 | `internal/server/configapi/` | 시크릿 무노출 토폴로지 투영 (ADR-005): 뷰 타입이 시크릿을 담을 수 없음; auth 문자열은 ref 이름/IAM 모드만, 해석된 키 절대 금지 |
 | RBAC | `internal/keystore/keystore.go` | `Principal.Allows()` (팀 + 허용 모델) |
-| 키 해싱 | `internal/keystore/sqlite.go` | 저장 시 SHA-256; 평문은 1회만 표시 |
+| 키 해싱 | `internal/keystore/sqlite.go` | 저장 시 SHA-256; 평문은 1회만 표시(또는 선언적 부트스트랩 키의 경우, ADR-023, `virtual_keys[].key_ref`로 참조 — 인라인 금지, provider의 `api_key_ref`와 동일한 §7 원칙) |
 | TLS 검증 | `internal/server/tls.go` | 반쪽만 지정된 cert/key 쌍 거부 |
 | 시크릿 ref | `internal/config/config.go` | `env:`/`file:`/`secret:`만; 인라인 `api_key` 거부 |
 | 메트릭 안전 | `internal/metrics/metrics.go` | `key_id`/시크릿 레이블 없음; `_rejected` 센티넬로 카디널리티 제한 |

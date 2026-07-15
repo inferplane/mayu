@@ -10,6 +10,13 @@ serviceAccount:
   create: true
   name: ""
   annotations: {}   # e.g. eks.amazonaws.com/role-arn for Bedrock IRSA
+persistence:
+  enabled: false   # opt in for production — without it /var/lib/inferplane is an
+                   # emptyDir and the key store/audit WAL are wiped on every restart
+  existingClaim: ""
+  size: 1Gi
+  storageClass: ""
+  accessMode: ReadWriteOnce
 # Off by default: the data plane needs a host to be genuinely useful, and the
 # admin plane defaults to OFF even when ingress.enabled is true (see admin.enabled
 # below) because it carries key-issuance/governance actions and should stay on a
@@ -38,6 +45,13 @@ secrets:
 # config.json rendered into a ConfigMap. Secrets use api_key_ref env: from existingSecret.
 config:
   server: { listen: ":8080", admin_listen: ":9090" }
+  key_store: { type: sqlite, path: /var/lib/inferplane/keys.db }
+  # To preload virtual keys, add entries like this and put INFERPLANE_VIRTUAL_KEY
+  # in secrets.existingSecret; the chart exposes that Secret through envFrom.
+  # virtual_keys:
+  #   - team: demo
+  #     key_ref: { env: INFERPLANE_VIRTUAL_KEY }
+  #     allowed_models: ["*"]
   providers:
     anthropic-direct:
       type: anthropic

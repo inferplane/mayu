@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -93,6 +94,52 @@ func newGateway(cfgPath string) (*gateway, error) {
 	store, err := keystore.OpenSQLite(raw.KeyStore.Path)
 	if err != nil {
 		return nil, fmt.Errorf("keystore: %w", err)
+	}
+	for i, vk := range raw.VirtualKeys {
+		teamKnown := false
+		if _, ok := raw.Teams[vk.Team]; ok {
+			teamKnown = true
+		} else {
+			_, ok, err := store.GetTeam(context.Background(), vk.Team)
+			if err != nil {
+				store.Close()
+				return nil, fmt.Errorf("virtual_keys[%d]: team lookup %q: %w", i, vk.Team, err)
+			}
+			teamKnown = ok
+		}
+		if !teamKnown {
+			store.Close()
+			return nil, fmt.Errorf("virtual_keys[%d]: unknown team %q (not in config teams or the key store)", i, vk.Team)
+		}
+
+		metadata := make(map[string]string, len(vk.Metadata)+1)
+		for k, v := range vk.Metadata {
+			metadata[k] = v
+		}
+		metadata["managed_by"] = "config"
+		opts := keystore.KeyOptions{
+			RPM:             vk.RPM,
+			TPM:             vk.TPM,
+			BudgetUSDMicros: int64(math.Round(vk.BudgetUSDPerMonth * 1_000_000)),
+			Owner:           vk.Owner,
+			Metadata:        metadata,
+		}
+		p, err := store.EnsureKey(context.Background(), vk.Key, vk.Team, vk.AllowedModels, opts)
+		if err != nil {
+			store.Close()
+			return nil, fmt.Errorf("virtual_keys[%d]: %w", i, err)
+		}
+		// EnsureKey's upsert deliberately never un-revokes a row (decision #2 —
+		// revocation must survive a store-wipe/re-declare cycle), so a
+		// previously-revoked key stays inert here even though the upsert
+		// itself succeeds. Check via Resolve so the boot log never claims an
+		// inert key is "active" — Resolve is the same fail-closed path
+		// KeyAuth uses.
+		if _, resolveErr := store.Resolve(context.Background(), vk.Key); resolveErr != nil {
+			fmt.Printf("inferplane: virtual key %s for team %s is REVOKED — declared in config but will not authenticate (rotate the secret to reactivate)\n", p.KeyID, vk.Team)
+		} else {
+			fmt.Printf("inferplane: virtual key %s managed by config for team %s\n", p.KeyID, vk.Team)
+		}
 	}
 
 	// Audit writer: build sinks from config, then the single-writer chain.

@@ -234,3 +234,109 @@ func TestMigration_concurrentOpensDoNotRace(t *testing.T) {
 		}
 	}
 }
+
+// ADR-023: declarative virtual keys. EnsureKey upserts a caller-supplied
+// plaintext (unlike Create/CreateWithOptions, which generate a random one) so
+// config-declared keys survive a wiped-and-recreated store across restarts.
+
+func TestEnsureKey_createsAndResolves(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	const plaintext = "sk-declarative-key-0123456789"
+
+	p1, err := s.EnsureKey(ctx, plaintext, "platform-eng", []string{"*"}, KeyOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Resolve(ctx, plaintext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Team != "platform-eng" || got.KeyID != p1.KeyID {
+		t.Fatalf("resolve mismatch: %+v vs %+v", got, p1)
+	}
+
+	// Ensuring again with the same plaintext must yield the same keyID (stable
+	// across restarts — the whole point of ADR-023).
+	p2, err := s.EnsureKey(ctx, plaintext, "platform-eng", []string{"*"}, KeyOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p2.KeyID != p1.KeyID {
+		t.Fatalf("keyID not stable across EnsureKey calls: %q vs %q", p1.KeyID, p2.KeyID)
+	}
+}
+
+func TestEnsureKey_updatesFieldsPreservesCreatedAt(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	const plaintext = "sk-declarative-key-0123456789"
+
+	if _, err := s.EnsureKey(ctx, plaintext, "team-a", []string{"model-a"}, KeyOptions{RPM: 10}); err != nil {
+		t.Fatal(err)
+	}
+	var createdAt string
+	if err := s.db.QueryRowContext(ctx, `SELECT created_at FROM keys WHERE key_hash = ?`, hashKey(plaintext)).Scan(&createdAt); err != nil {
+		t.Fatal(err)
+	}
+
+	time.Sleep(2 * time.Millisecond)
+	if _, err := s.EnsureKey(ctx, plaintext, "team-b", []string{"model-b"}, KeyOptions{RPM: 20}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Resolve(ctx, plaintext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Team != "team-b" || got.RPM != 20 || len(got.AllowedModels) != 1 || got.AllowedModels[0] != "model-b" {
+		t.Fatalf("fields not updated on re-Ensure: %+v", got)
+	}
+	var createdAt2 string
+	if err := s.db.QueryRowContext(ctx, `SELECT created_at FROM keys WHERE key_hash = ?`, hashKey(plaintext)).Scan(&createdAt2); err != nil {
+		t.Fatal(err)
+	}
+	if createdAt2 != createdAt {
+		t.Fatalf("created_at changed on re-Ensure: %q -> %q", createdAt, createdAt2)
+	}
+}
+
+func TestEnsureKey_doesNotResurrectRevoked(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	const plaintext = "sk-declarative-key-0123456789"
+
+	p, err := s.EnsureKey(ctx, plaintext, "team-a", []string{"*"}, KeyOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Revoke(ctx, p.KeyID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnsureKey(ctx, plaintext, "team-a", []string{"*"}, KeyOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Resolve(ctx, plaintext); err == nil {
+		t.Fatal("a revoked key must not resolve again after a re-Ensure of the same plaintext (revocation wins; the row still exists)")
+	}
+}
+
+func TestEnsureKey_plaintextNeverStored(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	const plaintext = "sk-declarative-key-0123456789"
+
+	if _, err := s.EnsureKey(ctx, plaintext, "t", []string{"*"}, KeyOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range list {
+		if strings.Contains(p.KeyID, plaintext) {
+			t.Fatal("plaintext leaked into key_id")
+		}
+	}
+}
+
+var _ KeyEnsurer = (*SQLiteStore)(nil)

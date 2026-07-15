@@ -1,3 +1,4 @@
+{{- if and .Values.persistence.enabled (ne (int .Values.replicaCount) 1) }}{{- fail "persistence.enabled requires replicaCount=1 (RWO PVC, single attach)" }}{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -6,6 +7,10 @@ metadata:
     {{- include "inferplane.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  {{- if .Values.persistence.enabled }}
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "inferplane.selectorLabels" . | nindent 6 }}
@@ -41,7 +46,16 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /etc/inferplane
+            - name: data
+              mountPath: /var/lib/inferplane
       volumes:
         - name: config
           configMap:
             name: {{ include "inferplane.fullname" . }}-config
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-data" (include "inferplane.fullname" .)) .Values.persistence.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}

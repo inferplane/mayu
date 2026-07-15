@@ -236,6 +236,29 @@ func (s *SQLiteStore) CreateWithOptions(ctx context.Context, team string, allowe
 	return plaintext, p, nil
 }
 
+func (s *SQLiteStore) EnsureKey(ctx context.Context, plaintext, team string, allowedModels []string, opts KeyOptions) (Principal, error) {
+	hashHex := hashKey(plaintext)
+	keyID := "ik_" + hashHex[:12]
+	metaJSON, err := encodeMetadata(opts.Metadata)
+	if err != nil {
+		return Principal{}, fmt.Errorf("keystore: metadata: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx,
+		`INSERT INTO keys (key_id, key_hash, team, allowed_models, created_at,
+		 budget_usd_micros, tpm, rpm, expires_at, owner, metadata) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+		 ON CONFLICT(key_hash) DO UPDATE SET
+		   team=excluded.team, allowed_models=excluded.allowed_models,
+		   budget_usd_micros=excluded.budget_usd_micros, tpm=excluded.tpm, rpm=excluded.rpm,
+		   expires_at=excluded.expires_at, owner=excluded.owner, metadata=excluded.metadata`,
+		keyID, hashHex, team, joinModels(allowedModels), nowRFC3339(),
+		opts.BudgetUSDMicros, opts.TPM, opts.RPM, encodeExpiry(opts.ExpiresAt), opts.Owner, metaJSON)
+	if err != nil {
+		return Principal{}, fmt.Errorf("keystore: ensure key: %w", err)
+	}
+	p := Principal{KeyID: keyID, Team: team, AllowedModels: allowedModels, KeyOptions: opts}
+	return p, nil
+}
+
 var ErrKeyNotFound = errors.New("keystore: key not found")
 
 const keyColumns = `key_id, team, allowed_models, budget_usd_micros, tpm, rpm, expires_at, owner, metadata`
@@ -346,6 +369,7 @@ func (s *SQLiteStore) List(ctx context.Context) ([]Principal, error) {
 func (s *SQLiteStore) Close() error { return s.db.Close() }
 
 var _ Store = (*SQLiteStore)(nil)
+var _ KeyEnsurer = (*SQLiteStore)(nil)
 
 var ErrTeamNotFound = errors.New("keystore: team not found")
 
