@@ -56,6 +56,10 @@ func (h *CountTokensHandler) count(req *http.Request, raw []byte) int64 {
 		return estimateTokens(raw)
 	}
 
+	// input.invokeModel.body is a base64 blob per the AWS API reference
+	// (InvokeModelTokensRequest: "Base64-encoded binary data object"). If a
+	// client ever sends it as raw JSON instead, the decode fails and we fall
+	// through to the coarse local estimate — still 200, never an error.
 	innerBody, err := base64.StdEncoding.DecodeString(*wrapper.Input.InvokeModel.Body)
 	if err != nil {
 		return estimateTokens(raw)
