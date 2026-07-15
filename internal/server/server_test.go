@@ -30,9 +30,10 @@ func TestDataMuxRoutesAndAuths(t *testing.T) {
 	models := map[string]config.ModelConfig{
 		"claude-sonnet-4-6": {Targets: []config.Target{{Provider: "p", Model: "claude-sonnet-4-6"}}},
 	}
-	r := router.New(newHolder(provs, models))
+	holder := newHolder(provs, models)
+	r := router.New(holder)
 	store := stubStore{key: "dev-key", p: keystore.Principal{KeyID: "ik_abc", Team: "platform-eng", AllowedModels: []string{"*"}}}
-	mux := DataMux(r, store, nil, nil, nil, nil, nil, nil)
+	mux := DataMux(r, holder, store, nil, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	rec := httptest.NewRecorder()
@@ -55,9 +56,10 @@ func TestDataMuxModelsContentNegotiation(t *testing.T) {
 	models := map[string]config.ModelConfig{
 		"claude-sonnet-4-6": {Targets: []config.Target{{Provider: "p", Model: "claude-sonnet-4-6"}}},
 	}
-	r := router.New(newHolder(provs, models))
+	holder := newHolder(provs, models)
+	r := router.New(holder)
 	store := stubStore{key: "dev-key", p: keystore.Principal{KeyID: "ik_abc", Team: "platform-eng", AllowedModels: []string{"*"}}}
-	mux := DataMux(r, store, nil, nil, nil, nil, nil, nil)
+	mux := DataMux(r, holder, store, nil, nil, nil, nil, nil, nil)
 
 	// OpenAI client (no anthropic-version header) → OpenAI {"object":"list"} shape.
 	reqO := httptest.NewRequest("GET", "/v1/models", nil)
@@ -84,9 +86,10 @@ func TestDataMuxChatCompletionsRoutes(t *testing.T) {
 	models := map[string]config.ModelConfig{
 		"claude-sonnet-4-6": {Targets: []config.Target{{Provider: "p", Model: "claude-sonnet-4-6"}}},
 	}
-	r := router.New(newHolder(provs, models))
+	holder := newHolder(provs, models)
+	r := router.New(holder)
 	store := stubStore{key: "dev-key", p: keystore.Principal{KeyID: "ik_abc", Team: "platform-eng", AllowedModels: []string{"*"}}}
-	mux := DataMux(r, store, nil, nil, nil, nil, nil, nil)
+	mux := DataMux(r, holder, store, nil, nil, nil, nil, nil, nil)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
 		strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hi"}]}`))
