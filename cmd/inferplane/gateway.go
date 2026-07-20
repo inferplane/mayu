@@ -7,6 +7,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sync"
@@ -524,7 +525,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 		}
 		return recs
 	}
-	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, m, writer, liveExport(holder), capabilities, analyticsQ, store, configTeams, alertFires, healthSnapshot, bodyRec, nil, nil, cfg.Probe.AllowedHosts...)}
+	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, m, writer, liveExport(holder), capabilities, analyticsQ, store, configTeams, alertFires, healthSnapshot, bodyRec, authConfigView(cfg), ssoConnectSrc(cfg), cfg.Probe.AllowedHosts...)}
 	return g, nil
 }
 
@@ -1055,6 +1056,46 @@ func oidcVerifier(cfg *config.Config) server.OIDCVerifier {
 		ClientID:    o.ClientID,
 		GroupsClaim: o.GroupsClaim,
 	})
+}
+
+// authConfigView builds the secret-free /admin/auth/config payload closure
+// (ADR-026). Returns nil when oidc is not configured (→ AdminMux omits the
+// endpoint entirely, i.e. 404). When oidc is set but login_origins is empty,
+// SSO is off: {sso:false} with issuer/client_id omitted (omitempty). When
+// login_origins is set, SSO is on: the public issuer + client_id are echoed
+// so the SPA can run discovery + PKCE. Never carries a secret.
+func authConfigView(cfg *config.Config) func() *server.AuthConfigView {
+	o := cfg.Server.AdminAuth.OIDC
+	if o == nil {
+		return nil
+	}
+	if len(o.LoginOrigins) == 0 {
+		return func() *server.AuthConfigView { return &server.AuthConfigView{SSO: false} }
+	}
+	return func() *server.AuthConfigView {
+		return &server.AuthConfigView{SSO: true, Issuer: o.Issuer, ClientID: o.ClientID}
+	}
+}
+
+// ssoConnectSrc builds the CSP connect-src additions for the admin console
+// (ADR-026). Empty (nil) when oidc is absent OR login_origins is empty — in
+// that case the console CSP must stay BYTE-IDENTICAL to the pre-SSO header, so
+// the issuer origin must NOT be added. When login_origins is set, the SPA must
+// reach both the issuer's discovery document and the hosted-UI token endpoint,
+// so connect-src carries the issuer ORIGIN (scheme+host only — the issuer
+// string may include a path like /pool-123 which would break a CSP source
+// expression) followed by each login origin.
+func ssoConnectSrc(cfg *config.Config) []string {
+	o := cfg.Server.AdminAuth.OIDC
+	if o == nil || len(o.LoginOrigins) == 0 {
+		return nil
+	}
+	origins := make([]string, 0, 1+len(o.LoginOrigins))
+	if u, err := url.Parse(o.Issuer); err == nil && u.Scheme != "" && u.Host != "" {
+		origins = append(origins, u.Scheme+"://"+u.Host)
+	}
+	origins = append(origins, o.LoginOrigins...)
+	return origins
 }
 
 // liveView derives the secret-free config view from the current generation,
