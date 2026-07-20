@@ -17,6 +17,8 @@ are non-negotiable invariants (see CLAUDE.md → Security mandates).
 | Data-plane auth | `internal/server/auth.go` | `KeyAuth` resolves `ik_...` → Principal |
 | Admin auth | `internal/server/adminauth.go` | `AdminAuth`: static break-glass tokens + OIDC ID tokens on one Bearer header (ADR-004); total shape-predicate routing, 401 vs 403, denial audit |
 | OIDC verify | `internal/adminauth/` | shared `IsOIDCBearerShape`, groups→team `Resolve`, go-oidc verifier (alg pin, aud/azp, ±60s skew, JWKS negative cache) |
+| Console SSO (SPA=public client) | `internal/server/adminui/static/app.js` | ADR-026: OAuth2 Authorization Code + PKCE runs in the browser; gateway stays a resource server. `sessionStorage` holds ONLY `ip_sso_verifier`/`ip_sso_state`/`ip_sso_nonce` (cleared on every callback exit); id_token is memory-only. Callback follows RFC 6749 §4.1.2.1 (state-before-error, textContent-only error, replaceState-before-exchange, nonce check); discovered endpoints must be https. Opt-in via `oidc.login_origins` (empty ⇒ CSP byte-identical, SSO hidden) |
+| Console CSP connect-src | `internal/server/adminui/adminui.go` + `cmd/inferplane/gateway.go` (`ssoConnectSrc`) | ADR-026: when `login_origins` set, `connect-src 'self' <issuer-origin> <login_origins…>` (issuer path stripped so it can't break the source expression); script/style stay `'self'`. Empty ⇒ `default-src 'self'; frame-ancestors 'none'` unchanged |
 | Config view | `internal/server/configapi/` | secret-free topology projection (ADR-005): view type cannot hold a secret; auth string from ref name / IAM mode only, never the resolved key |
 | RBAC | `internal/keystore/keystore.go` | `Principal.Allows()` (team + allowed models) |
 | Key hashing | `internal/keystore/sqlite.go` | SHA-256 at rest; plaintext shown once (or, for a declaratively-bootstrapped key, ADR-023, referenced via `virtual_keys[].key_ref` — never inline, same §7 posture as a provider's `api_key_ref`) |
@@ -53,6 +55,8 @@ are non-negotiable invariants (see CLAUDE.md → Security mandates).
 | 데이터 플레인 auth | `internal/server/auth.go` | `KeyAuth`가 `ik_...` → Principal 해석 |
 | 관리 auth | `internal/server/adminauth.go` | `AdminAuth`: 정적 break-glass 토큰 + OIDC ID 토큰을 단일 Bearer 헤더로 (ADR-004); total 술어 라우팅, 401/403, 거부 감사 |
 | OIDC 검증 | `internal/adminauth/` | 공유 `IsOIDCBearerShape`, groups→team `Resolve`, go-oidc 검증기 (alg 고정, aud/azp, ±60s 스큐, JWKS negative cache) |
+| 콘솔 SSO (SPA=public client) | `internal/server/adminui/static/app.js` | ADR-026: OAuth2 Authorization Code + PKCE를 브라우저에서 수행, 게이트웨이는 리소스 서버 유지. `sessionStorage`는 `ip_sso_verifier`/`ip_sso_state`/`ip_sso_nonce` 3개만(모든 콜백 종료 경로에서 삭제), id_token은 메모리 전용. 콜백은 RFC 6749 §4.1.2.1 준수(state-먼저-error, textContent 에러, 교환 전 replaceState, nonce 검증); 발견된 엔드포인트는 https 필수. `oidc.login_origins` 옵트인(빈 값이면 CSP byte-동일·SSO 숨김) |
+| 콘솔 CSP connect-src | `internal/server/adminui/adminui.go` + `cmd/inferplane/gateway.go` (`ssoConnectSrc`) | ADR-026: `login_origins` 설정 시 `connect-src 'self' <issuer-origin> <login_origins…>` (issuer path 제거해 소스 표현식 파손 방지); script/style은 `'self'` 유지. 빈 값이면 `default-src 'self'; frame-ancestors 'none'` 무변경 |
 | Config 뷰 | `internal/server/configapi/` | 시크릿 무노출 토폴로지 투영 (ADR-005): 뷰 타입이 시크릿을 담을 수 없음; auth 문자열은 ref 이름/IAM 모드만, 해석된 키 절대 금지 |
 | RBAC | `internal/keystore/keystore.go` | `Principal.Allows()` (팀 + 허용 모델) |
 | 키 해싱 | `internal/keystore/sqlite.go` | 저장 시 SHA-256; 평문은 1회만 표시(또는 선언적 부트스트랩 키의 경우, ADR-023, `virtual_keys[].key_ref`로 참조 — 인라인 금지, provider의 `api_key_ref`와 동일한 §7 원칙) |
