@@ -101,7 +101,10 @@ func sessionStorageUsesOnlyAllowedKeys(body string) (ok bool, offendingKey strin
 func TestAssetsAreDataFreeAndTokenSafe(t *testing.T) {
 	for _, path := range []string{"/", "/app.js", "/style.css"} {
 		_, body := get(t, path)
-		for _, banned := range []string{"ik_", "localStorage", "document.cookie"} {
+		// "sessionStorage[" (bracket/computed-key access) and "sessionStorage.clear"
+		// are banned outright — they bypass the named-key allowlist below, which only
+		// understands sessionStorage.{set,get,remove}Item("literal").
+		for _, banned := range []string{"ik_", "localStorage", "document.cookie", "sessionStorage[", "sessionStorage.clear"} {
 			if strings.Contains(body, banned) {
 				t.Errorf("asset %s contains banned token %q", path, banned)
 			}

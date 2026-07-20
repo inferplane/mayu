@@ -1273,6 +1273,12 @@ async function discoverSSO(issuer) {
   if (!discovery.authorization_endpoint || !discovery.token_endpoint) {
     throw new Error("OpenID discovery response is incomplete");
   }
+  // Defense-in-depth: the discovery document is fetched over TLS from the
+  // configured issuer, but a misconfigured IdP could still advertise a plain
+  // http endpoint — refuse to redirect to / POST credentials over one.
+  for (const ep of [discovery.authorization_endpoint, discovery.token_endpoint]) {
+    if (!/^https:\/\//i.test(ep)) throw new Error("OpenID endpoints must be https");
+  }
   return discovery;
 }
 
