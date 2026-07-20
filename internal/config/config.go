@@ -117,6 +117,7 @@ type OIDCConfig struct {
 	GroupsClaim   string         `json:"groups_claim,omitempty"` // default "groups"; top-level claim, no traversal
 	AdminGroups   []string       `json:"admin_groups,omitempty"`
 	GroupMappings []GroupMapping `json:"group_mappings,omitempty"`
+	LoginOrigins  []string       `json:"login_origins,omitempty"`
 }
 
 // GroupMapping maps one IdP group to gateway teams ("*" = explicit wildcard).
@@ -848,6 +849,20 @@ func validateOIDC(aa *AdminAuth) error {
 	u, err := url.Parse(o.Issuer)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
 		return fmt.Errorf("config: oidc.issuer must be an absolute https URL without query/fragment/userinfo, got %q", o.Issuer)
+	}
+	seenLoginOrigins := map[string]bool{}
+	for i, origin := range o.LoginOrigins {
+		u, err := url.Parse(origin)
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+			return fmt.Errorf("config: oidc.login_origins[%d]: must be an absolute https URL without query/fragment/userinfo, got %q", i, origin)
+		}
+		if u.Path != "" && u.Path != "/" {
+			return fmt.Errorf("config: oidc.login_origins[%d]: must not contain a path, got %q", i, origin)
+		}
+		if seenLoginOrigins[origin] {
+			return fmt.Errorf("config: oidc.login_origins[%d]: duplicate origin %q", i, origin)
+		}
+		seenLoginOrigins[origin] = true
 	}
 	if o.GroupsClaim == "" {
 		o.GroupsClaim = "groups"
