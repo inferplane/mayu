@@ -8,6 +8,7 @@ package adminui
 import (
 	"embed"
 	"net/http"
+	"strings"
 )
 
 //go:embed static
@@ -25,7 +26,11 @@ var contentTypes = map[string]string{
 // Handler serves the console at the mount root: "/" (and "/index.html"),
 // "/app.js", "/style.css". Anything else is 404. Every response carries a
 // strict CSP and nosniff (ADR-001 security posture).
-func Handler() http.Handler {
+func Handler(extraConnectSrc ...string) http.Handler {
+	csp := "default-src 'self'; frame-ancestors 'none'"
+	if len(extraConnectSrc) > 0 {
+		csp = "default-src 'self'; connect-src 'self' " + strings.Join(extraConnectSrc, " ") + "; frame-ancestors 'none'"
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -49,7 +54,7 @@ func Handler() http.Handler {
 		}
 		h := w.Header()
 		h.Set("Content-Type", ct)
-		h.Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'")
+		h.Set("Content-Security-Policy", csp)
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		w.Write(body)

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -26,6 +27,16 @@ import (
 	"github.com/inferplane/inferplane/internal/server/usageapi"
 	"github.com/inferplane/inferplane/pkg/ulid"
 )
+
+// AuthConfigView is the secret-free bootstrap payload the admin console SPA
+// reads to decide whether to show the SSO button and, if so, which public
+// OAuth2 identifiers to use (ADR-026). It never carries a secret — issuer and
+// client_id are the public identifiers of a PKCE public client.
+type AuthConfigView struct {
+	SSO      bool   `json:"sso"`
+	Issuer   string `json:"issuer,omitempty"`
+	ClientID string `json:"client_id,omitempty"`
+}
 
 // DataMux builds the data-plane (:8080) handler: Anthropic, Bedrock, and OpenAI
 // ingress endpoints behind virtual-key auth (M3). holder provides the live
@@ -100,7 +111,7 @@ func negotiateModels(anthropicH, openaiH http.Handler) http.Handler {
 // receives admin-action audit records (key create/revoke + denials, §5.5
 // "admin API calls are audit events"); nil skips. When m is nil the /metrics
 // endpoint is omitted.
-func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier, mapping adminauth.MappingConfig, configView func() configapi.View, auditFileSinks []string, aud *audit.Writer, m *metrics.Metrics, writer configapi.Writer, configExport func() configapi.ExportDoc, capabilities func() configapi.Capabilities, analyticsQ analyticsapi.Querier, teamStore keystore.TeamStore, configTeams func() []keystore.TeamRecord, alertFires func() []alert.Fire, healthSnapshot func() map[string]configapi.HealthRecord, bodiesRec *bodystore.Recorder, probeAllowedHosts ...string) http.Handler {
+func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier, mapping adminauth.MappingConfig, configView func() configapi.View, auditFileSinks []string, aud *audit.Writer, m *metrics.Metrics, writer configapi.Writer, configExport func() configapi.ExportDoc, capabilities func() configapi.Capabilities, analyticsQ analyticsapi.Querier, teamStore keystore.TeamStore, configTeams func() []keystore.TeamRecord, alertFires func() []alert.Fire, healthSnapshot func() map[string]configapi.HealthRecord, bodiesRec *bodystore.Recorder, authConfig func() *AuthConfigView, connectSrc []string, probeAllowedHosts ...string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
@@ -217,7 +228,18 @@ func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier,
 	// Minimal embedded key console (ADR-001): data-free static assets, served
 	// unauthenticated like /metrics — every data call it makes goes through the
 	// token-gated /admin/keys handlers above.
-	mux.Handle("/admin/ui/", http.StripPrefix("/admin/ui", adminui.Handler()))
+	if authConfig != nil {
+		mux.HandleFunc("GET /admin/auth/config", func(w http.ResponseWriter, r *http.Request) {
+			cfg := authConfig()
+			if cfg == nil {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(cfg)
+		})
+	}
+	mux.Handle("/admin/ui/", http.StripPrefix("/admin/ui", adminui.Handler(connectSrc...)))
 	mux.Handle("/admin/ui", http.RedirectHandler("/admin/ui/", http.StatusMovedPermanently))
 	return mux
 }
