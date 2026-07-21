@@ -87,7 +87,17 @@ func DataMux(r *router.Router, holder *live.Holder, store keystore.Store, aud *a
 	mux.Handle("GET /v1/models", negotiateModels(
 		anthropicapi.NewModelsHandler(r), openaiapi.NewModelsHandler(r)))
 	mux.Handle("GET /v1/usage", usageapi.NewHandler(gov))
-	return KeyAuth(store, mux)
+	// Unauthenticated convenience redirect: a browser hitting the bare data-plane
+	// root has no API key to offer and almost certainly means to reach the admin
+	// console, not the LLM API. Exact path only, ahead of KeyAuth (which would
+	// otherwise 401 it) — every other data-plane route (including /v1/*) stays
+	// behind KeyAuth unchanged.
+	dataMux := http.NewServeMux()
+	dataMux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/admin/ui/", http.StatusFound)
+	})
+	dataMux.Handle("/", KeyAuth(store, mux))
+	return dataMux
 }
 
 // negotiateModels routes GET /v1/models to the Anthropic-shaped handler when the
