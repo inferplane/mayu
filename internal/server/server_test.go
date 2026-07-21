@@ -51,6 +51,40 @@ func TestDataMuxRoutesAndAuths(t *testing.T) {
 	}
 }
 
+// TestDataMuxRootRedirectsToAdminUI: a browser hitting the bare data-plane
+// root has no x-api-key to offer, so it can only ever get a 401 there — the
+// intent is almost certainly the admin console. The redirect is unauthenticated
+// and applies ONLY to the exact "/" path; every other data-plane route,
+// including one that happens to 404 rather than 401, stays behind KeyAuth.
+func TestDataMuxRootRedirectsToAdminUI(t *testing.T) {
+	provs := map[string]providers.Provider{"p": mockprovider.New("claude-sonnet-4-6")}
+	models := map[string]config.ModelConfig{
+		"claude-sonnet-4-6": {Targets: []config.Target{{Provider: "p", Model: "claude-sonnet-4-6"}}},
+	}
+	holder := newHolder(provs, models)
+	r := router.New(holder)
+	store := stubStore{key: "dev-key", p: keystore.Principal{KeyID: "ik_abc", Team: "platform-eng", AllowedModels: []string{"*"}}}
+	mux := DataMux(r, holder, store, nil, nil, nil, nil, nil, nil)
+
+	req := httptest.NewRequest("GET", "/", nil) // no x-api-key
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("unauth GET / = %d, want %d (redirect)", rec.Code, http.StatusFound)
+	}
+	if loc := rec.Header().Get("Location"); loc != "/admin/ui/" {
+		t.Fatalf("GET / Location = %q, want /admin/ui/", loc)
+	}
+
+	// an unknown data-plane path must NOT redirect — only the exact root does.
+	req2 := httptest.NewRequest("GET", "/nope", nil)
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, req2)
+	if rec2.Code == http.StatusFound {
+		t.Fatalf("unauth GET /nope = %d, must not redirect (only exact / does)", rec2.Code)
+	}
+}
+
 func TestDataMuxModelsContentNegotiation(t *testing.T) {
 	provs := map[string]providers.Provider{"p": mockprovider.New("claude-sonnet-4-6")}
 	models := map[string]config.ModelConfig{
