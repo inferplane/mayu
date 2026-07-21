@@ -1,5 +1,8 @@
-// inferplane control plane (ADR-001/ADR-002). The admin token lives in this
-// variable only — never persisted (no storage APIs, no cookies, no URL).
+// inferplane control plane (ADR-001/ADR-002). The admin/ID token lives only in
+// the in-memory adminToken variable. The only browser storage used is for the
+// short-lived PKCE values ip_sso_verifier/ip_sso_state/ip_sso_nonce; all three
+// are cleared when the OAuth callback is processed. Callback code/state values
+// are stripped from the URL with replaceState before token exchange.
 // All rendering is textContent-only; data never becomes markup.
 "use strict";
 
@@ -1189,32 +1192,225 @@ $("body-drawer-close").addEventListener("click", () => { $("body-drawer").hidden
 
 /* ---------- session ---------- */
 
+async function unlock(token) {
+  adminToken = token;
+  const status = $("auth-status");
+  await refreshKeys();
+  status.textContent = "";
+  document.body.classList.remove("locked");
+  $("shell").hidden = false;
+  $("origin-chip").textContent = window.location.origin;
+  renderUsage(lastIssuedKey || null);
+  await loadWhoami(); // self-service identity + team scoping (ADR-010)
+  await loadCapabilities(); // capability-driven section affordances (spec §9.1)
+  showView("overview");
+  pollHealth();
+  setInterval(pollHealth, 15000);
+}
+
 $("token-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  adminToken = $("token").value;
+  const tok = $("token").value;
   $("token").value = ""; // don't leave the token sitting in the input
-  const status = $("auth-status");
   try {
-    await refreshKeys();
-    status.textContent = "";
-    document.body.classList.remove("locked");
-    $("shell").hidden = false;
-    $("origin-chip").textContent = window.location.origin;
-    renderUsage(lastIssuedKey || null);
-    await loadWhoami(); // self-service identity + team scoping (ADR-010)
-    await loadCapabilities(); // capability-driven section affordances (spec §9.1)
-    showView("overview");
-    pollHealth();
-    setInterval(pollHealth, 15000);
+    await unlock(tok);
   } catch (err) {
     adminToken = "";
+    const status = $("auth-status");
     status.textContent = String(err.message || err);
     status.className = "status err";
   }
 });
+
+function clearSSOState() {
+  sessionStorage.removeItem("ip_sso_verifier");
+  sessionStorage.removeItem("ip_sso_state");
+  sessionStorage.removeItem("ip_sso_nonce");
+}
+
+function showSSOError(message) {
+  const status = $("auth-status");
+  status.className = "status err";
+  status.textContent = message;
+}
+
+function base64url(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function randomBase64url() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return base64url(bytes);
+}
+
+async function pkceChallenge(verifier) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  return base64url(new Uint8Array(digest));
+}
+
+function ssoRedirectURI() {
+  return location.origin + "/admin/ui/";
+}
+
+async function loadSSOConfig() {
+  const resp = await fetch("/admin/auth/config");
+  if (resp.status === 404) return null;
+  if (!resp.ok) throw new Error("SSO configuration is unavailable");
+  const config = await resp.json();
+  if (!config || !config.sso) return null;
+  if (!config.issuer || !config.client_id) throw new Error("SSO configuration is incomplete");
+  return config;
+}
+
+async function discoverSSO(issuer) {
+  const discoveryURL = issuer.replace(/\/+$/, "") + "/.well-known/openid-configuration";
+  const resp = await fetch(discoveryURL);
+  if (!resp.ok) throw new Error("OpenID discovery failed");
+  const discovery = await resp.json();
+  if (!discovery.authorization_endpoint || !discovery.token_endpoint) {
+    throw new Error("OpenID discovery response is incomplete");
+  }
+  // Defense-in-depth: the discovery document is fetched over TLS from the
+  // configured issuer, but a misconfigured IdP could still advertise a plain
+  // http endpoint — refuse to redirect to / POST credentials over one.
+  for (const ep of [discovery.authorization_endpoint, discovery.token_endpoint]) {
+    if (!/^https:\/\//i.test(ep)) throw new Error("OpenID endpoints must be https");
+  }
+  return discovery;
+}
+
+async function startSSO(config) {
+  try {
+    const discovery = await discoverSSO(config.issuer);
+    const verifier = randomBase64url();
+    const state = randomBase64url();
+    const nonce = randomBase64url();
+    const challenge = await pkceChallenge(verifier);
+
+    sessionStorage.setItem("ip_sso_verifier", verifier);
+    sessionStorage.setItem("ip_sso_state", state);
+    sessionStorage.setItem("ip_sso_nonce", nonce);
+
+    const target = new URL(discovery.authorization_endpoint);
+    const query = new URLSearchParams({
+      response_type: "code",
+      client_id: config.client_id,
+      redirect_uri: ssoRedirectURI(),
+      scope: "openid",
+      state: state,
+      nonce: nonce,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+    });
+    for (const [key, value] of query) target.searchParams.set(key, value);
+    location.assign(target.toString());
+  } catch {
+    clearSSOState();
+    showSSOError("Unable to start SSO sign-in.");
+  }
+}
+
+function decodeIDTokenPayload(token) {
+  const parts = token.split(".");
+  if (parts.length < 2) throw new Error("Invalid ID token");
+  const encoded = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+  const padded = encoded + "=".repeat((4 - encoded.length % 4) % 4);
+  const bytes = Uint8Array.from(atob(padded), (char) => char.charCodeAt(0));
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
+async function handleSSOCallback(params, configPromise) {
+  const hasCode = params.has("code");
+  const hasError = params.has("error");
+  const hasState = params.has("state");
+
+  try {
+    if (hasCode && hasError) {
+      showSSOError("Invalid SSO callback.");
+      return;
+    }
+    if (!hasState) {
+      showSSOError("Invalid SSO callback: missing state.");
+      return;
+    }
+
+    const state = params.get("state");
+    if (state !== sessionStorage.getItem("ip_sso_state")) {
+      showSSOError("Invalid SSO callback: state mismatch.");
+      return;
+    }
+    if (hasError) {
+      showSSOError(params.get("error_description") || params.get("error") || "SSO sign-in failed.");
+      return;
+    }
+    if (!hasCode) {
+      showSSOError("Invalid SSO callback: missing code.");
+      return;
+    }
+
+    history.replaceState({}, "", location.pathname);
+
+    const config = await configPromise;
+    if (!config) throw new Error("SSO is not configured");
+    const discovery = await discoverSSO(config.issuer);
+    const verifier = sessionStorage.getItem("ip_sso_verifier");
+    if (!verifier) throw new Error("SSO session expired");
+
+    const tokenResp = await fetch(discovery.token_endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        client_id: config.client_id,
+        code: params.get("code"),
+        redirect_uri: ssoRedirectURI(),
+        code_verifier: verifier,
+      }).toString(),
+    });
+    if (!tokenResp.ok) throw new Error("SSO token exchange failed");
+    const tokens = await tokenResp.json();
+    if (!tokens.id_token) throw new Error("SSO token response did not include an ID token");
+
+    const payload = decodeIDTokenPayload(tokens.id_token);
+    if (payload.nonce !== sessionStorage.getItem("ip_sso_nonce")) {
+      throw new Error("SSO token nonce mismatch");
+    }
+
+    await unlock(tokens.id_token);
+  } catch (err) {
+    adminToken = "";
+    showSSOError(String(err.message || err));
+  } finally {
+    clearSSOState();
+  }
+}
+
+async function initSSO() {
+  const params = new URLSearchParams(location.search);
+  const isCallback = params.has("code") || params.has("error") || params.has("state");
+  const configPromise = loadSSOConfig();
+
+  if (isCallback) await handleSSOCallback(params, configPromise);
+
+  try {
+    const config = await configPromise;
+    if (!config) return;
+    $("sso-button").hidden = false;
+    $("sso-divider").hidden = false;
+    $("sso-button").addEventListener("click", () => startSSO(config));
+  } catch {
+    // Non-SSO and unavailable-config deployments keep the opt-in button hidden.
+    // Callback exchange failures are reported by handleSSOCallback.
+  }
+}
 
 $("disconnect").addEventListener("click", () => {
   adminToken = "";
   lastIssuedKey = "";
   location.reload(); // wipes all page state, returns to the lock screen
 });
+
+initSSO();

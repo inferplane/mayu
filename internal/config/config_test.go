@@ -328,6 +328,80 @@ func TestOIDCConfigRejectsDuplicateGroupKeys(t *testing.T) {
 	}
 }
 
+// ADR-026: console SSO login. login_origins opts the console into an SPA
+// OAuth2 Authorization Code + PKCE flow (still no gateway-side OAuth client
+// role — see the ADR). Each entry must be an absolute https ORIGIN (no path/
+// query/fragment/userinfo, matching the existing issuer validation style) so
+// the server can pass it straight into a CSP connect-src token without
+// smuggling a path/credential in.
+
+func TestOIDCLoginOriginsParse(t *testing.T) {
+	block := `{"issuer": "https://idp.example.com", "client_id": "x",
+	  "login_origins": ["https://idp-hosted-ui.example.com", "https://idp-hosted-ui-2.example.com"]}`
+	cfg, err := Load(writeOIDCConfig(t, block))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.Server.AdminAuth.OIDC.LoginOrigins
+	if len(got) != 2 || got[0] != "https://idp-hosted-ui.example.com" || got[1] != "https://idp-hosted-ui-2.example.com" {
+		t.Fatalf("login_origins: %+v", got)
+	}
+}
+
+func TestOIDCLoginOriginsAbsentIsEmpty(t *testing.T) {
+	cfg, err := Load(writeOIDCConfig(t, `{"issuer": "https://idp.example.com", "client_id": "x"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Server.AdminAuth.OIDC.LoginOrigins) != 0 {
+		t.Fatalf("login_origins should default empty (SSO off), got %+v", cfg.Server.AdminAuth.OIDC.LoginOrigins)
+	}
+}
+
+func TestOIDCLoginOriginsRejectsNonHTTPS(t *testing.T) {
+	block := `{"issuer": "https://idp.example.com", "client_id": "x",
+	  "login_origins": ["http://idp-hosted-ui.example.com"]}`
+	if _, err := Load(writeOIDCConfig(t, block)); err == nil {
+		t.Fatal("http login_origins entry: want load error")
+	}
+}
+
+func TestOIDCLoginOriginsRejectsPath(t *testing.T) {
+	for name, origin := range map[string]string{
+		"path":     "https://idp-hosted-ui.example.com/oauth2/authorize",
+		"query":    "https://idp-hosted-ui.example.com/?x=1",
+		"fragment": "https://idp-hosted-ui.example.com/#frag",
+		"userinfo": "https://user:pw@idp-hosted-ui.example.com",
+	} {
+		block := `{"issuer": "https://idp.example.com", "client_id": "x", "login_origins": ["` + origin + `"]}`
+		if _, err := Load(writeOIDCConfig(t, block)); err == nil {
+			t.Fatalf("%s (%s): want load error — login_origins must be an origin, not a URL with a path", name, origin)
+		}
+	}
+}
+
+func TestOIDCLoginOriginsRejectsDuplicates(t *testing.T) {
+	block := `{"issuer": "https://idp.example.com", "client_id": "x",
+	  "login_origins": ["https://idp-hosted-ui.example.com", "https://idp-hosted-ui.example.com"]}`
+	if _, err := Load(writeOIDCConfig(t, block)); err == nil {
+		t.Fatal("duplicate login_origins entry: want load error")
+	}
+}
+
+// A trailing slash (bare origin + "/") must be accepted — url.Parse reports
+// Path == "/" for it, which is semantically the same origin as no path.
+func TestOIDCLoginOriginsAcceptsTrailingSlash(t *testing.T) {
+	block := `{"issuer": "https://idp.example.com", "client_id": "x",
+	  "login_origins": ["https://idp-hosted-ui.example.com/"]}`
+	cfg, err := Load(writeOIDCConfig(t, block))
+	if err != nil {
+		t.Fatalf("trailing-slash origin should be accepted: %v", err)
+	}
+	if len(cfg.Server.AdminAuth.OIDC.LoginOrigins) != 1 {
+		t.Fatalf("login_origins: %+v", cfg.Server.AdminAuth.OIDC.LoginOrigins)
+	}
+}
+
 // TestOIDCConfigRejectsJWTShapedStaticToken pins the break-glass invariant
 // (P2 gate, triple-confirmed): a static admin token that the shared shape
 // predicate would route to the OIDC path can never be configured alongside an

@@ -14,6 +14,8 @@
     <div class="lock-card">
       <div class="wordmark"><span class="glyph">▰▰</span> inferplane</div>
       <p class="tagline">LLM consumption governance — control plane</p>
+      <button id="sso-button" type="button" hidden>Sign in with SSO</button>
+      <div id="sso-divider" class="lock-divider" hidden><span>or paste a token</span></div>
       <form id="token-form">
         <label class="microlabel" for="token">admin token · or OIDC ID token</label>
         <input id="token" type="password" autocomplete="off" spellcheck="false"
@@ -21,10 +23,9 @@
         <button type="submit">UNLOCK CONSOLE</button>
       </form>
       <p id="auth-status" class="status"></p>
-      <p class="lock-note">Either credential works (ADR-004): the static
-        break-glass admin token, or an OIDC ID token minted by your IdP's
-        CLI/device flow. It is held in page memory only — never stored, never
-        sent anywhere except this gateway's <code>/admin/keys</code> API.</p>
+      <p class="lock-note">Sign in with SSO through your IdP, or paste a
+        break-glass admin token or OIDC ID token. The token is held in page
+        memory only and is never stored.</p>
     </div>
   </div>
 

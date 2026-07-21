@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -374,4 +375,125 @@ func TestGateway_BedrockCountTokensNeverFails(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || out.InputTokens == nil || *out.InputTokens < 1 {
 		t.Fatalf("response not {\"inputTokens\">=1}: err=%v out=%+v", err, out)
 	}
+}
+
+// ADR-026 console SSO: the gateway derives GET /admin/auth/config and the
+// admin-UI CSP connect-src from the oidc config block. login_origins present
+// → sso:true + issuer/client_id echoed + CSP connect-src carries the issuer
+// ORIGIN (path stripped) plus each login origin; login_origins absent →
+// sso:false and CSP byte-identical to the pre-SSO header; oidc absent → 404.
+
+func TestGateway_AuthConfigEndpoint_SSOOn(t *testing.T) {
+	cfgPath := writeTestConfig(t, func(cfg map[string]any, dir string) {
+		cfg["server"].(map[string]any)["admin_auth"] = map[string]any{
+			"tokens": []any{"break-glass-tok"},
+			"oidc": map[string]any{
+				"issuer":        "https://idp.example.com/pool-123",
+				"client_id":     "console-client",
+				"login_origins": []any{"https://idp-ui.example.com"},
+			},
+		}
+	})
+	g, err := newGateway(cfgPath)
+	if err != nil {
+		t.Fatalf("newGateway: %v", err)
+	}
+	bootAndStop(t, g)
+
+	resp, err := (&http.Client{Timeout: 2 * time.Second}).Get("http://" + g.AdminAddr() + "/admin/auth/config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /admin/auth/config = %d, want 200 (unauthenticated)", resp.StatusCode)
+	}
+	var out struct {
+		SSO      bool   `json:"sso"`
+		Issuer   string `json:"issuer"`
+		ClientID string `json:"client_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if !out.SSO || out.Issuer != "https://idp.example.com/pool-123" || out.ClientID != "console-client" {
+		t.Fatalf("auth/config = %+v, want sso:true + full issuer + client_id", out)
+	}
+
+	// CSP connect-src must carry the issuer ORIGIN (no /pool-123 path) plus the login origin.
+	uiResp, err := (&http.Client{Timeout: 2 * time.Second}).Get("http://" + g.AdminAddr() + "/admin/ui/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer uiResp.Body.Close()
+	csp := uiResp.Header.Get("Content-Security-Policy")
+	if !strings.Contains(csp, "connect-src 'self' https://idp.example.com https://idp-ui.example.com") {
+		t.Fatalf("CSP = %q, want connect-src with issuer origin (path stripped) + login origin", csp)
+	}
+	if strings.Contains(csp, "pool-123") {
+		t.Fatalf("CSP = %q leaks the issuer PATH — connect-src must be origin-only", csp)
+	}
+}
+
+func TestGateway_AuthConfigEndpoint_SSOOff(t *testing.T) {
+	cfgPath := writeTestConfig(t, func(cfg map[string]any, dir string) {
+		cfg["server"].(map[string]any)["admin_auth"] = map[string]any{
+			"tokens": []any{"break-glass-tok"},
+			"oidc": map[string]any{
+				"issuer":    "https://idp.example.com/pool-123",
+				"client_id": "console-client",
+			},
+		}
+	})
+	g, err := newGateway(cfgPath)
+	if err != nil {
+		t.Fatalf("newGateway: %v", err)
+	}
+	bootAndStop(t, g)
+
+	resp, err := (&http.Client{Timeout: 2 * time.Second}).Get("http://" + g.AdminAddr() + "/admin/auth/config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /admin/auth/config = %d, want 200", resp.StatusCode)
+	}
+	body, _ := readAllString(resp)
+	if !strings.Contains(body, `"sso":false`) || strings.Contains(body, "issuer") || strings.Contains(body, "client_id") {
+		t.Fatalf("auth/config body = %s, want {\"sso\":false} with issuer/client_id omitted", body)
+	}
+
+	// CSP must be byte-identical to the pre-SSO header (no connect-src added).
+	uiResp, err := (&http.Client{Timeout: 2 * time.Second}).Get("http://" + g.AdminAddr() + "/admin/ui/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer uiResp.Body.Close()
+	if csp := uiResp.Header.Get("Content-Security-Policy"); csp != "default-src 'self'; frame-ancestors 'none'" {
+		t.Fatalf("CSP with SSO off = %q, want byte-identical pre-SSO CSP", csp)
+	}
+}
+
+func TestGateway_AuthConfigEndpoint_OIDCAbsent404(t *testing.T) {
+	cfgPath := writeTestConfig(t, nil) // no admin_auth.oidc block
+	g, err := newGateway(cfgPath)
+	if err != nil {
+		t.Fatalf("newGateway: %v", err)
+	}
+	bootAndStop(t, g)
+
+	resp, err := (&http.Client{Timeout: 2 * time.Second}).Get("http://" + g.AdminAddr() + "/admin/auth/config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET /admin/auth/config (oidc absent) = %d, want 404 (mount omitted)", resp.StatusCode)
+	}
+}
+
+func readAllString(resp *http.Response) (string, error) {
+	b, err := io.ReadAll(resp.Body)
+	return string(b), err
 }

@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -61,15 +62,55 @@ func TestServesAssets(t *testing.T) {
 	}
 }
 
+// allowedSessionStorageKeys are the ONLY sessionStorage keys the console may
+// ever use — the three short-lived PKCE values (ADR-026 console SSO) that
+// must survive the browser round-trip to the IdP and back (a plain JS
+// variable does not survive a full-page navigation). The id_token itself
+// must NEVER be persisted anywhere — it stays memory-only, same as today.
+var allowedSessionStorageKeys = []string{"ip_sso_verifier", "ip_sso_state", "ip_sso_nonce"}
+
+// sessionStorageUsesOnlyAllowedKeys reports whether every sessionStorage.*
+// call in body references one of allowedSessionStorageKeys as its key
+// literal. It is NOT a blanket ban and NOT a blanket "ip_sso_" prefix
+// exemption (that would let e.g. "ip_sso_token" smuggle a persisted bearer
+// token past this check) — every other sessionStorage usage remains banned.
+var sessionStorageCallRE = regexp.MustCompile(`sessionStorage\.(?:setItem|getItem|removeItem)\(\s*["'](\w+)["']`)
+
+func sessionStorageUsesOnlyAllowedKeys(body string) (ok bool, offendingKey string) {
+	for _, m := range sessionStorageCallRE.FindAllStringSubmatch(body, -1) {
+		key := m[1]
+		allowed := false
+		for _, want := range allowedSessionStorageKeys {
+			if key == want {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return false, key
+		}
+	}
+	return true, ""
+}
+
 // TestAssetsAreDataFreeAndTokenSafe enforces the ADR-001 posture: the static
-// assets carry no key material and the script never persists the admin token.
+// assets carry no key material and the script never persists the admin
+// token. sessionStorage is banned everywhere EXCEPT the three named PKCE keys
+// above (ADR-026) — any other sessionStorage usage, or any use of
+// localStorage/document.cookie, remains fully banned.
 func TestAssetsAreDataFreeAndTokenSafe(t *testing.T) {
 	for _, path := range []string{"/", "/app.js", "/style.css"} {
 		_, body := get(t, path)
-		for _, banned := range []string{"ik_", "localStorage", "sessionStorage", "document.cookie"} {
+		// "sessionStorage[" (bracket/computed-key access) and "sessionStorage.clear"
+		// are banned outright — they bypass the named-key allowlist below, which only
+		// understands sessionStorage.{set,get,remove}Item("literal").
+		for _, banned := range []string{"ik_", "localStorage", "document.cookie", "sessionStorage[", "sessionStorage.clear"} {
 			if strings.Contains(body, banned) {
 				t.Errorf("asset %s contains banned token %q", path, banned)
 			}
+		}
+		if ok, offending := sessionStorageUsesOnlyAllowedKeys(body); !ok {
+			t.Errorf("asset %s uses sessionStorage with disallowed key %q (only %v are permitted)", path, offending, allowedSessionStorageKeys)
 		}
 	}
 }
@@ -534,5 +575,39 @@ func TestAdminUI_regionsSaveWarningWired(t *testing.T) {
 	_, html := get(t, "/index.html")
 	if !strings.Contains(html, "Submitting this team form replaces any config-declared region policy") {
 		t.Error("index.html missing a hint that saving the team form replaces any config-declared region policy")
+	}
+}
+
+// TestHandlerExtendsConnectSrc proves Handler(extraConnectSrc ...string)
+// extends the CSP connect-src when origins are supplied (ADR-026: the SSO SPA
+// must fetch the IdP's discovery + token endpoints, which connect-src 'self'
+// would otherwise block), and stays byte-identical to the pre-SSO CSP when no
+// origin is passed (opt-in — zero change when SSO is off).
+func TestHandlerExtendsConnectSrc(t *testing.T) {
+	srv := httptest.NewServer(Handler("https://idp.example.com", "https://idp-ui.example.com"))
+	t.Cleanup(srv.Close)
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	csp := resp.Header.Get("Content-Security-Policy")
+	want := "default-src 'self'; connect-src 'self' https://idp.example.com https://idp-ui.example.com; frame-ancestors 'none'"
+	if csp != want {
+		t.Fatalf("CSP = %q, want %q", csp, want)
+	}
+}
+
+func TestHandlerNoConnectSrcIsByteIdentical(t *testing.T) {
+	srv := httptest.NewServer(Handler())
+	t.Cleanup(srv.Close)
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	csp := resp.Header.Get("Content-Security-Policy")
+	if csp != "default-src 'self'; frame-ancestors 'none'" {
+		t.Fatalf("CSP with no extra connect-src = %q, want byte-identical pre-SSO CSP", csp)
 	}
 }
