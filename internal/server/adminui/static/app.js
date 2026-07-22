@@ -40,21 +40,24 @@ async function api(method, path, body, optional) {
 /* ---------- views ---------- */
 
 const VIEWS = {
-  overview: "Overview",
-  usage: "Usage",
-  logs: "Logs",
-  keys: "Virtual keys",
-  teams: "Teams & Users",
-  providers: "Providers & Models",
-  governance: "Governance",
-  settings: "Settings",
+  overview: "nav.overview",
+  usage: "nav.usage",
+  logs: "nav.logs",
+  keys: "nav.keys",
+  teams: "nav.teamsUsers",
+  providers: "nav.providersModels",
+  governance: "nav.governance",
+  settings: "nav.settings",
 };
 
+let activeView = "overview"; // tracked so a language switch can re-render the current view
+
 function showView(name) {
+  activeView = name;
   for (const v of Object.keys(VIEWS)) $("view-" + v).hidden = v !== name;
   document.querySelectorAll("button.nav").forEach((b) =>
     b.classList.toggle("active", b.dataset.view === name));
-  $("view-title").textContent = VIEWS[name];
+  $("view-title").textContent = msg(VIEWS[name]);
   if (name === "overview") refreshOverview();
   if (name === "usage") refreshUsageView();
   if (name === "logs") refreshLogsView();
@@ -62,6 +65,19 @@ function showView(name) {
   if (name === "providers") refreshProviders();
   if (name === "governance") refreshGovernance();
 }
+
+// Language switcher (ADR-027): not persisted (ADR-001 data-free posture) — a
+// reload re-detects from navigator.language. Re-applies the static dictionary
+// walk, then re-renders whatever view/health status is currently on screen so
+// JS-generated text (never marked data-i18n — see i18n.js) picks up the switch.
+$("lang-select").value = LANG;
+applyLang(LANG); // apply the detected language to the static markup on load
+$("lang-select").addEventListener("change", (e) => {
+  applyLang(e.target.value);
+  pollHealth();
+  renderUsage(lastIssuedKey || null); // settings snippets aren't part of showView's refresh set
+  showView(activeView);
+});
 
 document.querySelectorAll("[data-view]").forEach((b) =>
   b.addEventListener("click", () => showView(b.dataset.view)));
@@ -155,10 +171,10 @@ async function pollHealth() {
   try {
     const r = await fetch("/healthz");
     led.className = r.ok ? "led on" : "led bad";
-    txt.textContent = r.ok ? "healthy" : "unhealthy";
+    txt.textContent = r.ok ? msg("health.healthy") : msg("health.unhealthy");
   } catch {
     led.className = "led bad";
-    txt.textContent = "unreachable";
+    txt.textContent = msg("health.unreachable");
   }
 }
 
@@ -205,7 +221,7 @@ async function refreshOverview() {
     const tbody = $("recent-keys").querySelector("tbody");
     tbody.textContent = "";
     if (!keys.length) {
-      tbody.appendChild(emptyRow(2, "none yet"));
+      tbody.appendChild(emptyRow(2, msg("common.noneYet")));
     } else {
       for (const k of keys.slice(-6).reverse()) {
         const tr = document.createElement("tr");
@@ -227,12 +243,12 @@ async function refreshOverview() {
     $("stat-requests").textContent = String(total);
     const teams = new Set(rows.map((r) => r.team));
     $("stat-teams").textContent = String(teams.size);
-    $("stat-teams-sub").textContent = teams.size ? [...teams].slice(0, 4).join(", ") : "across traffic";
+    $("stat-teams-sub").textContent = teams.size ? [...teams].slice(0, 4).join(", ") : msg("ov.acrossTraffic");
     $("stat-spend").textContent = spendMicros ? spendMicros.toLocaleString() : "0";
     const tbody = $("traffic-table").querySelector("tbody");
     tbody.textContent = "";
     if (!rows.length) {
-      tbody.appendChild(emptyRow(4, "no traffic yet — issue a key and send a request"));
+      tbody.appendChild(emptyRow(4, msg("ov.noTraffic")));
     } else {
       for (const r of rows.sort((a, b) => b.count - a.count).slice(0, 8)) {
         const tr = document.createElement("tr");
@@ -251,7 +267,7 @@ async function refreshOverview() {
       }
     }
   } catch {
-    $("stat-requests-sub").textContent = "/metrics unreachable";
+    $("stat-requests-sub").textContent = msg("ov.metricsUnreachable");
   }
 }
 
@@ -305,7 +321,7 @@ async function refreshProviders() {
   const provs = view.providers || [];
   const autoHealth = await fetchProviderHealth();
   if (!provs.length) {
-    pbody.appendChild(emptyRow(writable ? 6 : 4, "no providers configured"));
+    pbody.appendChild(emptyRow(writable ? 6 : 4, msg("prov.noProviders")));
   } else {
     for (const p of provs) {
       const tr = document.createElement("tr");
@@ -327,7 +343,7 @@ async function refreshProviders() {
   rbody.textContent = "";
   const models = view.models || [];
   if (!models.length) {
-    rbody.appendChild(emptyRow(writable ? 3 : 2, "no model routes configured"));
+    rbody.appendChild(emptyRow(writable ? 3 : 2, msg("prov.noRoutes")));
   } else {
     for (const m of models) {
       const tr = document.createElement("tr");
@@ -346,12 +362,12 @@ async function refreshProviders() {
 function providerActions(p) {
   const cell = document.createElement("td");
   const edit = document.createElement("button");
-  edit.className = "ghost"; edit.textContent = "edit";
+  edit.className = "ghost"; edit.textContent = msg("common.edit");
   edit.addEventListener("click", () => fillProviderForm(p));
   const del = document.createElement("button");
   del.className = "ghost"; del.textContent = "✕";
   del.addEventListener("click", async () => {
-    if (!confirm("Delete provider " + p.name + "?")) return;
+    if (!confirm(msg("prov.confirmDeletePrefix") + p.name + msg("common.confirmSuffix"))) return;
     try { await api("DELETE", "/admin/providers/" + encodeURIComponent(p.name)); await refreshProviders(); }
     catch (err) { $("provider-form-status").className = "status err"; $("provider-form-status").textContent = String(err.message || err); }
   });
@@ -363,12 +379,12 @@ function providerActions(p) {
 function routeActions(m) {
   const cell = document.createElement("td");
   const edit = document.createElement("button");
-  edit.className = "ghost"; edit.textContent = "edit";
+  edit.className = "ghost"; edit.textContent = msg("common.edit");
   edit.addEventListener("click", () => fillModelForm(m));
   const del = document.createElement("button");
   del.className = "ghost"; del.textContent = "✕";
   del.addEventListener("click", async () => {
-    if (!confirm("Delete model route " + m.name + "?")) return;
+    if (!confirm(msg("prov.confirmDeleteRoutePrefix") + m.name + msg("common.confirmSuffix"))) return;
     try { await api("DELETE", "/admin/models/" + encodeURIComponent(m.name)); await refreshProviders(); }
     catch (err) { $("model-form-status").className = "status err"; $("model-form-status").textContent = String(err.message || err); }
   });
@@ -525,13 +541,13 @@ function probeCacheSet(name, result) { probeResults[name] = result; }
 // probeBadge renders a provider's cached health into a table cell.
 function probeBadge(cell, result) {
   cell.className = "probe-badge";
-  if (!result) { cell.classList.add("untested"); cell.textContent = "○ untested"; return; }
+  if (!result) { cell.classList.add("untested"); cell.textContent = "○ " + msg("prov.untested"); return; }
   if (result.ok) {
     cell.classList.add("ok");
-    cell.textContent = "● ok" + (result.latency_ms ? " (" + result.latency_ms + "ms)" : "");
+    cell.textContent = "● " + msg("prov.ok") + (result.latency_ms ? " (" + result.latency_ms + "ms)" : "");
   } else {
     cell.classList.add("fail");
-    cell.textContent = "● " + (result.detail || "failed");
+    cell.textContent = "● " + (result.detail || msg("prov.failed"));
   }
 }
 
@@ -543,7 +559,7 @@ $("provider-form").addEventListener("submit", async (e) => {
   const status = $("provider-form-status");
   try {
     await api("PUT", "/admin/providers/" + encodeURIComponent(name), body);
-    status.className = "status"; status.textContent = "saved ✓ " + name;
+    status.className = "status"; status.textContent = msg("common.savedPrefix") + name;
     $("provider-form").reset();
     applyProviderTypeFields();
     await refreshProviders();
@@ -558,12 +574,12 @@ $("provider-form").addEventListener("submit", async (e) => {
 $("pf-test").addEventListener("click", async () => {
   const { name, body } = providerFormBody();
   const status = $("provider-form-status");
-  status.className = "status"; status.textContent = "testing…";
+  status.className = "status"; status.textContent = msg("common.testing");
   try {
     const res = await api("POST", "/admin/providers/test", body);
     if (name) { probeCacheSet(name, res); }
     status.className = res.ok ? "status" : "status err";
-    status.textContent = (res.ok ? "✓ reachable" : "✗ " + (res.detail || "unreachable"))
+    status.textContent = (res.ok ? "✓ " + msg("prov.reachable") : "✗ " + (res.detail || msg("prov.unreachable")))
       + (res.latency_ms ? " · " + res.latency_ms + "ms" : "");
     await refreshProviders();
   } catch (err) {
@@ -588,12 +604,12 @@ $("model-form").addEventListener("submit", async (e) => {
   }
   const status = $("model-form-status");
   if (!targets.length) {
-    status.className = "status err"; status.textContent = "add at least one target (provider + model)";
+    status.className = "status err"; status.textContent = msg("prov.needTarget");
     return;
   }
   try {
     await api("PUT", "/admin/models/" + encodeURIComponent(name), { targets: targets });
-    status.className = "status"; status.textContent = "saved ✓ " + name;
+    status.className = "status"; status.textContent = msg("common.savedPrefix") + name;
     $("mf-name").value = ""; $("mf-targets").textContent = ""; addTargetRow();
     await refreshProviders();
   } catch (err) {
@@ -642,9 +658,9 @@ async function refreshKeys() {
     }
     const cell = document.createElement("td");
     const btn = document.createElement("button");
-    btn.textContent = "revoke";
+    btn.textContent = msg("keys.revokeBtn");
     btn.addEventListener("click", async () => {
-      if (!confirm("Revoke " + k.key_id + "?")) return;
+      if (!confirm(msg("keys.confirmRevokePrefix") + k.key_id + msg("common.confirmSuffix"))) return;
       await api("DELETE", "/admin/keys/" + encodeURIComponent(k.key_id));
       await refreshKeys();
     });
@@ -721,7 +737,7 @@ $("create-form").addEventListener("submit", async (e) => {
       // JS Number is a 53-bit-mantissa float; above ~$9B (Number.MAX_SAFE_INTEGER
       // / 1e6) budget*1e6 silently loses precision before it ever reaches the
       // server's integer-microUSD path. No real key needs a nine-figure budget.
-      if (Number(budget) > 1e9) throw new Error("budget must be under $1,000,000,000");
+      if (Number(budget) > 1e9) throw new Error(msg("err.budgetTooLarge"));
       body.budget_usd_micros = Math.round(Number(budget) * 1e6);
     }
     // parseInt (not Number): TPM/RPM are integers server-side (int64) — a float
@@ -733,7 +749,7 @@ $("create-form").addEventListener("submit", async (e) => {
     if ($("kf-expires").value) body.expires_at = $("kf-expires").value + "T23:59:59Z";
     if ($("kf-owner").value) {
       const owner = $("kf-owner").value.trim();
-      if (owner.length > 256) throw new Error("owner must be 256 characters or fewer");
+      if (owner.length > 256) throw new Error(msg("err.ownerTooLong"));
       body.owner = owner;
     }
     const out = await api("POST", "/admin/keys", body);
@@ -810,7 +826,7 @@ async function refreshTeamsView() {
   tbody.textContent = "";
   const rows = teams.data || [];
   if (!rows.length) {
-    tbody.appendChild(emptyRow(5, "no teams yet"));
+    tbody.appendChild(emptyRow(5, msg("teams.noTeams")));
   } else {
     for (const t of rows) {
       const tr = document.createElement("tr");
@@ -820,12 +836,12 @@ async function refreshTeamsView() {
       const cell = document.createElement("td");
       if (whoamiIsAdmin && t.source === "record") {
         const edit = document.createElement("button");
-        edit.className = "ghost"; edit.textContent = "edit";
+        edit.className = "ghost"; edit.textContent = msg("common.edit");
         edit.addEventListener("click", () => fillTeamForm(t));
         const del = document.createElement("button");
         del.className = "ghost"; del.textContent = "✕";
         del.addEventListener("click", async () => {
-          if (!confirm("Delete team record " + t.name + "?")) return;
+          if (!confirm(msg("teams.confirmDeletePrefix") + t.name + msg("common.confirmSuffix"))) return;
           try { await api("DELETE", "/admin/teams/" + encodeURIComponent(t.name)); await refreshTeamsView(); }
           catch (err) { $("team-form-status").className = "status err"; $("team-form-status").textContent = String(err.message || err); }
         });
@@ -842,7 +858,7 @@ async function refreshTeamsView() {
   ubody.textContent = "";
   const urows = users.data || [];
   if (!urows.length) {
-    ubody.appendChild(emptyRow(3, "no keys issued yet"));
+    ubody.appendChild(emptyRow(3, msg("teams.noKeysIssued")));
   } else {
     for (const u of urows) {
       const tr = document.createElement("tr");
@@ -863,7 +879,7 @@ $("team-form").addEventListener("submit", async (e) => {
     const budget = $("tf-budget").value;
     if (budget) {
       // Same 53-bit-float precision guard as the key-issuance form.
-      if (Number(budget) > 1e9) throw new Error("budget must be under $1,000,000,000");
+      if (Number(budget) > 1e9) throw new Error(msg("err.budgetTooLarge"));
       body.budget_usd_micros = Math.round(Number(budget) * 1e6);
     }
     if ($("tf-rpm").value) body.rpm = parseInt($("tf-rpm").value, 10);
@@ -893,7 +909,7 @@ $("team-form").addEventListener("submit", async (e) => {
 // issued, the real virtual key — the page answers "how do I use this?" itself.
 function renderUsage(key) {
   const origin = window.location.origin;
-  const k = key || "<issue a key first>";
+  const k = key || msg("settings.issueKeyFirst");
   $("usage-claude").textContent =
     "export ANTHROPIC_BASE_URL=" + origin + "\n" +
     "export ANTHROPIC_API_KEY=" + k + "\n" +
@@ -919,7 +935,7 @@ async function loadModels(key) {
     const names = (out.data || []).map((m) => m.id || m.name).filter(Boolean);
     if (names.length) $("usage-models").textContent = names.join(", ");
   } catch {
-    $("usage-models").textContent = "see your gateway config (models map)";
+    $("usage-models").textContent = msg("settings.routableModelsFallback");
   }
 }
 
@@ -960,7 +976,7 @@ async function refreshGovernance() {
   qbody.textContent = "";
   const quota = parseLabeled(text, "inferplane_quota_utilization_ratio");
   if (!quota.length) {
-    qbody.appendChild(emptyRow(3, "no quota utilization reported yet"));
+    qbody.appendChild(emptyRow(3, msg("gov.noQuota")));
   } else {
     for (const q of quota.sort((a, b) => (a.labels.team || "").localeCompare(b.labels.team || ""))) {
       const tr = document.createElement("tr");
@@ -995,7 +1011,7 @@ async function refreshGovernance() {
   }
   const teams = Object.keys(spend).sort();
   if (!teams.length) {
-    sbody.appendChild(emptyRow(2, "no spend reported yet"));
+    sbody.appendChild(emptyRow(2, msg("gov.noSpend")));
   } else {
     for (const team of teams) {
       const tr = document.createElement("tr");
@@ -1012,7 +1028,7 @@ async function refreshGovernance() {
       const out = await api("GET", "/admin/alerts/recent", null, true);
       const fires = (out && out !== DISABLED) ? (out.fires || []) : [];
       if (!fires.length) {
-        abody.appendChild(emptyRow(6, "no alerts fired yet"));
+        abody.appendChild(emptyRow(6, msg("gov.noAlerts")));
       } else {
         for (const f of fires) {
           const tr = document.createElement("tr");
@@ -1021,13 +1037,13 @@ async function refreshGovernance() {
           tr.appendChild(td(f.key_id || "—"));
           tr.appendChild(td(((f.threshold || 0) * 100).toFixed(0) + "%"));
           tr.appendChild(td(((f.ratio || 0) * 100).toFixed(0) + "%"));
-          tr.appendChild(td(f.delivered ? "yes" : ("no" + (f.error ? " (" + f.error + ")" : ""))));
+          tr.appendChild(td(f.delivered ? msg("common.yes") : (msg("common.no") + (f.error ? " (" + f.error + ")" : ""))));
           abody.appendChild(tr);
         }
       }
     } catch {
       abody.textContent = "";
-      abody.appendChild(emptyRow(6, "failed to load"));
+      abody.appendChild(emptyRow(6, msg("common.failedToLoad")));
     }
   }
 }
@@ -1036,13 +1052,13 @@ async function refreshGovernance() {
 // goes through api() so it carries the in-memory admin token and handles 401).
 $("verify-audit").addEventListener("click", async () => {
   const box = $("verify-result");
-  box.textContent = "verifying…";
+  box.textContent = msg("common.verifying");
   box.className = "";
   try {
     const out = await api("GET", "/admin/audit/verify");
     const sinks = out.sinks || [];
     if (!sinks.length) {
-      box.textContent = "no file audit sink configured (stdout-only deployment)";
+      box.textContent = msg("gov.noSink");
       return;
     }
     box.textContent = "";
@@ -1050,10 +1066,10 @@ $("verify-audit").addEventListener("click", async () => {
       const line = document.createElement("div");
       line.className = "verify-line " + (s.ok ? "ok" : "err");
       if (s.ok) {
-        line.textContent = "✓ " + s.path + " — chain OK (" + (s.records || 0) + " records)" +
-          (s.partial_tail ? " [complete prefix; trailing partial line ignored]" : "");
+        line.textContent = "✓ " + s.path + " — " + msg("gov.chainOk") + " (" + (s.records || 0) + " " + msg("gov.recordsWord") + ")" +
+          (s.partial_tail ? " " + msg("gov.partialTail") : "");
       } else {
-        line.textContent = "✗ " + s.path + " — " + (s.broken_at ? "BROKEN at record " + s.broken_at : (s.reason || "not OK"));
+        line.textContent = "✗ " + s.path + " — " + (s.broken_at ? msg("gov.brokenAtPrefix") + s.broken_at : (s.reason || msg("gov.notOk")));
       }
       box.appendChild(line);
     }
@@ -1097,7 +1113,7 @@ async function loadLogsPage(before, reset) {
   const events = out.events || [];
   if (reset) tbody.textContent = "";
   if (!events.length) {
-    if (reset) tbody.appendChild(emptyRow(8, "no requests logged yet"));
+    if (reset) tbody.appendChild(emptyRow(8, msg("logs.noRequestsLogged")));
     $("logs-load-more").hidden = true;
     return;
   }
@@ -1116,7 +1132,7 @@ async function loadLogsPage(before, reset) {
       btn.type = "button";
       btn.className = "ghost";
       btn.textContent = "📄";
-      btn.title = "view captured body";
+      btn.title = msg("body.viewBtnTitle");
       btn.addEventListener("click", () => openBodyDrawer(e.body_ref));
       cell.appendChild(btn);
     }
@@ -1132,10 +1148,10 @@ $("logs-load-more").addEventListener("click", () => loadLogsPage(logsCursor, fal
 async function openBodyDrawer(ref) {
   const drawer = $("body-drawer");
   const box = $("body-drawer-content");
-  box.textContent = "loading…";
+  box.textContent = msg("common.loading");
   drawer.hidden = false;
   if (!capOn("logs_bodies")) {
-    box.textContent = "body store not enabled";
+    box.textContent = msg("body.storeNotEnabled");
     return;
   }
   try {
@@ -1153,35 +1169,35 @@ function renderBodyDrawer(box, ref, body) {
   box.textContent = "";
   const meta = document.createElement("p");
   meta.className = "hint";
-  meta.textContent = "record " + (body.record_id || "") + " · expires " + (body.expires_ts || "");
+  meta.textContent = msg("body.recordPrefix") + (body.record_id || "") + msg("body.expiresInfix") + (body.expires_ts || "");
   box.appendChild(meta);
 
   const req = document.createElement("pre");
-  req.textContent = "REQUEST:\n" + JSON.stringify(body.request, null, 2);
+  req.textContent = msg("body.requestLabel") + JSON.stringify(body.request, null, 2);
   box.appendChild(req);
 
   const resp = document.createElement("pre");
-  resp.textContent = "RESPONSE:\n" + (body.response == null
-    ? "(not captured — streaming responses are request-only)"
+  resp.textContent = msg("body.responseLabel") + (body.response == null
+    ? msg("body.notCapturedStreaming")
     : JSON.stringify(body.response, null, 2));
   box.appendChild(resp);
 
   const del = document.createElement("button");
   del.type = "button";
   del.className = "ghost";
-  del.textContent = "DELETE BODY";
+  del.textContent = msg("body.deleteBtn");
   del.addEventListener("click", async () => {
-    if (!confirm("Permanently delete this body? This cannot be undone.")) return;
+    if (!confirm(msg("body.confirmDelete"))) return;
     try {
       await api("DELETE", "/admin/bodies/" + encodeURIComponent(ref));
       box.textContent = "";
       const done = document.createElement("p");
-      done.textContent = "body deleted.";
+      done.textContent = msg("body.deleted");
       box.appendChild(done);
     } catch (err) {
       const errLine = document.createElement("p");
       errLine.className = "status err";
-      errLine.textContent = "delete failed: " + (err.message || err);
+      errLine.textContent = msg("body.deleteFailedPrefix") + (err.message || err);
       box.appendChild(errLine);
     }
   });

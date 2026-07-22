@@ -19,13 +19,14 @@ var static embed.FS
 var contentTypes = map[string]string{
 	"index.html":  "text/html; charset=utf-8",
 	"app.js":      "text/javascript; charset=utf-8",
+	"i18n.js":     "text/javascript; charset=utf-8",
 	"style.css":   "text/css; charset=utf-8",
 	"favicon.svg": "image/svg+xml",
 }
 
 // Handler serves the console at the mount root: "/" (and "/index.html"),
-// "/app.js", "/style.css". Anything else is 404. Every response carries a
-// strict CSP and nosniff (ADR-001 security posture).
+// "/app.js", "/i18n.js", "/style.css". Anything else is 404. Every response
+// carries a strict CSP and nosniff (ADR-001 security posture).
 func Handler(extraConnectSrc ...string) http.Handler {
 	csp := "default-src 'self'; frame-ancestors 'none'"
 	if len(extraConnectSrc) > 0 {

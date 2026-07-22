@@ -46,6 +46,7 @@ func TestServesIndex(t *testing.T) {
 func TestServesAssets(t *testing.T) {
 	for path, wantCT := range map[string]string{
 		"/app.js":      "text/javascript",
+		"/i18n.js":     "text/javascript",
 		"/style.css":   "text/css",
 		"/favicon.svg": "image/svg+xml",
 	} {
@@ -99,7 +100,7 @@ func sessionStorageUsesOnlyAllowedKeys(body string) (ok bool, offendingKey strin
 // above (ADR-026) — any other sessionStorage usage, or any use of
 // localStorage/document.cookie, remains fully banned.
 func TestAssetsAreDataFreeAndTokenSafe(t *testing.T) {
-	for _, path := range []string{"/", "/app.js", "/style.css"} {
+	for _, path := range []string{"/", "/app.js", "/i18n.js", "/style.css"} {
 		_, body := get(t, path)
 		// "sessionStorage[" (bracket/computed-key access) and "sessionStorage.clear"
 		// are banned outright — they bypass the named-key allowlist below, which only
@@ -609,5 +610,46 @@ func TestHandlerNoConnectSrcIsByteIdentical(t *testing.T) {
 	csp := resp.Header.Get("Content-Security-Policy")
 	if csp != "default-src 'self'; frame-ancestors 'none'" {
 		t.Fatalf("CSP with no extra connect-src = %q, want byte-identical pre-SSO CSP", csp)
+	}
+}
+
+// TestAdminUI_i18nWired pins ADR-027: the console ships a self-contained
+// en/ko/zh/ja dictionary (no CDN — CSP default-src 'self' forbids one), a
+// manual switcher, and the static markup is wired to it via data-i18n. It
+// does NOT re-check every individual string translated elsewhere in this
+// file (those tests already pin their own English source text verbatim).
+func TestAdminUI_i18nWired(t *testing.T) {
+	_, html := get(t, "/index.html")
+	if !strings.Contains(html, `id="lang-select"`) {
+		t.Error("index.html missing the language switcher #lang-select")
+	}
+	if !strings.Contains(html, "data-i18n=") {
+		t.Error("index.html has no data-i18n attributes — i18n markup missing")
+	}
+	if !strings.Contains(html, `<script src="i18n.js">`) {
+		t.Error("index.html does not load i18n.js")
+	}
+
+	_, i18n := get(t, "/i18n.js")
+	for _, want := range []string{"en:", "ko:", "zh:", "ja:", "function msg(", "function applyLang(", "function detectLang("} {
+		if !strings.Contains(i18n, want) {
+			t.Errorf("i18n.js missing %q", want)
+		}
+	}
+	// No persistence (ADR-001 data-free posture) — language choice is
+	// re-detected from navigator.language on every load, never read back
+	// from storage.
+	for _, banned := range []string{"localStorage", "sessionStorage.", "document.cookie"} {
+		if strings.Contains(i18n, banned) {
+			t.Errorf("i18n.js contains banned storage API %q — language must not be persisted", banned)
+		}
+	}
+
+	_, js := get(t, "/app.js")
+	if !strings.Contains(js, `$("lang-select").addEventListener("change"`) {
+		t.Error("app.js does not wire a change handler for #lang-select")
+	}
+	if !strings.Contains(js, "applyLang(") {
+		t.Error("app.js never calls applyLang() — language switch would be a no-op")
 	}
 }
