@@ -13,17 +13,18 @@
   <div id="lock">
     <div class="lock-card">
       <div class="wordmark"><span class="glyph">▰▰</span> inferplane</div>
-      <p class="tagline">LLM consumption governance — control plane</p>
-      <button id="sso-button" type="button" hidden>Sign in with SSO</button>
-      <div id="sso-divider" class="lock-divider" hidden><span>or paste a token</span></div>
+      <p class="tagline" data-i18n="lock.tagline">LLM consumption governance — control plane</p>
+      <button id="sso-button" type="button" hidden data-i18n="lock.sso">Sign in with SSO</button>
+      <div id="sso-divider" class="lock-divider" hidden><span data-i18n="lock.divider">or paste a token</span></div>
       <form id="token-form">
-        <label class="microlabel" for="token">admin token · or OIDC ID token</label>
+        <label class="microlabel" for="token" data-i18n="lock.label">admin token · or OIDC ID token</label>
         <input id="token" type="password" autocomplete="off" spellcheck="false"
+               data-i18n-placeholder="lock.placeholder"
                placeholder="paste admin token, or an ID token from your IdP CLI" required>
-        <button type="submit">UNLOCK CONSOLE</button>
+        <button type="submit" data-i18n="lock.unlock">UNLOCK CONSOLE</button>
       </form>
       <p id="auth-status" class="status"></p>
-      <p class="lock-note">Sign in with SSO through your IdP, or paste a
+      <p class="lock-note" data-i18n="lock.note">Sign in with SSO through your IdP, or paste a
         break-glass admin token or OIDC ID token. The token is held in page
         memory only and is never stored.</p>
     </div>
@@ -34,18 +35,24 @@
     <aside id="side">
       <div class="wordmark sm"><span class="glyph">▰▰</span> inferplane</div>
       <nav>
-        <button class="nav active" data-view="overview">⌂&ensp;Overview</button>
-        <button class="nav" data-view="usage">▤&ensp;Usage</button>
-        <button class="nav" data-view="logs">≡&ensp;Logs</button>
-        <button class="nav" data-view="keys">⚿&ensp;Virtual keys</button>
-        <button class="nav" data-view="teams">⚇&ensp;Teams &amp; Users</button>
-        <button class="nav" data-view="providers">⇄&ensp;Providers &amp; Models</button>
-        <button class="nav" data-view="governance">◷&ensp;Governance</button>
-        <button class="nav" data-view="settings">⚙&ensp;Settings</button>
+        <button class="nav active" data-view="overview">⌂&ensp;<span data-i18n="nav.overview">Overview</span></button>
+        <button class="nav" data-view="usage">▤&ensp;<span data-i18n="nav.usage">Usage</span></button>
+        <button class="nav" data-view="logs">≡&ensp;<span data-i18n="nav.logs">Logs</span></button>
+        <button class="nav" data-view="keys">⚿&ensp;<span data-i18n="nav.keys">Virtual keys</span></button>
+        <button class="nav" data-view="teams">⚇&ensp;<span data-i18n="nav.teamsUsers">Teams &amp; Users</span></button>
+        <button class="nav" data-view="providers">⇄&ensp;<span data-i18n="nav.providersModels">Providers &amp; Models</span></button>
+        <button class="nav" data-view="governance">◷&ensp;<span data-i18n="nav.governance">Governance</span></button>
+        <button class="nav" data-view="settings">⚙&ensp;<span data-i18n="nav.settings">Settings</span></button>
       </nav>
       <div class="side-foot">
-        <div class="led-row"><span id="conn-led" class="led on"></span>session active</div>
-        <button id="disconnect" class="ghost">LOCK</button>
+        <select id="lang-select" aria-label="language">
+          <option value="en">English</option>
+          <option value="ko">한국어</option>
+          <option value="zh">中文</option>
+          <option value="ja">日本語</option>
+        </select>
+        <div class="led-row"><span id="conn-led" class="led on"></span><span data-i18n="footer.sessionActive">session active</span></div>
+        <button id="disconnect" class="ghost" data-i18n="footer.lock">LOCK</button>
       </div>
     </aside>
 
@@ -62,43 +69,43 @@
       <section id="view-overview" class="view">
         <div class="cards">
           <div class="card stat">
-            <div class="microlabel">requests · total</div>
+            <div class="microlabel" data-i18n="ov.reqTotal">requests · total</div>
             <div class="big" id="stat-requests">—</div>
             <div class="sub" id="stat-requests-sub">from /metrics</div>
           </div>
           <div class="card stat">
-            <div class="microlabel">active keys</div>
+            <div class="microlabel" data-i18n="ov.activeKeys">active keys</div>
             <div class="big" id="stat-keys">—</div>
-            <div class="sub">issued &amp; not revoked</div>
+            <div class="sub" data-i18n="ov.issuedNotRevoked">issued &amp; not revoked</div>
           </div>
           <div class="card stat">
-            <div class="microlabel">teams seen</div>
+            <div class="microlabel" data-i18n="ov.teamsSeen">teams seen</div>
             <div class="big" id="stat-teams">—</div>
             <div class="sub" id="stat-teams-sub">across traffic</div>
           </div>
           <div class="card stat">
-            <div class="microlabel">budget spend</div>
+            <div class="microlabel" data-i18n="ov.budgetSpend">budget spend</div>
             <div class="big" id="stat-spend">—</div>
-            <div class="sub">µUSD settled this window</div>
+            <div class="sub" data-i18n="ov.budgetSub">µUSD settled this window</div>
             <div class="sparkhold" id="stat-spend-spark"></div>
           </div>
         </div>
 
         <div class="twocol">
           <div class="card">
-            <div class="microlabel">traffic by model · provider</div>
+            <div class="microlabel" data-i18n="ov.trafficTitle">traffic by model · provider</div>
             <table class="data" id="traffic-table">
-              <thead><tr><th>model</th><th>provider</th><th>status</th><th class="num">req</th></tr></thead>
-              <tbody><tr><td colspan="4" class="empty">no traffic yet — issue a key and send a request</td></tr></tbody>
+              <thead><tr><th data-i18n="th.model">model</th><th data-i18n="th.provider">provider</th><th data-i18n="th.status">status</th><th class="num" data-i18n="th.req">req</th></tr></thead>
+              <tbody><tr><td colspan="4" class="empty" data-i18n="ov.noTraffic">no traffic yet — issue a key and send a request</td></tr></tbody>
             </table>
           </div>
           <div class="card">
-            <div class="microlabel">recent keys</div>
+            <div class="microlabel" data-i18n="ov.recentKeys">recent keys</div>
             <table class="data" id="recent-keys">
-              <thead><tr><th>key id</th><th>team</th></tr></thead>
-              <tbody><tr><td colspan="2" class="empty">none yet</td></tr></tbody>
+              <thead><tr><th data-i18n="th.keyId">key id</th><th data-i18n="th.team">team</th></tr></thead>
+              <tbody><tr><td colspan="2" class="empty" data-i18n="common.noneYet">none yet</td></tr></tbody>
             </table>
-            <button class="linklike" data-view="keys">manage keys →</button>
+            <button class="linklike" data-view="keys" data-i18n="ov.manageKeys">manage keys →</button>
           </div>
         </div>
       </section>
@@ -106,24 +113,23 @@
       <!-- ===== usage ===== -->
       <section id="view-usage" class="view" hidden>
         <div class="card affordance" data-cap="analytics_index">
-          <div class="microlabel">usage &amp; spend analytics</div>
-          <p class="hint">Enable the analytics store to see spend over time and per
-            team/key/model breakdowns. <span class="ko">분석 스토어를 켜면 기간별
-            스펜드와 팀·키·모델별 사용량을 볼 수 있습니다.</span></p>
+          <div class="microlabel" data-i18n="usage.title">usage &amp; spend analytics</div>
+          <p class="hint" data-i18n="usage.hint">Enable the analytics store to see spend over time and per
+            team/key/model breakdowns.</p>
         </div>
         <div id="usage-content" hidden>
           <div class="card">
-            <div class="microlabel">totals · last 30 days</div>
+            <div class="microlabel" data-i18n="usage.totalsTitle">totals · last 30 days</div>
             <table class="data" id="usage-totals"><tbody></tbody></table>
           </div>
           <div class="twocol">
             <div class="card">
-              <div class="microlabel">spend by team</div>
-              <table class="data" id="usage-by-team"><thead><tr><th>team</th><th class="num">req</th><th class="num">USD</th></tr></thead><tbody></tbody></table>
+              <div class="microlabel" data-i18n="usage.byTeam">spend by team</div>
+              <table class="data" id="usage-by-team"><thead><tr><th data-i18n="th.team">team</th><th class="num" data-i18n="th.req">req</th><th class="num" data-i18n="th.usd">USD</th></tr></thead><tbody></tbody></table>
             </div>
             <div class="card">
-              <div class="microlabel">spend by model</div>
-              <table class="data" id="usage-by-model"><thead><tr><th>model</th><th class="num">req</th><th class="num">USD</th></tr></thead><tbody></tbody></table>
+              <div class="microlabel" data-i18n="usage.byModel">spend by model</div>
+              <table class="data" id="usage-by-model"><thead><tr><th data-i18n="th.model">model</th><th class="num" data-i18n="th.req">req</th><th class="num" data-i18n="th.usd">USD</th></tr></thead><tbody></tbody></table>
             </div>
           </div>
         </div>
@@ -132,43 +138,35 @@
       <!-- ===== logs ===== -->
       <section id="view-logs" class="view" hidden>
         <div class="card affordance" data-cap="analytics_index">
-          <div class="microlabel">request log viewer</div>
-          <p class="hint">Enable the analytics store to inspect individual requests
-            (metadata). Prompt/response bodies require the opt-in body store.
-            <span class="ko">분석 스토어를 켜면 개별 요청(메타데이터)을 볼 수 있습니다.</span></p>
+          <div class="microlabel" data-i18n="logs.title">request log viewer</div>
+          <p class="hint" data-i18n="logs.hint">Enable the analytics store to inspect individual requests
+            (metadata). Prompt/response bodies require the opt-in body store.</p>
         </div>
         <div id="logs-content" hidden>
           <div class="card">
-            <div class="microlabel">recent requests</div>
-            <p class="hint">📄 marks a request whose body was captured (opt-in
-              <code>audit.log_bodies</code>, D4/ADR-018). A streaming response is
-              never captured — request only.
-              <span class="ko">📄는 본문이 저장된 요청입니다(옵트인 <code>audit.log_bodies</code>).
-              스트리밍 응답은 저장되지 않습니다 — 요청만 저장됩니다.</span></p>
+            <div class="microlabel" data-i18n="logs.recentTitle">recent requests</div>
+            <p class="hint"><span data-i18n="logs.bodyHint1">📄 marks a request whose body was captured (opt-in </span>
+              <code>audit.log_bodies</code><span data-i18n="logs.bodyHint2">, D4/ADR-018). A streaming response is
+              never captured — request only.</span></p>
             <table class="data" id="logs-table">
-              <thead><tr><th>time</th><th>team</th><th>model</th><th>provider</th><th>status</th><th class="num">tokens</th><th class="num">cost</th><th></th></tr></thead>
+              <thead><tr><th data-i18n="th.time">time</th><th data-i18n="th.team">team</th><th data-i18n="th.model">model</th><th data-i18n="th.provider">provider</th><th data-i18n="th.status">status</th><th class="num" data-i18n="th.tokens">tokens</th><th class="num" data-i18n="th.cost">cost</th><th></th></tr></thead>
               <tbody></tbody>
             </table>
-            <button id="logs-load-more" type="button" class="ghost" hidden>LOAD MORE</button>
+            <button id="logs-load-more" type="button" class="ghost" hidden data-i18n="logs.loadMore">LOAD MORE</button>
           </div>
           <div class="card affordance" data-cap="logs_bodies">
-            <div class="microlabel">body store</div>
-            <p class="hint">Enable <code>audit.log_bodies</code> to view/delete captured
-              request &amp; response bodies from the table above.
-              <span class="ko"><code>audit.log_bodies</code>를 켜면 위 표에서 저장된
-              요청·응답 본문을 보고 삭제할 수 있습니다.</span></p>
+            <div class="microlabel" data-i18n="logs.bodyStoreTitle">body store</div>
+            <p class="hint"><span data-i18n="logs.enableBodyPre">Enable </span><code>audit.log_bodies</code><span data-i18n="logs.enableBodyPost"> to view/delete captured
+              request &amp; response bodies from the table above.</span></p>
           </div>
           <div class="card" id="body-drawer" hidden>
-            <div class="microlabel">body — retention &amp; privacy</div>
-            <p class="hint">Bodies live in a separate, deletable, encrypted store
+            <div class="microlabel" data-i18n="logs.retentionTitle">body — retention &amp; privacy</div>
+            <p class="hint"><span data-i18n="logs.retentionPre">Bodies live in a separate, deletable, encrypted store
               OUTSIDE the audit chain. PII masking (if enabled) is best-effort — it
               does not guarantee removal of secrets, credentials, or other
-              sensitive content. Viewing a body is itself logged (<code>body_accessed</code>).
-              <span class="ko">본문은 감사 체인과 분리된, 삭제 가능하고 암호화된 별도 저장소에
-              있습니다. PII 마스킹(활성화된 경우)은 최선 노력이며 시크릿·자격증명 등의 제거를
-              보장하지 않습니다. 본문 조회 자체도 기록됩니다(<code>body_accessed</code>).</span></p>
+              sensitive content. Viewing a body is itself logged (</span><code>body_accessed</code><span data-i18n="logs.retentionPost">).</span></p>
             <div id="body-drawer-content"></div>
-            <button id="body-drawer-close" type="button" class="ghost">CLOSE</button>
+            <button id="body-drawer-close" type="button" class="ghost" data-i18n="logs.close">CLOSE</button>
           </div>
         </div>
       </section>
@@ -176,35 +174,34 @@
       <!-- ===== keys ===== -->
       <section id="view-keys" class="view" hidden>
         <div class="card" id="issue-card">
-          <div class="microlabel">issue a virtual key</div>
+          <div class="microlabel" data-i18n="keys.issueTitle">issue a virtual key</div>
           <p id="whoami-line" class="hint" hidden></p>
           <form id="create-form" class="row">
-            <input id="team" type="text" placeholder="team (e.g. demo)" required>
+            <input id="team" type="text" data-i18n-placeholder="keys.teamPlaceholder" placeholder="team (e.g. demo)" required>
             <select id="team-select" hidden></select>
-            <input id="models" type="text" placeholder="allowed models — comma-separated, * for all" required>
-            <input id="kf-budget" type="number" step="0.01" min="0" placeholder="budget USD (optional)">
-            <input id="kf-tpm" type="number" min="0" step="1" placeholder="TPM (optional)">
-            <input id="kf-rpm" type="number" min="0" step="1" placeholder="RPM (optional)">
-            <input id="kf-expires" type="date" placeholder="expires (optional)">
-            <input id="kf-owner" type="text" placeholder="owner (optional)">
-            <button type="submit">ISSUE KEY</button>
+            <input id="models" type="text" data-i18n-placeholder="keys.modelsPlaceholder" placeholder="allowed models — comma-separated, * for all" required>
+            <input id="kf-budget" type="number" step="0.01" min="0" data-i18n-placeholder="common.budgetPlaceholder" placeholder="budget USD (optional)">
+            <input id="kf-tpm" type="number" min="0" step="1" data-i18n-placeholder="common.tpmPlaceholder" placeholder="TPM (optional)">
+            <input id="kf-rpm" type="number" min="0" step="1" data-i18n-placeholder="common.rpmPlaceholder" placeholder="RPM (optional)">
+            <input id="kf-expires" type="date" data-i18n-placeholder="common.expiresPlaceholder" placeholder="expires (optional)">
+            <input id="kf-owner" type="text" data-i18n-placeholder="common.ownerPlaceholder" placeholder="owner (optional)">
+            <button type="submit" data-i18n="keys.issueBtn">ISSUE KEY</button>
           </form>
           <p id="create-form-status" class="status"></p>
-          <p class="hint">Budget/TPM/RPM are enforced live on every request for this key, layered on top of the team's own limits.
-            <span class="ko">예산/TPM/RPM은 이 키의 모든 요청에서 실시간으로 강제되며, 팀 자체 한도 위에 추가로 적용됩니다.</span></p>
+          <p class="hint" data-i18n="keys.enforceHint">Budget/TPM/RPM are enforced live on every request for this key, layered on top of the team's own limits.</p>
           <div id="plaintext-box" hidden>
-            <div class="microlabel warn-label">⚠ shown once — copy now, not recoverable</div>
+            <div class="microlabel warn-label" data-i18n="keys.shownOnce">⚠ shown once — copy now, not recoverable</div>
             <div class="row">
               <code id="plaintext" class="reveal"></code>
-              <button id="copy" type="button" class="ghost">COPY</button>
+              <button id="copy" type="button" class="ghost" data-i18n="common.copy">COPY</button>
             </div>
           </div>
         </div>
 
         <div class="card">
-          <div class="microlabel">issued keys</div>
+          <div class="microlabel" data-i18n="keys.issuedTitle">issued keys</div>
           <table class="data" id="keys">
-            <thead><tr><th>key id</th><th>team</th><th>allowed models</th><th>limits</th><th></th></tr></thead>
+            <thead><tr><th data-i18n="th.keyId">key id</th><th data-i18n="th.team">team</th><th data-i18n="th.allowedModels">allowed models</th><th data-i18n="th.limits">limits</th><th></th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -213,77 +210,62 @@
       <!-- ===== teams & users ===== -->
       <section id="view-teams" class="view" hidden>
         <div class="card affordance" data-cap="teams_records">
-          <div class="microlabel">teams &amp; users</div>
-          <p class="hint">Team and user records are not enabled. Today teams are
-            derived from issued keys. <span class="ko">팀·유저 레코드가 비활성화돼
-            있습니다. 현재 팀은 발급된 키에서 파생됩니다.</span></p>
+          <div class="microlabel" data-i18n="teams.title">teams &amp; users</div>
+          <p class="hint" data-i18n="teams.notEnabledHint">Team and user records are not enabled. Today teams are
+            derived from issued keys.</p>
         </div>
         <div id="teams-content" hidden>
           <div class="card" id="team-form-card">
-            <div class="microlabel">team governance</div>
+            <div class="microlabel" data-i18n="teams.govTitle">team governance</div>
             <form id="team-form" class="row">
-              <input id="tf-name" type="text" placeholder="team name" required>
-              <input id="tf-budget" type="number" step="0.01" min="0" placeholder="budget USD (optional)">
-              <input id="tf-rpm" type="number" min="0" step="1" placeholder="RPM (optional)">
-              <input id="tf-tpm" type="number" min="0" step="1" placeholder="TPM (optional)">
-              <input id="tf-tpd" type="number" min="0" step="1" placeholder="tokens/day (optional)">
+              <input id="tf-name" type="text" data-i18n-placeholder="teams.namePlaceholder" placeholder="team name" required>
+              <input id="tf-budget" type="number" step="0.01" min="0" data-i18n-placeholder="common.budgetPlaceholder" placeholder="budget USD (optional)">
+              <input id="tf-rpm" type="number" min="0" step="1" data-i18n-placeholder="common.rpmPlaceholder" placeholder="RPM (optional)">
+              <input id="tf-tpm" type="number" min="0" step="1" data-i18n-placeholder="common.tpmPlaceholder" placeholder="TPM (optional)">
+              <input id="tf-tpd" type="number" min="0" step="1" data-i18n-placeholder="teams.tpdPlaceholder" placeholder="tokens/day (optional)">
               <select id="tf-quota-exceeded">
-                <option value="">quota exceeded: block (default)</option>
-                <option value="block">quota exceeded: block</option>
-                <option value="warn">quota exceeded: warn</option>
+                <option value="" data-i18n="teams.quotaBlockDefault">quota exceeded: block (default)</option>
+                <option value="block" data-i18n="teams.quotaBlock">quota exceeded: block</option>
+                <option value="warn" data-i18n="teams.quotaWarn">quota exceeded: warn</option>
               </select>
               <select id="tf-budget-exceeded">
-                <option value="">budget exceeded: block (default)</option>
-                <option value="block">budget exceeded: block</option>
-                <option value="warn">budget exceeded: warn</option>
+                <option value="" data-i18n="teams.budgetBlockDefault">budget exceeded: block (default)</option>
+                <option value="block" data-i18n="teams.budgetBlock">budget exceeded: block</option>
+                <option value="warn" data-i18n="teams.budgetWarn">budget exceeded: warn</option>
               </select>
-              <input id="tf-models" type="text" placeholder="default allowed models — comma-separated (optional)">
-              <input id="tf-guardrail-id" type="text" placeholder="guardrail ID override (optional, bedrock)">
-              <input id="tf-guardrail-version" type="text" placeholder="guardrail version (optional, default DRAFT)">
-              <input id="tf-regions" type="text" placeholder="allowed regions — comma-separated (optional)">
-              <button type="submit">SAVE TEAM</button>
+              <input id="tf-models" type="text" data-i18n-placeholder="teams.modelsPlaceholder" placeholder="default allowed models — comma-separated (optional)">
+              <input id="tf-guardrail-id" type="text" data-i18n-placeholder="common.guardrailIdPlaceholder" placeholder="guardrail ID override (optional, bedrock)">
+              <input id="tf-guardrail-version" type="text" data-i18n-placeholder="common.guardrailVersionPlaceholder" placeholder="guardrail version (optional, default DRAFT)">
+              <input id="tf-regions" type="text" data-i18n-placeholder="teams.regionsPlaceholder" placeholder="allowed regions — comma-separated (optional)">
+              <button type="submit" data-i18n="teams.saveBtn">SAVE TEAM</button>
             </form>
             <p id="team-form-status" class="status"></p>
-            <p class="hint">Rate/TPM/quota/budget limits are enforced live on every
-              request for this team the moment you save — no restart.
-              <span class="ko">RPM/TPM/쿼터/예산 한도는 저장 즉시 이 팀의 모든 요청에
-              실시간으로 적용됩니다 — 재시작이 필요 없습니다.</span></p>
-            <p class="hint">Counters are enforced <b>per gateway instance</b> (ADR-013)
-              — with N replicas a team may consume up to N× before blocking.
-              <span class="ko">카운터는 <b>인스턴스별</b>로 집계됩니다(ADR-013) —
-              레플리카가 N개면 차단 전까지 최대 N배까지 소비될 수 있습니다.</span></p>
-            <p class="hint">Guardrail override selects a DIFFERENT Bedrock Guardrail for
+            <p class="hint" data-i18n="teams.hint1">Rate/TPM/quota/budget limits are enforced live on every
+              request for this team the moment you save — no restart.</p>
+            <p class="hint"><span data-i18n="teams.hint2pre">Counters are enforced </span><b data-i18n="teams.perInstance">per gateway instance</b><span data-i18n="teams.hint2post"> (ADR-013)
+              — with N replicas a team may consume up to N× before blocking.</span></p>
+            <p class="hint" data-i18n="teams.guardrailHint">Guardrail override selects a DIFFERENT Bedrock Guardrail for
               this team — it cannot remove the provider's configured default
-              (no per-team opt-out, D6/ADR-019).
-              <span class="ko">가드레일 오버라이드는 이 팀에 <b>다른</b> Bedrock
-              Guardrail을 지정할 뿐, provider에 설정된 기본 가드레일을 끌 수는 없습니다
-              (팀별 opt-out 없음, D6/ADR-019).</span></p>
-            <p class="hint">Allowed regions restrict this team to providers labeled with
+              (no per-team opt-out, D6/ADR-019).</p>
+            <p class="hint" data-i18n="teams.regionsHint">Allowed regions restrict this team to providers labeled with
               one of these regions — a provider with NO region label is always
-              blocked for a restricted team (fail-closed, D7/ADR-020).
-              <span class="ko">허용 region은 이 팀을 지정된 region으로 라벨링된
-              provider로만 제한합니다 — region 라벨이 없는 provider는 제한된 팀에서
-              항상 차단됩니다(fail-closed, D7/ADR-020).</span></p>
-            <p class="hint">Submitting this team form replaces any config-declared region policy for that team unless you include the allowed regions here.
-              <span class="ko">이 팀 양식을 제출하면 여기에 허용 region을 포함하지
-              않는 한 해당 팀의 config 선언 region 정책이 대체됩니다.</span></p>
+              blocked for a restricted team (fail-closed, D7/ADR-020).</p>
+            <p class="hint" data-i18n="teams.regionsSaveWarning">Submitting this team form replaces any config-declared region policy for that team unless you include the allowed regions here.</p>
           </div>
           <div class="card">
-            <div class="microlabel">teams</div>
+            <div class="microlabel" data-i18n="teams.tableTitle">teams</div>
             <table class="data" id="teams-table">
-              <thead><tr><th>name</th><th>source</th><th class="num">spend (30d)</th><th>limits</th><th></th></tr></thead>
+              <thead><tr><th data-i18n="th.name">name</th><th data-i18n="th.source">source</th><th class="num" data-i18n="th.spend30d">spend (30d)</th><th data-i18n="th.limits">limits</th><th></th></tr></thead>
               <tbody></tbody>
             </table>
           </div>
           <div class="card">
-            <div class="microlabel">users</div>
-            <p class="hint">Users are derived read-only from key owners — there is no
+            <div class="microlabel" data-i18n="teams.usersTitle">users</div>
+            <p class="hint" data-i18n="teams.usersHint">Users are derived read-only from key owners — there is no
               users table. Per-user spend is not available: audit events carry a team,
-              not an owner. <span class="ko">유저는 키 소유자에서 파생된 읽기 전용
-              목록입니다(별도 테이블 없음). 오디트 이벤트에는 팀만 기록되어 유저별
-              spend는 제공되지 않습니다.</span></p>
+              not an owner.</p>
             <table class="data" id="users-table">
-              <thead><tr><th>owner</th><th>teams</th><th class="num">keys</th></tr></thead>
+              <thead><tr><th data-i18n="th.owner">owner</th><th data-i18n="th.teamsCol">teams</th><th class="num" data-i18n="th.keys">keys</th></tr></thead>
               <tbody></tbody>
             </table>
           </div>
@@ -292,89 +274,84 @@
 
       <!-- ===== providers ===== -->
       <section id="view-providers" class="view" hidden>
-        <p class="hint" id="providers-mode-ro">Upstream providers and model routing are declared in
-          <b>config</b> (policy-as-code, ADR-003) — this view is read-only.
+        <p class="hint" id="providers-mode-ro"><span data-i18n="prov.roPre">Upstream providers and model routing are declared in
+          </span><b data-i18n="prov.configWord">config</b><span data-i18n="prov.roPost"> (policy-as-code, ADR-003) — this view is read-only.
           Secrets never appear here: only the env var / file path the gateway
-          reads, or the IAM mode. <span class="ko">업스트림 프로바이더·모델
-          라우팅은 config로 선언합니다(읽기 전용). 시크릿 값은 표시되지 않고,
-          참조 이름/IAM 모드만 보입니다.</span></p>
-        <p class="hint" id="providers-mode-rw" hidden>This gateway has a <b>provider store</b> — you can
+          reads, or the IAM mode.</span></p>
+        <p class="hint" id="providers-mode-rw" hidden><span data-i18n="prov.rwRun1">This gateway has a </span><b data-i18n="prov.providerStoreWord">provider store</b><span data-i18n="prov.rwRun2"> — you can
           register and edit providers/routes here (ADR-008). You register only the
-          <b>reference</b> a provider authenticates with (an env var name or a file
-          path) — <b>never the secret value</b>; set the value in your platform's
-          secret store. Changes apply immediately (hot-reload). <span class="ko">프로바이더
-          스토어가 있어 여기서 등록·편집할 수 있습니다. 시크릿 값이 아니라 참조
-          이름(env/파일 경로)만 등록하세요 — 값은 본인 시크릿 스토어에 둡니다.</span></p>
+          </span><b data-i18n="prov.referenceWord">reference</b><span data-i18n="prov.rwRun3"> a provider authenticates with (an env var name or a file
+          path) — </span><b data-i18n="prov.neverSecretWord">never the secret value</b><span data-i18n="prov.rwRun4">; set the value in your platform's
+          secret store. Changes apply immediately (hot-reload).</span></p>
 
         <div class="card">
-          <div class="microlabel">providers</div>
+          <div class="microlabel" data-i18n="prov.tableTitle">providers</div>
           <table class="data" id="providers-table">
-            <thead><tr><th>name</th><th>type</th><th>endpoint</th><th>auth</th><th id="prov-status-col" hidden>status</th><th id="prov-act-col" hidden></th></tr></thead>
-            <tbody><tr><td colspan="4" class="empty">connect to load…</td></tr></tbody>
+            <thead><tr><th data-i18n="th.name">name</th><th data-i18n="th.type">type</th><th data-i18n="th.endpoint">endpoint</th><th data-i18n="th.auth">auth</th><th id="prov-status-col" hidden data-i18n="th.status">status</th><th id="prov-act-col" hidden></th></tr></thead>
+            <tbody><tr><td colspan="4" class="empty" data-i18n="common.connectToLoad">connect to load…</td></tr></tbody>
           </table>
         </div>
 
         <!-- register/edit provider (shown only when a provider store is enabled) -->
         <div class="card" id="provider-write" hidden>
-          <div class="microlabel">① register &amp; test a provider · <span class="ko">프로바이더 등록 &amp; 연결 테스트</span></div>
+          <div class="microlabel" data-i18n="prov.registerTitle">① register &amp; test a provider</div>
           <form id="provider-form" class="grid-form">
-            <input id="pf-name" type="text" placeholder="name (e.g. anthropic-prod)" required>
+            <input id="pf-name" type="text" data-i18n-placeholder="prov.namePlaceholder" placeholder="name (e.g. anthropic-prod)" required>
             <select id="pf-type">
               <option value="anthropic">anthropic</option>
               <option value="openai_compatible">openai_compatible</option>
               <option value="bedrock">bedrock</option>
             </select>
-            <input id="pf-baseurl" type="text" placeholder="base_url (anthropic / openai_compatible)">
+            <input id="pf-baseurl" type="text" data-i18n-placeholder="prov.baseUrlPlaceholder" placeholder="base_url (anthropic / openai_compatible)">
             <select id="pf-refkind">
-              <option value="env">api_key_ref · env var NAME</option>
-              <option value="file">api_key_ref · file PATH</option>
-              <option value="none">no key (bedrock / keyless)</option>
+              <option value="env" data-i18n="prov.refEnv">api_key_ref · env var NAME</option>
+              <option value="file" data-i18n="prov.refFile">api_key_ref · file PATH</option>
+              <option value="none" data-i18n="prov.refNone">no key (bedrock / keyless)</option>
             </select>
-            <input id="pf-refval" type="text" placeholder="ref NAME or PATH — never the secret value">
-            <input id="pf-region" type="text" placeholder="region label (any provider type; blank = fail-closed for restricted teams)">
-            <input id="pf-authmode" type="text" placeholder="auth mode (bedrock, e.g. irsa)">
-            <input id="pf-guardrail-id" type="text" placeholder="guardrail ID override (optional, bedrock)">
-            <input id="pf-guardrail-version" type="text" placeholder="guardrail version (optional, default DRAFT)">
-            <button type="button" id="pf-test" class="ghost">TEST CONNECTION</button>
-            <button type="submit">SAVE PROVIDER</button>
+            <input id="pf-refval" type="text" data-i18n-placeholder="prov.refValPlaceholder" placeholder="ref NAME or PATH — never the secret value">
+            <input id="pf-region" type="text" data-i18n-placeholder="prov.regionPlaceholder" placeholder="region label (any provider type; blank = fail-closed for restricted teams)">
+            <input id="pf-authmode" type="text" data-i18n-placeholder="prov.authModePlaceholder" placeholder="auth mode (bedrock, e.g. irsa)">
+            <input id="pf-guardrail-id" type="text" data-i18n-placeholder="common.guardrailIdPlaceholder" placeholder="guardrail ID override (optional, bedrock)">
+            <input id="pf-guardrail-version" type="text" data-i18n-placeholder="common.guardrailVersionPlaceholder" placeholder="guardrail version (optional, default DRAFT)">
+            <button type="button" id="pf-test" class="ghost" data-i18n="prov.testBtn">TEST CONNECTION</button>
+            <button type="submit" data-i18n="prov.saveBtn">SAVE PROVIDER</button>
           </form>
-          <p class="hint warn-label">⚠ enter the env var NAME or file PATH — the gateway
+          <p class="hint warn-label" data-i18n="prov.warnHint">⚠ enter the env var NAME or file PATH — the gateway
             never stores a secret value. Set the value in your secret store.</p>
-          <p class="hint">TEST CONNECTION resolves the ref server-side and probes the
-            upstream — you never paste a key. <span class="ko">TEST CONNECTION은 시크릿
-            참조를 서버에서 해석해 업스트림에 연결을 시험합니다 — 키를 붙여넣지 않습니다.</span></p>
+          <p class="hint" data-i18n="prov.testHint">TEST CONNECTION resolves the ref server-side and probes the
+            upstream — you never paste a key.</p>
           <p id="provider-form-status" class="status"></p>
         </div>
 
         <div class="card">
-          <div class="microlabel">model routing · primary → fallback</div>
+          <div class="microlabel" data-i18n="prov.routingTitle">model routing · primary → fallback</div>
           <table class="data" id="routes-table">
-            <thead><tr><th>model</th><th>route (provider · upstream model)</th><th id="route-act-col" hidden></th></tr></thead>
-            <tbody><tr><td colspan="2" class="empty">connect to load…</td></tr></tbody>
+            <thead><tr><th data-i18n="th.model">model</th><th data-i18n="th.route">route (provider · upstream model)</th><th id="route-act-col" hidden></th></tr></thead>
+            <tbody><tr><td colspan="2" class="empty" data-i18n="common.connectToLoad">connect to load…</td></tr></tbody>
           </table>
         </div>
 
         <!-- add/edit model route (shown only when a provider store is enabled) -->
         <div class="card" id="model-write" hidden>
-          <div class="microlabel">② add a model route · <span class="ko">모델 라우트 추가</span></div>
+          <div class="microlabel" data-i18n="prov.addRouteTitle">② add a model route</div>
           <form id="model-form">
             <div class="row">
-              <input id="mf-name" type="text" placeholder="model name (e.g. claude-sonnet-4-6)" required>
+              <input id="mf-name" type="text" data-i18n-placeholder="prov.modelNamePlaceholder" placeholder="model name (e.g. claude-sonnet-4-6)" required>
             </div>
             <div id="mf-targets"></div>
             <div class="row">
-              <button id="mf-add-target" type="button" class="ghost">+ ADD TARGET</button>
-              <button type="submit">SAVE ROUTE</button>
+              <button id="mf-add-target" type="button" class="ghost" data-i18n="prov.addTargetBtn">+ ADD TARGET</button>
+              <button type="submit" data-i18n="prov.saveRouteBtn">SAVE ROUTE</button>
             </div>
           </form>
-          <p class="hint">Targets are tried in order (target 1 = primary, the rest = fallback).
-            <code>api</code> is optional (bedrock: invoke_model / converse).</p>
+          <p class="hint"><span data-i18n="prov.targetsHintPre">Targets are tried in order (target 1 = primary, the rest = fallback).
+            </span><code>api</code><span data-i18n="prov.targetsHintPost"> is optional (bedrock: invoke_model / converse).</span></p>
           <p id="model-form-status" class="status"></p>
         </div>
 
         <div class="card">
-          <div class="snippet-head"><span class="microlabel">add a provider · config block</span>
-            <button class="ghost copy-snippet" data-target="add-provider">COPY</button></div>
+          <div class="snippet-head"><span class="microlabel" data-i18n="prov.snippetTitle">add a provider · config block</span>
+            <button class="ghost copy-snippet" data-target="add-provider" data-i18n="common.copy">COPY</button></div>
           <pre class="snippet"><code id="add-provider">// providers: one block per upstream; secrets stay as env/file refs.
 "providers": {
   "anthropic-direct": { "type": "anthropic",
@@ -392,103 +369,98 @@
     { "provider": "bedrock-us", "model": "anthropic.claude-sonnet-4-6-v1:0", "api": "invoke_model" }
   ] }
 }</code></pre>
-          <p class="hint">Without a provider store, config is loaded at boot —
-            edit config and reload (<code>kill -HUP</code>) to apply. Set the
-            referenced secret in your platform's secret store — never inline.</p>
+          <p class="hint"><span data-i18n="prov.bootHintPre">Without a provider store, config is loaded at boot —
+            edit config and reload (</span><code>kill -HUP</code><span data-i18n="prov.bootHintPost"> to apply. Set the
+            referenced secret in your platform's secret store — never inline.</span></p>
         </div>
 
         <div class="card" id="export-card" hidden>
-          <div class="snippet-head"><span class="microlabel">git export · current topology (refs only, secret-free)</span>
-            <button id="export-btn" type="button" class="ghost">EXPORT</button></div>
+          <div class="snippet-head"><span class="microlabel" data-i18n="prov.exportTitle">git export · current topology (refs only, secret-free)</span>
+            <button id="export-btn" type="button" class="ghost" data-i18n="prov.exportBtn">EXPORT</button></div>
           <pre class="snippet"><code id="export-out">click EXPORT to render the committable config fragment…</code></pre>
-          <p class="hint">Commit this to Git for review / disaster recovery. The DB
+          <p class="hint" data-i18n="prov.exportHint">Commit this to Git for review / disaster recovery. The DB
             is the live source of truth; this is the export half (ADR-008).</p>
         </div>
       </section>
 
       <!-- ===== governance ===== -->
       <section id="view-governance" class="view" hidden>
-        <p class="hint">Per-team enforcement, read live from <code>/metrics</code>.
+        <p class="hint"><span data-i18n="gov.introPre">Per-team enforcement, read live from </span><code>/metrics</code><span data-i18n="gov.introPost">.
           Quota utilization is a ratio gauge; budget spend is a cumulative
           counter since process start (not a utilization gauge — a true budget
-          gauge needs the configured limit). <span class="ko">팀별 집행 현황을
-          /metrics에서 실시간으로 읽습니다. 쿼터는 비율 게이지, 예산 지출은
-          프로세스 시작 이후 누적 카운터입니다.</span></p>
+          gauge needs the configured limit).</span></p>
 
         <div class="card">
-          <div class="microlabel">quota utilization · per team / window</div>
+          <div class="microlabel" data-i18n="gov.quotaTitle">quota utilization · per team / window</div>
           <table class="data" id="quota-table">
-            <thead><tr><th>team</th><th>window</th><th>utilization</th></tr></thead>
-            <tbody><tr><td colspan="3" class="empty">connect to load…</td></tr></tbody>
+            <thead><tr><th data-i18n="th.team">team</th><th data-i18n="th.window">window</th><th data-i18n="th.utilization">utilization</th></tr></thead>
+            <tbody><tr><td colspan="3" class="empty" data-i18n="gov.noQuota">no quota utilization reported yet</td></tr></tbody>
           </table>
         </div>
 
         <div class="card">
-          <div class="microlabel">budget spend · cumulative since start</div>
+          <div class="microlabel" data-i18n="gov.spendTitle">budget spend · cumulative since start</div>
           <table class="data" id="spend-table">
-            <thead><tr><th>team</th><th>spend (USD, cumulative)</th></tr></thead>
-            <tbody><tr><td colspan="2" class="empty">connect to load…</td></tr></tbody>
+            <thead><tr><th data-i18n="th.team">team</th><th data-i18n="th.spendUsdCumulative">spend (USD, cumulative)</th></tr></thead>
+            <tbody><tr><td colspan="2" class="empty" data-i18n="gov.noSpend">no spend reported yet</td></tr></tbody>
           </table>
         </div>
 
         <div class="card affordance" data-cap="budget_alerts">
-          <div class="microlabel">budget alerts · recent fires</div>
-          <p class="hint">Webhook fires when a team's or a key's monthly budget
-            utilization crosses a configured threshold (<code>budget_alerts</code>,
+          <div class="microlabel" data-i18n="gov.alertsTitle">budget alerts · recent fires</div>
+          <p class="hint"><span data-i18n="gov.alertsHintPre">Webhook fires when a team's or a key's monthly budget
+            utilization crosses a configured threshold (</span><code>budget_alerts</code><span data-i18n="gov.alertsHintPost">,
             ADR-017) — the "key" column is blank for a team-level fire.
             Per-instance state — a multi-replica deployment may fire once per
-            replica. <span class="ko">팀 또는 키의 예산 사용률이 임계치를 넘으면
-            웹훅이 발화합니다("key" 열은 팀 단위 알림에서는 비어 있습니다).
-            인스턴스별 상태라 다중 레플리카에서는 레플리카당
-            중복 발화할 수 있습니다.</span></p>
+            replica.</span></p>
           <table class="data" id="alerts-table">
-            <thead><tr><th>time</th><th>team</th><th>key</th><th>threshold</th><th>ratio</th><th>delivered</th></tr></thead>
-            <tbody><tr><td colspan="6" class="empty">connect to load…</td></tr></tbody>
+            <thead><tr><th data-i18n="th.time">time</th><th data-i18n="th.team">team</th><th>key</th><th data-i18n="th.threshold">threshold</th><th data-i18n="th.ratio">ratio</th><th data-i18n="th.delivered">delivered</th></tr></thead>
+            <tbody><tr><td colspan="6" class="empty" data-i18n="gov.noAlerts">no alerts fired yet</td></tr></tbody>
           </table>
         </div>
 
         <div class="card">
-          <div class="microlabel">audit integrity</div>
-          <p class="hint">Verify the tamper-evident hash chain of each file
+          <div class="microlabel" data-i18n="gov.auditTitle">audit integrity</div>
+          <p class="hint" data-i18n="gov.auditHint">Verify the tamper-evident hash chain of each file
             sink, on demand.</p>
-          <button id="verify-audit" type="button">VERIFY CHAIN</button>
+          <button id="verify-audit" type="button" data-i18n="gov.verifyBtn">VERIFY CHAIN</button>
           <div id="verify-result"></div>
         </div>
       </section>
 
       <!-- ===== settings (initial: connection quickstart; Phase 0b adds toggles) ===== -->
       <section id="view-settings" class="view" hidden>
-        <p class="hint">Point a coding agent at this gateway with a virtual key.
-          Issue a key in <b>Virtual keys</b> and these snippets fill in with live values.
-          <span class="ko">키를 발급하면 아래 예시에 실제 값이 채워집니다.</span></p>
+        <p class="hint"><span data-i18n="settings.introPre">Point a coding agent at this gateway with a virtual key.
+          Issue a key in </span><b data-i18n="settings.virtualKeysWord">Virtual keys</b><span data-i18n="settings.introPost"> and these snippets fill in with live values.</span></p>
 
         <div class="card">
-          <div class="snippet-head"><span class="microlabel">claude code</span>
-            <button class="ghost copy-snippet" data-target="usage-claude">COPY</button></div>
+          <div class="snippet-head"><span class="microlabel" data-i18n="settings.claudeCodeTitle">claude code</span>
+            <button class="ghost copy-snippet" data-target="usage-claude" data-i18n="common.copy">COPY</button></div>
           <pre class="snippet"><code id="usage-claude">export ANTHROPIC_BASE_URL=&lt;this gateway&gt;
 export ANTHROPIC_API_KEY=&lt;issue a key first&gt;
 claude</code></pre>
         </div>
 
         <div class="card">
-          <div class="snippet-head"><span class="microlabel">curl · anthropic messages</span>
-            <button class="ghost copy-snippet" data-target="usage-curl">COPY</button></div>
+          <div class="snippet-head"><span class="microlabel" data-i18n="settings.curlTitle">curl · anthropic messages</span>
+            <button class="ghost copy-snippet" data-target="usage-curl" data-i18n="common.copy">COPY</button></div>
           <pre class="snippet"><code id="usage-curl">« issue a key to render a ready-to-run example »</code></pre>
         </div>
 
         <div class="card">
-          <div class="snippet-head"><span class="microlabel">openai-compatible clients · opencode</span>
-            <button class="ghost copy-snippet" data-target="usage-openai">COPY</button></div>
+          <div class="snippet-head"><span class="microlabel" data-i18n="settings.openaiTitle">openai-compatible clients · opencode</span>
+            <button class="ghost copy-snippet" data-target="usage-openai" data-i18n="common.copy">COPY</button></div>
           <pre class="snippet"><code id="usage-openai">base URL: &lt;this gateway&gt;/v1
 api key:  the same virtual key</code></pre>
         </div>
 
-        <p class="hint">routable models: <code id="usage-models" class="mono">issue a key to load…</code><br>
-          health <code>/healthz</code> · metrics <code>/metrics</code> · keys API <code>/admin/keys</code> (Bearer)</p>
+        <p class="hint"><span data-i18n="settings.routableModels">routable models: </span><code id="usage-models" class="mono">issue a key to load…</code><br>
+          <span data-i18n="settings.healthLabel">health </span><code>/healthz</code><span data-i18n="settings.metricsLabel"> · metrics </span><code>/metrics</code><span data-i18n="settings.keysApiLabel"> · keys API </span><code>/admin/keys</code><span data-i18n="settings.bearerLabel"> (Bearer)</span></p>
       </section>
     </main>
   </div>
 
+  <script src="i18n.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
