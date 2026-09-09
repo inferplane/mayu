@@ -99,6 +99,10 @@ read + write + Δ across 20+ requests), while the Anthropic wire requires the th
 disjoint — `usageWithCache` subtracts the cache counts back out for the
 `converseInclusiveInputUsage` allow-list (clamped at 0), or a client's context
 math runs at ~2x the real prompt and settle bills every cached token twice.
+The list is per FAMILY, not per vendor: `openai.gpt-6` (astra) already reports the
+three counts disjoint (probed live 2026-09-09: `inputTokens: 2` next to
+`cacheWriteInputTokens: 4008`, then `cacheReadInputTokens: 4008` on the re-send) and
+is deliberately NOT listed — adding it would clamp its real input to 0.
 
 ### 5. Per-model Converse/Mantle inference-param strip rules
 Some Bedrock models 400 (`ValidationException`) on inference params Claude Code
@@ -115,6 +119,7 @@ and their param contract belongs to the client.
 | Upstream id substring | Stripped |
 |---|---|
 | `openai.gpt-5.6` (luna/sol/terra; NOT gpt-oss, NOT Mantle-only gpt-5.4/5.5) | `temperature`, `topP`, `stopSequences` |
+| `openai.gpt-6` (astra; probed live 2026-09-09 ap-northeast-2) | `temperature`, `topP`, `stopSequences` |
 | `xai.` (grok-4.6) | `temperature`, `topP`, `stopSequences` |
 | `openai.gpt-oss` | `stopSequences` |
 | `deepseek.v` (v3.x only — r1 accepts all three) | `stopSequences` |
@@ -134,6 +139,7 @@ the floor (only ever MORE output, never less), logged once per model. Probed liv
 | Upstream id substring | maxTokens floor |
 |---|---|
 | `openai.gpt-5.6` | 16 |
+| `openai.gpt-6` (astra, live 2026-09-09) | 16 |
 | `xai.` | 16 |
 
 `mantleChatStripParams` (`providers/bedrock/mantle.go`), OpenAI-wire field names on
@@ -142,6 +148,10 @@ Mantle's chat-completions route:
 | Upstream id substring | Stripped |
 |---|---|
 | `openai.gpt-5.6` | `temperature`, `top_p`, `stop` |
+
+`openai.gpt-6` (astra) is absent here on purpose: it has been probed only on Converse,
+and the allow-list posture keeps an unprobed route's params intact (same asymmetry as
+grok-4.6, documented in `mantle.go`).
 
 Mantle chat additionally renames `max_tokens` → `max_completion_tokens` for every
 model on that route (the gpt-5.6 family rejects `max_tokens` outright; all probed

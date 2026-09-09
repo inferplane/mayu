@@ -558,6 +558,21 @@ func TestStreamConverseToolUse(t *testing.T) {
 // rate + cache rate) — the egress mirror of the OpenAI-ingress bug ADR-030
 // fixed in usageFromOAI.
 func TestUsageWithCacheInclusiveInputFamilies(t *testing.T) {
+	// gpt-6-astra is DISJOINT on the wire (probed live 2026-09-09: inputTokens 2
+	// alongside cacheWriteInputTokens 4008) — it must pass through untouched,
+	// or the subtraction would clamp its real input to 0.
+	t.Run("gpt-6-astra passes through disjoint", func(t *testing.T) {
+		u := usageWithCache("global.openai.gpt-6-astra", 2, 7, 0, 0, 0, 4008)
+		if u.InputTokens == nil || *u.InputTokens != 2 {
+			t.Fatalf("gpt-6-astra input must pass through as 2, got %+v", u.InputTokens)
+		}
+		if u.CacheReadInputTokens != nil && *u.CacheReadInputTokens != 0 {
+			t.Fatalf("gpt-6-astra cache read must be 0, got %d", *u.CacheReadInputTokens)
+		}
+		if u.CacheCreationInputTokens == nil || *u.CacheCreationInputTokens != 4008 {
+			t.Fatalf("gpt-6-astra cache write must be 4008, got %+v", u.CacheCreationInputTokens)
+		}
+	})
 	t.Run("gpt-5.6 flat write total", func(t *testing.T) {
 		// Live audit record 2026-08-31T04:11:53Z: in 50768, cr 40988, cw 9778.
 		u := usageWithCache("global.openai.gpt-5.6-sol", 50768, 210, 40988, 0, 0, 9778)
@@ -722,6 +737,9 @@ func TestStripUnsupportedInference(t *testing.T) {
 		{"global.openai.gpt-5.6-sol", all, []string{"maxTokens"}},
 		{"global.openai.gpt-5.6-luna", all, []string{"maxTokens"}},
 		{"global.openai.gpt-5.6-terra", all, []string{"maxTokens"}},
+		// gpt-6 (astra) — same contract, probed live 2026-09-09.
+		{"global.openai.gpt-6-astra", all, []string{"maxTokens"}},
+		{"openai.gpt-6-astra", all, []string{"maxTokens"}},
 		// …but gpt-5.4/5.5 (Mantle-only) and gpt-oss ACCEPT sampling params —
 		// neither "openai." nor "openai.gpt-5" is narrow enough.
 		{"openai.gpt-5.4", nil, []string{"maxTokens", "temperature", "topP", "stopSequences"}},
@@ -836,8 +854,9 @@ func TestFloorMaxTokens(t *testing.T) {
 		{"global.openai.gpt-5.6-sol", 16, 16},
 		{"global.openai.gpt-5.6-sol", 4096, 4096},
 		{"global.xai.grok-4.6", 1, 16},
-		{"openai.gpt-5.4", 1, 1}, // Mantle-served, accepts 1 — unlisted
-		{"zai.glm-5", 1, 1},      // accepts 1 — unlisted
+		{"global.openai.gpt-6-astra", 1, 16}, // "Expected a value >= 16, but got 8" (live 2026-09-09)
+		{"openai.gpt-5.4", 1, 1},             // Mantle-served, accepts 1 — unlisted
+		{"zai.glm-5", 1, 1},                  // accepts 1 — unlisted
 		{"anthropic.claude-opus-5", 1, 1},
 	}
 	for _, tc := range cases {
