@@ -130,6 +130,60 @@ If a future user need appears, the right seam is a `RequestFilter`-like
 the existing `Allows` + `SubstituteTier` + RBAC re-check — never a bypass of
 them.
 
+### 1.4b Client protocol coverage (goal #1 — one entry point for every coding agent)
+
+Different clients speak different wire protocols; the single-entry-point
+goal is only met for a client whose protocol has an ingress.
+
+```
+  client              native wire protocol                  ingress today                       status
+  ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Claude Code         Anthropic Messages + count_tokens     /v1/messages, /count_tokens          ✔ verified (primary target)
+  OpenCode            Anthropic  OR  OpenAI Chat            /v1/messages  OR  /v1/chat/completions ✔ both ingresses exist
+  Hermes Agent        OpenAI Chat Completions               /v1/chat/completions                 ✔ ingress exists, not verified against Hermes
+  Codex CLI           OpenAI Responses (default)            ── none ──                           ✘ gap
+                      OpenAI Chat  (wire_api = "chat")      /v1/chat/completions                 🔶 workaround, unverified (roadmap: 0 hits for "codex")
+  AWS SDK clients     Bedrock InvokeModel                   /model/{id}/invoke (ADR-024)         ✔
+```
+
+The core is already protocol-agnostic: every ingress builds the same
+`Principal`, calls the same `Governor`, `Router`, filters and audit, and the
+canonical schema (Anthropic superset, `Extra` preserved) is the pivot for
+cross-protocol egress. What is missing is one more ingress.
+
+**Gap: no `/v1/responses` ingress.** Codex's default `wire_api` is the
+Responses API, whose request shape (`input` items, `instructions`,
+`previous_response_id`) and event stream (`response.output_text.delta`,
+`response.function_call_arguments.delta`, …) differ from Chat Completions.
+Until an ingress exists, the documented path is `wire_api = "chat"` in
+`~/.codex/config.toml`, and that path itself needs a real fixture test
+(roadmap "Purpose alignment" row #1 is still 🔶 for exactly this reason).
+
+**Shape of the fix (ADR candidate: "Responses API ingress"):**
+
+- `internal/server/openaiapi/responses.go`: Responses request → canonical
+  (`input` items map onto `messages`; `instructions` onto `system`;
+  function tools onto `tools`); `previous_response_id` is **rejected** with a
+  clear 400 in v1 — the gateway is stateless per request and must not grow a
+  response store to honor it.
+- Egress: canonical → Anthropic / Bedrock / OpenAI Chat as today; verbatim
+  only when the upstream itself speaks Responses (an `openai_compatible`
+  provider flag), otherwise every Codex-default request is a convert path
+  and therefore cache-cold — surface it via the §1.3 header.
+- Streaming: a Responses event synthesizer next to
+  `internal/openai.ReadChatSSE`, driven by the canonical frame lifecycle
+  (message_start / content_block_* / message_delta / message_stop), so all
+  three upstreams produce one Responses stream shape.
+- RBAC re-check, `count_tokens`-style never-non-200 exemptions, and the
+  masked-team cross-protocol rejection (ADR-009) apply unchanged — the tests
+  in `internal/server/anthropicapi/*_rbac_*_test.go` are the template.
+
+**Same user, several clients.** Keys are issued to users, not clients: a
+user alternating Claude Code and Codex resolves to one `Principal`, one
+budget, one audit identity. The ingress kind is an audit attribute
+(`RequestRef`, appended field if added), never a policy subject — do not add
+a per-client rule kind.
+
 ### 1.5 Out of scope by design: endpoint picking (L7)
 
 For `openai_compatible` targets that are a self-hosted vLLM pool, picking
@@ -429,6 +483,7 @@ shape as `count_tokens_rbac_fallback_test.go`.
 | 2 | **ADR-044 prompt integrity**: policy prefix + tool_use gate + canary (§3.2–3.3) | — | the widest gap; the tool gate is the only real enforcement layer for agent traffic |
 | 3 | PII: deterministic placeholders + reversible pseudonymize + KR locale pack (§2.2) | — | needs 1; pure `plugins/piimask` work after that |
 | 4 | Provider pin + `x-inferplane-cache-domain` header (§1.2–1.3) | — | needs 1; closes the cold-cache visibility gap |
+| 4' | **Responses API ingress** for Codex default `wire_api` (§1.4b), preceded by a Codex `wire_api = "chat"` fixture test | — | independent of 1–4; directly closes roadmap Purpose row #1 (🔶 → ✔) |
 | — | Intent routing (§1.4), boundary marking / scanner (§3.4), NER (§2.2) | — | deferred with reasons above |
 
 Each ADR goes through the repo's multi-model design gate like ADR-009 and
