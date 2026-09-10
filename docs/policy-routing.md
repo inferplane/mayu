@@ -34,8 +34,12 @@ mayu serve --config examples/config.policy-routing.json
 Treat the one-time key output as a secret. Send an ordinary Anthropic Messages or
 OpenAI Chat Completions request for `premium-coder` (or its configured alias). The
 example's `tools` capability is illustrative; no vision/reasoning/structured-output
-support is declared. Native Bedrock requests require a compatible Bedrock provider
-and cannot use this example's OpenAI-compatible targets.
+support is declared. Native Bedrock InvokeModel/InvokeModelWithResponseStream
+requests with supported Anthropic-shaped text bodies can also route through these
+`openai_compatible` targets; the gateway translates requests and renders responses
+in the ingress format. This is subject to the existing cross-protocol limits:
+vision, reasoning, structured-output and uninspectable content cannot use that
+policy-selected path. Capability declarations do not override translator limits.
 
 ## Policy fields
 
@@ -118,6 +122,11 @@ RBAC/region permission, and compatible transport. Known translator losses overri
 capability declarations. OpenAI ingress cannot select direct Anthropic, native
 Bedrock requires a compatible path, and Converse/cross-protocol paths have further
 feature restrictions. This does not add Responses ingress or expand legacy masking.
+
+With a provider store enabled, the console's provider/model edit forms prefill and
+replace these declarations. Select `unknown`, blank the context window (or set 0),
+or uncheck capabilities to clear them deliberately. Ordinary model edits preserve
+existing aliases; NEW PROVIDER / NEW MODEL resets the draft for a new entry.
 
 ## Delivery, upgrade, and recovery
 
