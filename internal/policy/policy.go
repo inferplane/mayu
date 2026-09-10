@@ -19,6 +19,7 @@ package policy
 import (
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	v1alpha1 "github.com/inferplane/inferplane/api/v1alpha1"
@@ -102,6 +103,7 @@ type Rule struct {
 	Budget        *Budget
 	Routing       *Routing
 	ModelAccess   *ModelAccess
+	SensitiveData *SensitiveData
 	Rate          *Rate
 }
 
@@ -141,11 +143,12 @@ type Rate struct {
 	TPM       int64
 }
 
-// Routing is the internal form of a routing rule: exactly one of Affinity or
-// BudgetTiers is set (ADR-041 added the second half).
+// Routing is the internal form of a routing rule: exactly one of Affinity,
+// BudgetTiers, or Context is set.
 type Routing struct {
 	Affinity    *Affinity
 	BudgetTiers *BudgetTiers
+	Context     *Context
 }
 
 // Affinity is the internal form of the cache-affinity half of a routing
@@ -235,17 +238,23 @@ func FromV1Alpha1(doc *v1alpha1.GovernancePolicy) (*Policy, error) {
 			return nil, reject(wr.Name, fmt.Sprintf("unknown failurePolicy %q", wr.FailurePolicy))
 		}
 		kinds := 0
-		for _, set := range []bool{wr.Budget != nil, wr.Routing != nil, wr.ModelAccess != nil, wr.Rate != nil} {
+		for _, set := range []bool{wr.Budget != nil, wr.Routing != nil, wr.ModelAccess != nil, wr.Rate != nil, wr.SensitiveData != nil} {
 			if set {
 				kinds++
 			}
 		}
 		if kinds != 1 {
-			return nil, reject(wr.Name, "exactly one of budget, routing, modelAccess, or rate must be set")
+			return nil, reject(wr.Name, "exactly one of budget, routing, modelAccess, rate, or sensitiveData must be set")
 		}
 
 		r := Rule{Name: wr.Name, FailurePolicy: wr.FailurePolicy}
 		switch {
+		case wr.SensitiveData != nil:
+			sd, err := sensitiveDataFromV1Alpha1(wr, reject)
+			if err != nil {
+				return nil, err
+			}
+			r.SensitiveData = sd
 		case wr.Budget != nil:
 			b, err := budgetFromV1Alpha1(wr, reject)
 			if err != nil {
@@ -362,15 +371,28 @@ func budgetFromV1Alpha1(wr v1alpha1.Rule, reject func(rule, reason string) *Unsu
 	}, nil
 }
 
-// routingFromV1Alpha1 converts the routing rule's exactly-one-of-two halves.
+// routingFromV1Alpha1 converts the routing rule's exactly-one-of-three shapes.
 // doc is the whole document so BudgetTiers.budgetRef can be resolved against
 // a budget rule declared elsewhere in the same policy (ADR-041 D1).
 func routingFromV1Alpha1(wr v1alpha1.Rule, doc *v1alpha1.GovernancePolicy, reject func(rule, reason string) *UnsupportedError) (*Routing, error) {
 	wrt := wr.Routing
 	affinitySet := wrt.OnAffinityConflict != ""
 	tiersSet := wrt.BudgetTiers != nil
-	if affinitySet == tiersSet {
-		return nil, reject(wr.Name, "routing rule must set exactly one of onAffinityConflict or budgetTiers")
+	shapes := 0
+	for _, set := range []bool{affinitySet, tiersSet, wrt.Context != nil} {
+		if set {
+			shapes++
+		}
+	}
+	if shapes != 1 {
+		return nil, reject(wr.Name, "routing rule must set exactly one of onAffinityConflict, budgetTiers, or context")
+	}
+	if wrt.Context != nil {
+		c, err := contextFromV1Alpha1(wr, reject)
+		if err != nil {
+			return nil, err
+		}
+		return &Routing{Context: c}, nil
 	}
 	if affinitySet {
 		switch wrt.OnAffinityConflict {
@@ -436,4 +458,77 @@ func routingFromV1Alpha1(wr v1alpha1.Rule, doc *v1alpha1.GovernancePolicy, rejec
 	}
 
 	return &Routing{BudgetTiers: &BudgetTiers{BudgetRef: bt.BudgetRef, Tiers: tiers}}, nil
+}
+
+// SensitiveData is a validated privacy restriction. The slices are owned.
+type SensitiveData struct {
+	OnDetected      v1alpha1.SensitiveDataAction
+	OnUninspectable v1alpha1.SensitiveDataAction
+	InternalModels  []string
+}
+
+// Context is a validated optional model recommendation. Mode is never empty.
+type Context struct {
+	Mode                 v1alpha1.ContextMode
+	FromModels           []string
+	SimpleModel          string
+	ComplexModel         string
+	MaxSimpleInputTokens int64
+	ComplexKeywords      []string
+}
+
+func explicitModel(name string) bool {
+	return strings.TrimSpace(name) != "" && !strings.ContainsAny(name, "*?[]")
+}
+
+func sensitiveDataFromV1Alpha1(wr v1alpha1.Rule, reject func(string, string) *UnsupportedError) (*SensitiveData, error) {
+	sd := wr.SensitiveData
+	if wr.FailurePolicy != v1alpha1.FailClosed {
+		return nil, reject(wr.Name, "sensitiveData requires FailClosed")
+	}
+	for _, a := range []v1alpha1.SensitiveDataAction{sd.OnDetected, sd.OnUninspectable} {
+		if a != v1alpha1.InternalOnly && a != v1alpha1.Block {
+			return nil, reject(wr.Name, "sensitiveData actions must be InternalOnly or Block (both required)")
+		}
+	}
+	if (sd.OnDetected == v1alpha1.InternalOnly || sd.OnUninspectable == v1alpha1.InternalOnly) && len(sd.InternalModels) == 0 {
+		return nil, reject(wr.Name, "InternalOnly requires non-empty internalModels")
+	}
+	for _, m := range sd.InternalModels {
+		if !explicitModel(m) {
+			return nil, reject(wr.Name, "internalModels requires explicit non-empty model names without wildcards")
+		}
+	}
+	return &SensitiveData{OnDetected: sd.OnDetected, OnUninspectable: sd.OnUninspectable, InternalModels: append([]string(nil), sd.InternalModels...)}, nil
+}
+
+func contextFromV1Alpha1(wr v1alpha1.Rule, reject func(string, string) *UnsupportedError) (*Context, error) {
+	c := wr.Routing.Context
+	if wr.FailurePolicy != v1alpha1.FailOpen {
+		return nil, reject(wr.Name, "routing.context requires FailOpen")
+	}
+	mode := c.Mode
+	if mode == "" {
+		mode = v1alpha1.Shadow
+	}
+	if mode != v1alpha1.Shadow && mode != v1alpha1.Enforce {
+		return nil, reject(wr.Name, "routing.context.mode must be Shadow or Enforce")
+	}
+	if len(c.FromModels) == 0 || !explicitModel(c.SimpleModel) || !explicitModel(c.ComplexModel) {
+		return nil, reject(wr.Name, "routing.context requires fromModels and explicit simpleModel/complexModel")
+	}
+	for _, m := range c.FromModels {
+		if !explicitModel(m) {
+			return nil, reject(wr.Name, "routing.context.fromModels requires explicit non-empty model names")
+		}
+	}
+	if c.MaxSimpleInputTokens <= 0 {
+		return nil, reject(wr.Name, "routing.context.maxSimpleInputTokens must be positive")
+	}
+	for _, k := range c.ComplexKeywords {
+		if strings.TrimSpace(k) == "" {
+			return nil, reject(wr.Name, "routing.context.complexKeywords must not contain blank strings")
+		}
+	}
+	return &Context{Mode: mode, FromModels: append([]string(nil), c.FromModels...), SimpleModel: c.SimpleModel, ComplexModel: c.ComplexModel, MaxSimpleInputTokens: c.MaxSimpleInputTokens, ComplexKeywords: append([]string(nil), c.ComplexKeywords...)}, nil
 }

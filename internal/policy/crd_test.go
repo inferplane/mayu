@@ -61,3 +61,54 @@ func TestCRDManifestMatchesAPIVersion(t *testing.T) {
 		}
 	}
 }
+
+// Unknown CRD properties are pruned by Kubernetes. Every new wire field must
+// therefore have a structural schema, including required actions and mode enum.
+func TestRoutingPolicyCRDSchema(t *testing.T) {
+	data, err := os.ReadFile("../../deploy/crd/inferplane.dev_governancepolicies.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var crd map[string]any
+	if err := sigyaml.Unmarshal(data, &crd); err != nil {
+		t.Fatal(err)
+	}
+	at := func(m map[string]any, keys ...string) map[string]any {
+		t.Helper()
+		for _, k := range keys {
+			next, ok := m[k].(map[string]any)
+			if !ok {
+				t.Fatalf("schema missing %s", k)
+			}
+			m = next
+		}
+		return m
+	}
+	spec := at(crd, "spec")
+	version := spec["versions"].([]any)[0].(map[string]any)
+	rule := at(version, "schema", "openAPIV3Schema", "properties", "spec", "properties", "rules", "items", "properties")
+	sensitive := at(rule, "sensitiveData")
+	props := at(sensitive, "properties")
+	for _, field := range []string{"onDetected", "onUninspectable"} {
+		action := at(props, field)
+		enum := action["enum"].([]any)
+		if len(enum) != 2 || enum[0] != "InternalOnly" || enum[1] != "Block" {
+			t.Fatalf("unbounded action %s: %v", field, enum)
+		}
+	}
+	required := sensitive["required"].([]any)
+	if len(required) != 2 || required[0] != "onDetected" || required[1] != "onUninspectable" {
+		t.Fatalf("actions not required: %v", required)
+	}
+	c := at(rule, "routing", "properties", "context")
+	cp := at(c, "properties")
+	if mode := at(cp, "mode"); mode["default"] != "Shadow" {
+		t.Fatal("context default not Shadow")
+	}
+	for _, field := range []string{"fromModels", "simpleModel", "complexModel", "maxSimpleInputTokens", "complexKeywords"} {
+		at(cp, field)
+	}
+	if at(cp, "maxSimpleInputTokens")["minimum"] != float64(1) {
+		t.Fatal("nonpositive threshold allowed")
+	}
+}

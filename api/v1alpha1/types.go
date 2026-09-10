@@ -87,15 +87,16 @@ const (
 )
 
 // Rule is one governance rule. Exactly one of the kind-specific fields
-// (Budget, Routing, ModelAccess, Rate) is set. FailurePolicy is REQUIRED —
+// (Budget, Routing, ModelAccess, Rate, SensitiveData) is set. FailurePolicy is REQUIRED —
 // there is no default, because a defaulted failure mode is a silent one.
 type Rule struct {
-	Name          string           `json:"name"`
-	FailurePolicy FailurePolicy    `json:"failurePolicy"`
-	Budget        *BudgetRule      `json:"budget,omitempty"`
-	Routing       *RoutingRule     `json:"routing,omitempty"`
-	ModelAccess   *ModelAccessRule `json:"modelAccess,omitempty"`
-	Rate          *RateRule        `json:"rate,omitempty"`
+	Name          string             `json:"name"`
+	FailurePolicy FailurePolicy      `json:"failurePolicy"`
+	Budget        *BudgetRule        `json:"budget,omitempty"`
+	Routing       *RoutingRule       `json:"routing,omitempty"`
+	ModelAccess   *ModelAccessRule   `json:"modelAccess,omitempty"`
+	Rate          *RateRule          `json:"rate,omitempty"`
+	SensitiveData *SensitiveDataRule `json:"sensitiveData,omitempty"`
 }
 
 // BudgetPeriod is the calendar window a budget rule's limit applies to. It is
@@ -202,18 +203,21 @@ const (
 	PreferFallback ConflictPreference = "PreferFallback"
 )
 
-// RoutingRule is one of two mutually exclusive shapes, selected by which
+// RoutingRule is one of three mutually exclusive shapes, selected by which
 // field is set:
 //
 //   - OnAffinityConflict — cache-affinity routing (pins sessions/prefixes to
 //     keep server-side prompt caches warm). Rejected by every data plane
 //     build today (internal/policy checkEnforceable); parked behind the
 //     unimplemented internal/cache.VolatileStore.
+//
 //   - BudgetTiers — cost-driven model substitution keyed on budget
 //     utilization (ADR-041). Enforceable independently of the affinity half.
 //
+//   - Context — optional request-context model selection (Shadow by default).
+//
 // Exactly one must be set; internal/policy.FromV1Alpha1 rejects a rule that
-// sets both or neither.
+// sets multiple or none.
 type RoutingRule struct {
 	// OnAffinityConflict: what to do when fallback wants to move a session
 	// that cache affinity wants to keep pinned. Required when this half of
@@ -223,6 +227,8 @@ type RoutingRule struct {
 	// a cheaper target once a named budget rule's utilization crosses a
 	// threshold. Required when this half of the rule is used.
 	BudgetTiers *BudgetTiersRule `json:"budgetTiers,omitempty"`
+	// Context selects a model from locally inspected request complexity.
+	Context *ContextRule `json:"context,omitempty"`
 }
 
 // BudgetTiersRule maps budget-utilization thresholds of one named budget
@@ -251,4 +257,39 @@ type BudgetTier struct {
 	// may not appear as both a key and a value in one rule (no chains); the
 	// map must be non-empty with no empty key or value.
 	Substitute map[string]string `json:"substitute"`
+}
+
+// SensitiveDataAction is a destination restriction, never an advisory action.
+type SensitiveDataAction string
+
+const (
+	InternalOnly SensitiveDataAction = "InternalOnly"
+	Block        SensitiveDataAction = "Block"
+)
+
+// SensitiveDataRule restricts detected or uninspectable request content.
+// Both actions are required. InternalOnly requires explicit internalModels.
+type SensitiveDataRule struct {
+	OnDetected      SensitiveDataAction `json:"onDetected"`
+	OnUninspectable SensitiveDataAction `json:"onUninspectable"`
+	InternalModels  []string            `json:"internalModels,omitempty"`
+}
+
+// ContextMode selects observation or optional model substitution.
+type ContextMode string
+
+const (
+	Shadow  ContextMode = "Shadow"
+	Enforce ContextMode = "Enforce"
+)
+
+// ContextRule recommends one of two explicit models based on local inspection.
+// Omitted mode defaults to Shadow. Context always requires FailOpen.
+type ContextRule struct {
+	Mode                 ContextMode `json:"mode,omitempty"`
+	FromModels           []string    `json:"fromModels"`
+	SimpleModel          string      `json:"simpleModel"`
+	ComplexModel         string      `json:"complexModel"`
+	MaxSimpleInputTokens int64       `json:"maxSimpleInputTokens"`
+	ComplexKeywords      []string    `json:"complexKeywords,omitempty"`
 }

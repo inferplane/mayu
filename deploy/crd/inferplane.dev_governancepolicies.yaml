@@ -65,11 +65,15 @@ spec:
                     required: ["name", "failurePolicy"]
                     x-kubernetes-validations:
                       # Exactly one rule kind — mirrors internal/policy.
-                      - rule: "[has(self.budget), has(self.routing), has(self.modelAccess), has(self.rate)].filter(x, x).size() == 1"
-                        message: "exactly one of budget, routing, modelAccess, or rate must be set"
+                      - rule: "[has(self.budget), has(self.routing), has(self.modelAccess), has(self.rate), has(self.sensitiveData)].filter(x, x).size() == 1"
+                        message: "exactly one of budget, routing, modelAccess, rate, or sensitiveData must be set"
                       # A hard-cap budget rule must fail closed (ADR-032).
                       - rule: "!has(self.budget) || !(has(self.budget.hardCap) && self.budget.hardCap) || self.failurePolicy == 'FailClosed'"
                         message: "a hard-cap budget rule must be FailClosed"
+                      - rule: "!has(self.sensitiveData) || self.failurePolicy == 'FailClosed'"
+                        message: "sensitiveData requires FailClosed"
+                      - rule: "!has(self.routing) || !has(self.routing.context) || self.failurePolicy == 'FailOpen'"
+                        message: "routing.context requires FailOpen"
                     properties:
                       name:
                         type: string
@@ -112,14 +116,65 @@ spec:
                           period:
                             type: string
                             enum: ["CalendarDay", "CalendarMonth"]
+                      sensitiveData:
+                        type: object
+                        required: ["onDetected", "onUninspectable"]
+                        x-kubernetes-validations:
+                          - rule: "(self.onDetected != 'InternalOnly' && self.onUninspectable != 'InternalOnly') || (has(self.internalModels) && self.internalModels.size() > 0)"
+                            message: "InternalOnly requires non-empty internalModels"
+                        properties:
+                          onDetected:
+                            type: string
+                            enum: ["InternalOnly", "Block"]
+                          onUninspectable:
+                            type: string
+                            enum: ["InternalOnly", "Block"]
+                          internalModels:
+                            type: array
+                            items:
+                              type: string
+                              minLength: 1
+                              pattern: '^[^*?\[\]]*[^*?\[\]\s][^*?\[\]]*$'
                       routing:
                         type: object
                         x-kubernetes-validations:
-                          # Exactly one of the two routing halves (ADR-041
-                          # added budgetTiers alongside the affinity half).
-                          - rule: "[has(self.onAffinityConflict), has(self.budgetTiers)].filter(x, x).size() == 1"
-                            message: "routing rule must set exactly one of onAffinityConflict or budgetTiers"
+                          # Exactly one routing subtype; preserve affinity/budget semantics.
+                          - rule: "[has(self.onAffinityConflict), has(self.budgetTiers), has(self.context)].filter(x, x).size() == 1"
+                            message: "routing rule must set exactly one of onAffinityConflict, budgetTiers, or context"
                         properties:
+                          context:
+                            type: object
+                            required: ["fromModels", "simpleModel", "complexModel", "maxSimpleInputTokens"]
+                            properties:
+                              mode:
+                                type: string
+                                enum: ["Shadow", "Enforce"]
+                                default: "Shadow"
+                              fromModels:
+                                type: array
+                                minItems: 1
+                                items:
+                                  type: string
+                                  minLength: 1
+                                  pattern: '^[^*?\[\]]*[^*?\[\]\s][^*?\[\]]*$'
+                              simpleModel:
+                                type: string
+                                minLength: 1
+                                pattern: '^[^*?\[\]]*[^*?\[\]\s][^*?\[\]]*$'
+                              complexModel:
+                                type: string
+                                minLength: 1
+                                pattern: '^[^*?\[\]]*[^*?\[\]\s][^*?\[\]]*$'
+                              maxSimpleInputTokens:
+                                type: integer
+                                format: int64
+                                minimum: 1
+                              complexKeywords:
+                                type: array
+                                items:
+                                  type: string
+                                  minLength: 1
+                                  pattern: '\S'
                           onAffinityConflict:
                             type: string
                             enum: ["PreferAffinity", "PreferFallback"]
