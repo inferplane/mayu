@@ -14,6 +14,8 @@ import (
 	"github.com/inferplane/inferplane/internal/keystore"
 	"github.com/inferplane/inferplane/internal/live"
 	"github.com/inferplane/inferplane/internal/metrics"
+	"github.com/inferplane/inferplane/internal/policy"
+	"github.com/inferplane/inferplane/internal/sensitivity"
 	"github.com/inferplane/inferplane/providers"
 )
 
@@ -26,7 +28,9 @@ type Router struct {
 	policyGate func(p keystore.Principal, model string, canonical func(string) string) bool
 	// tierGate is an optional ADR-041 budget-tier substitution source (see
 	// SetTierGate). nil = no substitution.
-	tierGate func(p keystore.Principal) map[string]string
+	tierGate         func(p keystore.Principal) map[string]string
+	routingPolicies  func(team, user string) ([]*policy.Policy, error)
+	requestInspector sensitivity.Inspector
 }
 
 func New(holder *live.Holder) *Router {
@@ -123,6 +127,18 @@ func (r *Router) SetTierGate(gate func(p keystore.Principal) map[string]string) 
 	r.tierGate = gate
 }
 
+// SetRoutingPolicyLookup installs the routing policy snapshot lookup. nil
+// disables routing policies. Like SetPolicyGate, assignment is startup-only.
+func (r *Router) SetRoutingPolicyLookup(lookup func(team, user string) ([]*policy.Policy, error)) {
+	r.routingPolicies = lookup
+}
+
+// SetRequestInspector overrides local inspection. nil uses the stateless
+// sensitivity.NewInspector default. Assignment is startup-only.
+func (r *Router) SetRequestInspector(inspector sensitivity.Inspector) {
+	r.requestInspector = inspector
+}
+
 // SubstituteTier applies an active ADR-041 budget-tier substitution to an
 // already-canonicalized, already-routed model, or returns it unchanged.
 // Unlike ResolveModel (which only ever substitutes an UNROUTED model),
@@ -180,6 +196,9 @@ type ChainTarget struct {
 	// Region is the target provider's configured region label (D7, ADR-020),
 	// captured from the generation this was resolved on. Empty = unlabeled.
 	Region string
+	// DataBoundary is operator attestation captured from the same snapshot.
+	// Only "internal" satisfies an InternalOnly routing restriction.
+	DataBoundary string
 }
 
 // ResolveChain returns every configured target for a model in priority order,
@@ -212,7 +231,7 @@ func (r *Router) ResolveChain(model string) ([]ChainTarget, *live.State, error) 
 				continue // config drift: target points at unknown provider
 			}
 			id, _ := st.Identity(t.Provider)
-			ct := ChainTarget{Provider: p, ProviderName: t.Provider, Identity: id, Upstream: t.Model, Model: m, Region: st.Region(t.Provider)}
+			ct := ChainTarget{Provider: p, ProviderName: t.Provider, Identity: id, Upstream: t.Model, Model: m, Region: st.Region(t.Provider), DataBoundary: st.DataBoundary(t.Provider)}
 			all = append(all, ct)
 			if r.brk.Allow(id) {
 				allowed = append(allowed, ct)

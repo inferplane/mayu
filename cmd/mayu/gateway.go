@@ -551,11 +551,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 	// modelAccess rules narrow every ingress RBAC decision through the router's
 	// policy gate (key allow-list must pass AND the policy must allow); team-
 	// and user-subject rules both apply, user matched on the key's Owner.
-	if polStore != nil {
-		r.SetPolicyGate(func(p keystore.Principal, model string, canonical func(string) string) bool {
-			return polStore.ModelAllowed(p.Team, p.Owner, model, canonical)
-		})
-	}
+	wireRoutingPolicyGates(r, polStore)
 	// ADR-041 budget-tier substitution. Control-plane mode: tiers is
 	// populated by the syncer from resp.ActiveTiers (below), judged
 	// GLOBALLY by inferplaned. Standalone mode: no control plane to judge
@@ -1704,4 +1700,16 @@ func standaloneActiveTierSubstitutions(store *policy.Store, gov *governance.Gove
 	table := tier.NewTable()
 	table.Set(active)
 	return table.Get(team)
+}
+
+// wireRoutingPolicyGates shares the local/distributed store with both routing
+// gates. Keeping this assembly socket-free allows direct rejection-gate tests.
+func wireRoutingPolicyGates(r *router.Router, store *policy.Store) {
+	if store == nil {
+		return
+	}
+	r.SetPolicyGate(func(p keystore.Principal, model string, canonical func(string) string) bool {
+		return store.ModelAllowed(p.Team, p.Owner, model, canonical)
+	})
+	r.SetRoutingPolicyLookup(store.MatchingRoutingPolicies)
 }
