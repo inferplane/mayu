@@ -226,11 +226,31 @@ func (w *walker) text(text string, encodedDepth int) error {
 	}
 	// Ordinary prose can begin with a brace or quote. Only valid encoded JSON
 	// is recursively inspected; ambiguity, cancellation and bounds still fail.
-	_, err := w.decode([]byte(trimmed), encodedDepth+1)
+	// Stage visits and accounting in a copy: a malformed speculative document
+	// must not publish partially decoded categories, keywords or token counts.
+	probe := *w
+	var pending []string
+	probe.visit = func(text string) error {
+		pending = append(pending, text)
+		return nil
+	}
+	_, err := probe.decode([]byte(trimmed), encodedDepth+1)
 	if errors.Is(err, errMalformed) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	w.nodes, w.decoded, w.inputTokens = probe.nodes, probe.decoded, probe.inputTokens
+	for _, text := range pending {
+		if err := w.ctx.Err(); err != nil {
+			return err
+		}
+		if err := w.visit(text); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type contextReader struct {

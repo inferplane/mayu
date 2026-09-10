@@ -14,7 +14,7 @@ func (r *Result) inspectShape(protocol string, root any) error {
 		r.Complete = false
 		return nil
 	}
-	r.options(body)
+	r.options(protocol, body)
 	if system, exists := body["system"]; exists {
 		r.content(protocol, system)
 	}
@@ -29,7 +29,7 @@ func (r *Result) inspectShape(protocol string, root any) error {
 			r.Complete = false
 			continue
 		}
-		r.options(message)
+		r.options(protocol, message)
 		if err := r.messageTools(protocol, message); err != nil {
 			return err
 		}
@@ -79,6 +79,8 @@ func (r *Result) messageTools(protocol string, message map[string]any) error {
 				r.Complete = false
 				continue
 			}
+			r.onlyFields(call, "id", "type", "function")
+			r.optionalText(call, "id")
 			if err := r.functionCall(call["function"]); err != nil {
 				return err
 			}
@@ -99,6 +101,7 @@ func (r *Result) functionCall(value any) error {
 		r.Complete = false
 		return nil
 	}
+	r.onlyFields(function, "name", "arguments")
 	if _, ok := function["name"].(string); !ok {
 		r.Complete = false
 	}
@@ -129,7 +132,7 @@ func present(value any) bool {
 	}
 }
 
-func (r *Result) options(object map[string]any) {
+func (r *Result) options(protocol string, object map[string]any) {
 	for _, key := range []string{"tools", "functions", "tool_calls", "function_call", "tool_choice", "toolConfig"} {
 		if present(object[key]) {
 			r.HasTools = true
@@ -138,6 +141,19 @@ func (r *Result) options(object map[string]any) {
 	for _, key := range []string{"reasoning", "reasoning_content", "reasoning_effort"} {
 		if present(object[key]) {
 			r.HasReasoning = true
+		}
+	}
+	if reasoning, exists := object["reasoning"]; exists {
+		if protocol != "openai" {
+			r.Complete = false
+		}
+		switch value := reasoning.(type) {
+		case string: // Inspectable reasoning text was scanned by walker.
+		case map[string]any:
+			r.onlyFields(value, "effort", "summary")
+			r.optionalText(value, "effort", "summary")
+		default:
+			r.Complete = false
 		}
 	}
 	if present(object["reasoning_details"]) {
@@ -151,8 +167,11 @@ func (r *Result) options(object map[string]any) {
 		if !ok {
 			r.Complete = false
 			r.HasReasoning = true
-		} else if cfg["type"] != "disabled" {
-			r.HasReasoning = true
+		} else {
+			r.onlyFields(cfg, "type", "budget_tokens")
+			if cfg["type"] != "disabled" {
+				r.HasReasoning = true
+			}
 		}
 	}
 	for _, key := range []string{"response_format", "output_format", "structured_output"} {
@@ -200,6 +219,24 @@ func (r *Result) requireText(block map[string]any, key string) {
 	}
 }
 
+// Use these only at protocol-owned positions. Application payloads such as tool
+// inputs, decoded function arguments and tool-result JSON keep arbitrary fields.
+func (r *Result) onlyFields(object map[string]any, allowed ...string) {
+	for key := range object {
+		if !slices.Contains(allowed, key) {
+			r.Complete = false
+		}
+	}
+}
+
+func (r *Result) optionalText(object map[string]any, keys ...string) {
+	for _, key := range keys {
+		if _, exists := object[key]; exists {
+			r.requireText(object, key)
+		}
+	}
+}
+
 func (r *Result) block(protocol string, block map[string]any) {
 	kind, hasType := block["type"].(string)
 	if !hasType && protocol == "bedrock" {
@@ -244,6 +281,9 @@ func (r *Result) block(protocol string, block map[string]any) {
 		r.HasReasoning = true
 		r.requireText(block, "text")
 		fields = []string{"text"}
+		if protocol != "openai" {
+			r.Complete = false
+		}
 		if _, exists := block["encrypted_content"]; exists {
 			r.Complete = false
 		}
@@ -289,8 +329,12 @@ func (r *Result) bedrockBlock(block map[string]any) {
 			object, ok := value.(map[string]any)
 			if !ok {
 				r.Complete = false
-			} else if _, ok := object["input"].(map[string]any); !ok {
-				r.Complete = false
+			} else {
+				r.onlyFields(object, "toolUseId", "name", "input")
+				r.optionalText(object, "toolUseId", "name")
+				if _, ok := object["input"].(map[string]any); !ok {
+					r.Complete = false
+				}
 			}
 		case "toolResult":
 			r.HasTools = true
@@ -299,6 +343,8 @@ func (r *Result) bedrockBlock(block map[string]any) {
 				r.Complete = false
 				continue
 			}
+			r.onlyFields(object, "toolUseId", "content", "status")
+			r.optionalText(object, "toolUseId", "status")
 			content, ok := object["content"].([]any)
 			if !ok {
 				r.Complete = false
@@ -325,7 +371,9 @@ func (r *Result) bedrockBlock(block map[string]any) {
 			if !ok || len(object) != 1 {
 				r.Complete = false
 			} else {
+				r.onlyFields(text, "text", "signature")
 				r.requireText(text, "text")
+				r.optionalText(text, "signature")
 			}
 		default:
 			r.Complete = false

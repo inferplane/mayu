@@ -15,7 +15,6 @@ var detectors = []struct {
 	valid    func(string) bool
 }{
 	{"email", regexp.MustCompile("(?i)[a-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?){1,8}"), nil},
-	{"credit_card", regexp.MustCompile(`(?:[0-9][ -]?){12,18}[0-9]`), validCard},
 	{"ssn", regexp.MustCompile(`[0-9]{3}-[0-9]{2}-[0-9]{4}`), validSSN},
 	{"ipv4", regexp.MustCompile(`[0-9]{1,3}(?:\.[0-9]{1,3}){3}`), func(s string) bool {
 		addr, err := netip.ParseAddr(s)
@@ -42,6 +41,9 @@ func detect(ctx context.Context, text string, found map[string]bool) error {
 			return err
 		}
 		end := min(start+chunk+overlap, len(text))
+		if !found["credit_card"] && containsCard(text, start, end) {
+			found["credit_card"] = true
+		}
 		for _, detector := range detectors {
 			if found[detector.category] {
 				continue
@@ -62,6 +64,32 @@ func detect(ctx context.Context, text string, found map[string]bool) error {
 		}
 	}
 	return nil
+}
+
+func containsCard(text string, start, end int) bool {
+	// Try every digit-boundary start and every supported length. A rejected
+	// candidate must not swallow a later card or part of an adjacent card.
+	// At most 19 digits (37 bytes including separators) are examined per start.
+	for left := start; left < end; left++ {
+		if text[left] < '0' || text[left] > '9' ||
+			(left > 0 && text[left-1] >= '0' && text[left-1] <= '9') {
+			continue
+		}
+		right := left
+		for count := 1; count <= 19 && right < end; count++ {
+			if text[right] < '0' || text[right] > '9' {
+				break
+			}
+			right++
+			if count >= 13 && digitBoundary(text, left, right) && validCard(text[left:right]) {
+				return true
+			}
+			if right < end && (text[right] == ' ' || text[right] == '-') {
+				right++
+			}
+		}
+	}
+	return false
 }
 
 func digitBoundary(text string, left, right int) bool {

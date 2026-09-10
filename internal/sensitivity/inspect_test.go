@@ -124,6 +124,50 @@ func TestInspectContextSignals(t *testing.T) {
 	}
 }
 
+func TestInspectProtocolObjectMembers(t *testing.T) {
+	tests := []struct {
+		name, protocol, raw string
+		incomplete          bool
+		tools, reasoning    bool
+		categories          []string
+	}{
+		{"openai call opaque member", "openai", `{"messages":[{"role":"assistant","content":null,"tool_calls":[{"type":"function","function":{"name":"f","arguments":"{}"},"encrypted_content":"YWJj"}]}]}`, true, true, false, nil},
+		{"openai function opaque member", "openai", `{"messages":[{"role":"assistant","content":null,"tool_calls":[{"type":"function","function":{"name":"f","arguments":"{}","encrypted_content":"YWJj"}}]}]}`, true, true, false, nil},
+		{"openai legacy function opaque member", "openai", `{"messages":[{"role":"assistant","content":null,"function_call":{"name":"f","arguments":"{}","encrypted_content":"YWJj"}}]}`, true, true, false, nil},
+		{"openai call unknown member", "openai", `{"messages":[{"role":"assistant","content":null,"tool_calls":[{"type":"function","function":{"name":"f","arguments":"{}"},"future":{"data":"YWJj"}}]}]}`, true, true, false, nil},
+		{"openai call malformed id", "openai", `{"messages":[{"role":"assistant","content":null,"tool_calls":[{"id":{"encrypted_content":"YWJj"},"type":"function","function":{"name":"f","arguments":"{}"}}]}]}`, true, true, false, nil},
+		{"openai application arguments", "openai", `{"messages":[{"role":"assistant","content":null,"tool_calls":[{"id":"t","type":"function","function":{"name":"f","arguments":"{\"type\":\"image\",\"encrypted_content\":\"alice@example.test\"}"}}]}]}`, false, true, false, []string{"email"}},
+		{"bedrock tool use opaque member", "bedrock", `{"messages":[{"role":"assistant","content":[{"toolUse":{"toolUseId":"t","name":"f","input":{},"encrypted_content":"YWJj"}}]}]}`, true, true, false, nil},
+		{"bedrock tool result opaque member", "bedrock", `{"messages":[{"role":"user","content":[{"toolResult":{"toolUseId":"t","content":[{"json":{}}],"encrypted_content":"YWJj"}}]}]}`, true, true, false, nil},
+		{"bedrock application input", "bedrock", `{"messages":[{"role":"assistant","content":[{"toolUse":{"toolUseId":"t","name":"f","input":{"type":"image","encrypted_content":"alice@example.test"}}}]}]}`, false, true, false, []string{"email"}},
+		{"bedrock application result", "bedrock", `{"messages":[{"role":"user","content":[{"toolResult":{"toolUseId":"t","content":[{"json":{"type":"document","redactedContent":"alice@example.test"}}]}}]}]}`, false, true, false, []string{"email"}},
+		{"bedrock reasoning text opaque member", "bedrock", `{"messages":[{"role":"assistant","content":[{"reasoningContent":{"reasoningText":{"text":"safe","redactedContent":"YWJj"}}}]}]}`, true, false, true, nil},
+		{"bedrock reasoning malformed signature", "bedrock", `{"messages":[{"role":"assistant","content":[{"reasoningContent":{"reasoningText":{"text":"safe","signature":{"redactedContent":"YWJj"}}}}]}]}`, true, false, true, nil},
+		{"bedrock reasoning text control", "bedrock", `{"messages":[{"role":"assistant","content":[{"reasoningContent":{"reasoningText":{"text":"safe","signature":"sig"}}}]}]}`, false, false, true, nil},
+		{"openai reasoning option opaque member", "openai", `{"reasoning":{"effort":"high","encrypted_content":"YWJj"},"messages":[{"role":"user","content":"safe"}]}`, true, false, true, nil},
+		{"openai reasoning option malformed effort", "openai", `{"reasoning":{"effort":{"encrypted_content":"YWJj"}},"messages":[{"role":"user","content":"safe"}]}`, true, false, true, nil},
+		{"openai reasoning option control", "openai", `{"reasoning":{"effort":"high","summary":"auto"},"messages":[{"role":"user","content":"safe"}]}`, false, false, true, nil},
+		{"openai reasoning text control", "openai", `{"messages":[{"role":"assistant","content":[{"type":"reasoning","text":"safe"}]}]}`, false, false, true, nil},
+		{"anthropic wrong reasoning block", "anthropic", `{"messages":[{"role":"assistant","content":[{"type":"reasoning","text":"safe"}]}]}`, true, false, true, nil},
+		{"bedrock wrong reasoning block", "bedrock", `{"messages":[{"role":"assistant","content":[{"type":"reasoning","text":"safe"}]}]}`, true, false, true, nil},
+		{"anthropic thinking opaque option", "anthropic", `{"thinking":{"type":"enabled","budget_tokens":1024,"encrypted_content":"YWJj"},"messages":[{"role":"user","content":"safe"}]}`, true, false, true, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := []byte(tt.raw)
+			before := bytes.Clone(raw)
+			got, err := NewInspector().Inspect(context.Background(), tt.protocol, raw)
+			if err != nil || got.Complete == tt.incomplete || got.HasTools != tt.tools ||
+				got.HasReasoning != tt.reasoning || !slices.Equal(got.Categories, tt.categories) {
+				t.Fatalf("inspection = %+v, %v", got, err)
+			}
+			if !bytes.Equal(raw, before) {
+				t.Fatal("inspection mutated request")
+			}
+		})
+	}
+}
+
 func TestInspectOutputBudget(t *testing.T) {
 	tests := []struct {
 		name, protocol, field string
