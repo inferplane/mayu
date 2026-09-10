@@ -188,6 +188,7 @@ type Lease struct {
 // the design fixes:
 //
 //   - the subject must select a team and/or a user;
+//   - spec.rules must contain at least one rule, matching the CRD;
 //   - failurePolicy is required per rule — no silent defaults;
 //   - a hard-cap budget rule must be FailClosed (soft budgets fail open);
 //   - a budget rule's period is CalendarDay or CalendarMonth (empty defaults to
@@ -211,6 +212,9 @@ func FromV1Alpha1(doc *v1alpha1.GovernancePolicy) (*Policy, error) {
 	}
 	if doc.Spec.Subject.Team == "" && doc.Spec.Subject.User == "" {
 		return nil, reject("", "spec.subject must select a team and/or a user")
+	}
+	if len(doc.Spec.Rules) == 0 {
+		return nil, reject("", "spec.rules must contain at least one rule")
 	}
 
 	p := &Policy{

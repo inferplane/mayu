@@ -338,3 +338,69 @@ func TestRoutingPolicyScopedUserAndConcurrentCopies(t *testing.T) {
 		t.Fatal("snapshot leaked mutable copies")
 	}
 }
+
+// Empty rules must be rejected on every delivery channel, matching CRD minItems.
+// Otherwise a schema-invalid replacement can remove active privacy or clear its
+// retained rejection gate without a valid policy generation.
+func TestRoutingPolicyRejectsEmptyRules(t *testing.T) {
+	for _, form := range []struct{ name, member string }{
+		{"omitted", ""}, {"null", `,"rules":null`}, {"empty", `,"rules":[]`},
+	} {
+		t.Run(form.name, func(t *testing.T) {
+			var empty v1alpha1.GovernancePolicy
+			raw := `{"apiVersion":"inferplane.dev/v1alpha1","kind":"GovernancePolicy","metadata":{"name":"routing","generation":3},"spec":{"subject":{"team":"eng"}` + form.member + `}}`
+			if err := json.Unmarshal([]byte(raw), &empty); err != nil {
+				t.Fatal(err)
+			}
+			p, err := FromV1Alpha1(&empty)
+			var unsupported *UnsupportedError
+			if p != nil || !errors.As(err, &unsupported) {
+				t.Errorf("empty rules converted: policy=%+v err=%v", p, err)
+			}
+
+			for _, priorRejected := range []bool{false, true} {
+				name := "accepted-privacy"
+				if priorRejected {
+					name = "rejected-privacy"
+				}
+				t.Run(name, func(t *testing.T) {
+					s := NewEmptyStore()
+					valid := routingDoc(t, privacyRules)
+					if rejections := s.ApplyWire([]v1alpha1.GovernancePolicy{valid}); len(rejections) != 0 {
+						t.Fatal(rejections)
+					}
+					if ps, err := s.MatchingRoutingPolicies("eng", "u"); err != nil || len(ps) != 1 {
+						t.Fatalf("valid privacy missing: %v %v", ps, err)
+					}
+					if priorRejected {
+						bad := routingDoc(t, privacyRules)
+						bad.Metadata.Generation = 2
+						bad.Spec.Rules[0].FailurePolicy = v1alpha1.FailOpen
+						if rejections := s.ApplyWire([]v1alpha1.GovernancePolicy{bad}); len(rejections) != 1 {
+							t.Fatal(rejections)
+						}
+						if _, err := s.MatchingRoutingPolicies("eng", "u"); !errors.Is(err, ErrSensitivePolicyRejected) {
+							t.Fatalf("bad privacy not gated: %v", err)
+						}
+					}
+					for delivery := 1; delivery <= 2; delivery++ {
+						if rejections := s.ApplyWire([]v1alpha1.GovernancePolicy{empty}); len(rejections) != 1 {
+							t.Errorf("empty delivery %d accepted: %v", delivery, rejections)
+						}
+						if ps, err := s.MatchingRoutingPolicies("eng", "u"); !errors.Is(err, ErrSensitivePolicyRejected) {
+							t.Errorf("empty delivery %d removed privacy gate: policies=%v err=%v", delivery, ps, err)
+						}
+					}
+					valid.Metadata.Generation = 4
+					if rejections := s.ApplyWire([]v1alpha1.GovernancePolicy{valid}); len(rejections) != 0 {
+						t.Fatal(rejections)
+					}
+					ps, err := s.MatchingRoutingPolicies("eng", "u")
+					if err != nil || len(ps) != 1 || ps[0].Generation != 4 || len(ps[0].Rules) != 1 || ps[0].Rules[0].SensitiveData == nil {
+						t.Fatalf("valid nonempty recovery failed: %v %v", ps, err)
+					}
+				})
+			}
+		})
+	}
+}
