@@ -5,9 +5,10 @@
 **Verification status (2026-09-10):** Tasks 1–4 are independently approved per
 `.superpowers/sdd/2026-09-09-policy-aware-routing/progress.md`: Task 1 through
 483578d, Task 2 through 6cb5223, Task 3 through 4afb7bd, Task 4 through 3c4a219.
-Checked steps below reflect those implementation/review records. Final Task 5
-release gates require fresh controller logs; earlier full-suite passes do not
-establish the final tree's gate status.
+Task 5 implementation and all mandatory release gates are complete at `de988d0`,
+verified from the controller's 2026-09-10 final-gate record and race/harness logs.
+Checked steps below reflect that evidence and the prior task records.
+**Whole-branch review remains pending; this status does not approve it.**
 
 **Goal:** Implement local sensitivity-aware destination restrictions and observable,
 opt-in context routing for coding-agent requests.
@@ -238,13 +239,13 @@ docs/enterprise-strategy.md and affected reference docs. Add acceptance tests in
 **Consumes:** all prior implemented interfaces and reports.
 **Produces:** reviewable working release, documented limits and complete checks.
 
-- [ ] Add any missing end-to-end acceptance cases from the spec using fake
+- [x] Add any missing end-to-end acceptance cases from the spec using fake
   providers: real policy load/assembly, metadata preserved after DB reload,
   fail-closed rejected privacy generation and recovery, budget substitution
   followed by privacy restriction, governance denial before provider.
   Demonstrate red for any acceptance gap, implement the smallest fix and retest.
-- [ ] Wire the existing `Store.SetRoutedAndPriced` validator in the actual mayu
-  assembly (currently absent, confirmed in Task3 report). Put topology-check
+- [x] Wire the existing `Store.SetRoutedAndPriced` validator in the actual mayu
+  assembly (absent at the Task 3 handoff). Put topology-check
   logic in an internal package; local policy must be validated before serving
   and control-plane policies on ApplyWire. Add real-assembly rejection tests for
   unrouted/unpriced privacy and context targets. Keep runtime candidate checks.
@@ -266,7 +267,7 @@ docs/enterprise-strategy.md and affected reference docs. Add acceptance tests in
   use its `check_ai_context.py --emit-marker` and validator. Preserve handwritten
   files; retain the Kiro bridge if already present. This is local documentation
   synchronization and does not dispatch external AI panels.
-- [ ] Run ALL mandatory build/race/vet/gofmt/harness/diff gates from the spec,
+- [x] Run ALL mandatory build/race/vet/gofmt/harness/diff gates from the spec,
   capture output in the task report, DCO commit, and prepare final review.
 
 ## Acceptance record
@@ -275,3 +276,26 @@ Worker reports and review packages live in the plan-specific ignored SDD workspa
 The controller records completed tasks, exact commits, decisions and findings in
 its progress ledger. Do not report cost savings or production readiness from unit
 test success.
+
+### Final controller gates at de988d0 (2026-09-10)
+
+Every command exited 0. Evidence is in the plan-specific SDD workspace:
+`final-gates-de988d0.md`, `final-race-de988d0.log`, and
+`final-harness-de988d0.log`.
+
+| Gate | Verified result |
+|---|---|
+| Static builds, `CGO_ENABLED=0`, mayu and inferplaned | PASS |
+| `go test ./... -race` | PASS, including listener-dependent assembly and both alert E2Es |
+| `go vet ./...` | PASS, no output |
+| `gofmt -l .` | Empty output |
+| `git diff --check 401dd20..HEAD` | PASS |
+| `bash tests/run-all.sh` | 67/67 PASS, 0 failed, 0 skipped |
+| Standalone context validator | Synced, within size cap, no secrets |
+
+Go checks used `GOCACHE=/tmp/inferplane-go-build GOPROXY=off`; static builds
+used the explicit worktree `GIT_DIR` and `GIT_WORK_TREE`. Implementation and fix
+commits `2aab86b` and `de988d0` carry DCO sign-off. This completion update changes
+only documentation and records the supplied results; it does not rerun tests.
+
+- [ ] Complete final whole-branch review (controller-owned; pending).
