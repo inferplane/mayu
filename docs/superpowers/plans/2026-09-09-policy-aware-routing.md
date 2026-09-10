@@ -277,11 +277,11 @@ The controller records completed tasks, exact commits, decisions and findings in
 its progress ledger. Do not report cost savings or production readiness from unit
 test success.
 
-### Final controller gates at de988d0 (2026-09-10)
+### Final controller gates at 128e23b (2026-09-10)
 
 Every command exited 0. Evidence is in the plan-specific SDD workspace:
-`final-gates-de988d0.md`, `final-race-de988d0.log`, and
-`final-harness-de988d0.log`.
+`final-gates-128e23b.md`, `final-race-128e23b.log`, and
+`final-harness-128e23b.log`.
 
 | Gate | Verified result |
 |---|---|
@@ -292,10 +292,20 @@ Every command exited 0. Evidence is in the plan-specific SDD workspace:
 | `git diff --check 401dd20..HEAD` | PASS |
 | `bash tests/run-all.sh` | 67/67 PASS, 0 failed, 0 skipped |
 | Standalone context validator | Synced, within size cap, no secrets |
+| Console JavaScript syntax and Node-backed payload regressions | PASS |
+| Browser edit/save/readback/routing checks | 29/29 PASS; private calls 6, sensitive public calls 0 |
 
 Go checks used `GOCACHE=/tmp/inferplane-go-build GOPROXY=off`; static builds
-used the explicit worktree `GIT_DIR` and `GIT_WORK_TREE`. Implementation and fix
-commits `2aab86b` and `de988d0` carry DCO sign-off. This completion update changes
-only documentation and records the supplied results; it does not rerun tests.
+used the explicit worktree `GIT_DIR` and `GIT_WORK_TREE`. All implementation and
+fix commits carry DCO sign-off. The final console fix preserves boundary,
+context, capabilities and aliases across real replacement writes, including
+deliberate clear/restore/reset. Browser proof used installed Playwright with
+local fake upstreams and a real gateway/SQLite store. Desktop behavior was
+verified; the console's existing mobile horizontal overflow remains outside
+this change and is not claimed fixed.
 
-- [ ] Complete final whole-branch review (controller-owned; pending).
+- [x] Complete final whole-branch review. The independent review covered
+  `401dd20..0eb1b64`; its console-preservation and Bedrock-guide findings were
+  resolved in `09e18f3`/`128e23b`. The independent scoped re-review approved the
+  fix wave with no remaining findings. This completion update changes only
+  documentation and records verified results; it does not change runtime code.
