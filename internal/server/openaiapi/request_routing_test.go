@@ -38,21 +38,23 @@ func TestChatNoNewPolicyPassthrough(t *testing.T) {
 	}
 }
 
-func TestChatContextOnlyOriginalTransportAndRetries(t *testing.T) {
+func TestChatPassiveContextPreservesLegacyRetries(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		for _, fail := range []bool{false, true} {
-			for _, mode := range []v1alpha1.ContextMode{v1alpha1.Shadow, v1alpha1.Enforce} {
+			for _, mode := range []v1alpha1.ContextMode{"", v1alpha1.Shadow, v1alpha1.Enforce} {
 				t.Run(string(mode)+map[bool]string{false: "/complete", true: "/stream"}[stream]+map[bool]string{false: "/original", true: "/retry"}[fail], func(t *testing.T) {
 					original := &legacyAnthropicSpy{}
 					original.Fail = fail
-					unsafe := &legacyAnthropicSpy{}
-					safe := &routingtest.Spy{}
-					holder := holderFor(map[string]providers.Provider{"original": original, "unsafe": unsafe, "safe": safe},
-						map[string]config.ModelConfig{"m": {Targets: []config.Target{{Provider: "original", Model: "up"}, {Provider: "unsafe", Model: "up"}, {Provider: "safe", Model: "up"}}}})
+					retry := &legacyAnthropicSpy{}
+					tail := &routingtest.Spy{}
+					holder := holderFor(map[string]providers.Provider{"original": original, "retry": retry, "tail": tail},
+						map[string]config.ModelConfig{"m": {Targets: []config.Target{{Provider: "original", Model: "up"}, {Provider: "retry", Model: "up"}, {Provider: "tail", Model: "up"}}}})
 					r := router.New(holder)
-					p := routingtest.Context(mode)
-					p.Rules[0].Routing.Context.FromModels = []string{"m"} // economy is unavailable
-					r.SetRoutingPolicyLookup(func(string, string) ([]*policy.Policy, error) { return []*policy.Policy{p}, nil })
+					if mode != "" {
+						p := routingtest.Context(mode)
+						p.Rules[0].Routing.Context.FromModels = []string{"m"} // economy is unavailable
+						r.SetRoutingPolicyLookup(func(string, string) ([]*policy.Policy, error) { return []*policy.Policy{p}, nil })
+					}
 					raw := strings.Replace(routingtest.Body("openai", "clean", stream), `"premium"`, `"m"`, 1)
 					rec := httptest.NewRecorder()
 					NewChatHandler(r).ServeHTTP(rec, routingtest.Request("/v1/chat/completions", raw))
@@ -60,8 +62,11 @@ func TestChatContextOnlyOriginalTransportAndRetries(t *testing.T) {
 					if fail {
 						retries = 1
 					}
-					if rec.Code != 200 || len(original.Calls) != 1 || len(unsafe.Calls) != 0 || len(safe.Calls) != retries || original.Calls[0].Body != raw {
-						t.Fatalf("optional context broke original or allowed unsafe retry: status=%d calls=%d/%d/%d", rec.Code, len(original.Calls), len(unsafe.Calls), len(safe.Calls))
+					if rec.Code != 200 || len(original.Calls) != 1 || len(retry.Calls) != retries || len(tail.Calls) != 0 || original.Calls[0].Body != raw {
+						t.Fatalf("passive context changed legacy order/retry: status=%d calls=%d/%d/%d", rec.Code, len(original.Calls), len(retry.Calls), len(tail.Calls))
+					}
+					if fail && retry.Calls[0].Body != raw {
+						t.Fatal("legacy retry body changed")
 					}
 				})
 			}

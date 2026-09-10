@@ -38,6 +38,9 @@ type RequestRoutingInput struct {
 
 // RequestRoutingResult owns its chain and decision slices. State is exactly the
 // supplied immutable generation: use it for attempts, context checks and pricing.
+// Without privacy or an applied context selection, Model retains the input's
+// preflight/request-model meaning, even if region filtering promoted a fallback.
+// Decision.SelectedModel names the first planned target; attempts use ct.Model.
 // On error Model/Chain/Decision.SelectedModel are empty; Decision describes denial.
 type RequestRoutingResult struct {
 	Model    string
@@ -115,7 +118,7 @@ func (r *Router) RouteRequest(ctx context.Context, in RequestRoutingInput) (Requ
 	if requested == "" {
 		requested = in.Model
 	}
-	out := RequestRoutingResult{State: in.State, Decision: RoutingDecision{RequestedModel: requested, Reason: "unchanged", Inspection: "not_inspected"}}
+	out := RequestRoutingResult{Model: in.Model, State: in.State, Decision: RoutingDecision{RequestedModel: requested, Reason: "unchanged", Inspection: "not_inspected"}}
 	// Lookup errors must be checked even for count-only/otherwise ineligible
 	// requests. Never expose arbitrary dependency error text in a routing error.
 	var docs []*policy.Policy
@@ -136,37 +139,29 @@ func (r *Router) RouteRequest(ctx context.Context, in RequestRoutingInput) (Requ
 	st := in.State
 	in.Model = st.Canonical(in.Model)
 	rules := requestRules(docs, st, in.Model)
+	hasPrivacy := false
 	for _, rule := range rules {
 		out.Decision.Policies = append(out.Decision.Policies, rule.ref)
+		hasPrivacy = hasPrivacy || rule.sensitive != nil
 	}
 	if !r.allowsInState(in.Principal, st.Canonical(requested), st) || !r.allowsInState(in.Principal, in.Model, st) {
 		return denyRouting(out, "model_forbidden", nil)
 	}
-	if len(rules) == 0 {
-		// Installing this ingress seam must not opt legacy traffic into new
-		// physical/capability restrictions. Preserve the resolved attempt
-		// chain and its ordering, while retaining existing RBAC and regions.
-		// Lookup rejection and original/current model authorization above
-		// still apply. An empty filtered chain is never reconstructed here.
-		safe := make([]ChainTarget, 0, len(in.Chain))
-		for _, ct := range in.Chain {
-			if !r.allowsInState(in.Principal, st.Canonical(ct.Model), st) {
-				continue
-			}
-			region := st.Region(ct.ProviderName)
-			if len(in.AllowedRegions) > 0 && (region == "" || !slices.Contains(in.AllowedRegions, region)) {
-				continue
-			}
-			safe = append(safe, ct)
+	if !hasPrivacy {
+		// Optional context observes this complete authorized legacy chain.
+		// New compatibility/metadata gates apply only if a new chain is
+		// selected. Preserve the input preflight model independently of
+		// the first target (an ingress filter may have promoted a fallback).
+		out.Chain = r.legacyChain(in)
+		if len(out.Chain) == 0 {
+			return denyRouting(out, "no_safe_route", nil)
 		}
-		return finishRouting(out, safe)
+		out.Decision.SelectedModel = out.Chain[0].Model
+		if len(rules) == 0 {
+			return out, nil
+		}
 	}
-	hasPrivacy := false
-	for _, rule := range rules {
-		hasPrivacy = hasPrivacy || rule.sensitive != nil
-	}
-	boundary := requestBoundary{router: r, in: in, apis: requestAPIs(st), preserveOriginal: !hasPrivacy}
-	safe := boundary.filter(in.Chain, false)
+	boundary := requestBoundary{router: r, in: in, apis: requestAPIs(st)}
 	inspector := r.requestInspector
 	if inspector == nil {
 		inspector = sensitivity.NewInspector()
@@ -178,7 +173,7 @@ func (r *Router) RouteRequest(ctx context.Context, in RequestRoutingInput) (Requ
 			return denyRouting(out, "inspection_failed", nil)
 		}
 		out.Decision.Reason = "context_inspection_failed"
-		return finishRouting(out, safe)
+		return out, nil
 	}
 	out.Decision.Inspection = "complete"
 	if !inspected.Complete {
@@ -187,6 +182,12 @@ func (r *Router) RouteRequest(ctx context.Context, in RequestRoutingInput) (Requ
 	out.Decision.Categories = boundedCategories(inspected.Categories)
 	boundary.inspection = &inspected
 	boundary.converseSafe = conversePreservesRequest(in.RawBody)
+	if !hasPrivacy {
+		if in.CountOnly {
+			return out, nil
+		}
+		return r.applyContext(out, boundary, rules, inspected), nil
+	}
 	// All triggered privacy rules apply, regardless of document delivery order.
 	// A nil model set means unrestricted; a non-nil empty intersection denies.
 	block := false
@@ -224,7 +225,7 @@ func (r *Router) RouteRequest(ctx context.Context, in RequestRoutingInput) (Requ
 		out.Decision.Privacy = "internal_only"
 		out.Decision.Reason = "internal_only"
 	}
-	safe = boundary.filter(in.Chain, false)
+	safe := boundary.filter(in.Chain, false)
 	if len(safe) == 0 && boundary.models != nil {
 		names := make([]string, 0, len(boundary.models))
 		for name := range boundary.models {
@@ -244,6 +245,26 @@ func (r *Router) RouteRequest(ctx context.Context, in RequestRoutingInput) (Requ
 		return out, err
 	}
 	return r.applyContext(out, boundary, rules, inspected), nil
+}
+
+// legacyChain owns its returned slice and retains existing attempt order,
+// including provider retries and cross-model fallbacks. It enforces the
+// established RBAC/region constraints without opting passive traffic into new
+// transport, context, capability or pricing requirements. It never rebuilds
+// an empty input or consults a different topology generation.
+func (r *Router) legacyChain(in RequestRoutingInput) []ChainTarget {
+	safe := make([]ChainTarget, 0, len(in.Chain))
+	for _, ct := range in.Chain {
+		if !r.allowsInState(in.Principal, in.State.Canonical(ct.Model), in.State) {
+			continue
+		}
+		region := in.State.Region(ct.ProviderName)
+		if len(in.AllowedRegions) > 0 && (region == "" || !slices.Contains(in.AllowedRegions, region)) {
+			continue
+		}
+		safe = append(safe, ct)
+	}
+	return safe
 }
 
 func denyRouting(out RequestRoutingResult, reason string, cause error) (RequestRoutingResult, error) {
@@ -346,7 +367,7 @@ func (r *Router) applyContext(out RequestRoutingResult, boundary requestBoundary
 		out.Decision.Reason = "context_ineligible"
 		return out
 	}
-	if proposed == out.Model {
+	if proposed == boundary.in.State.Canonical(out.Model) {
 		out.Decision.Reason = "context_unchanged"
 		return out
 	}
@@ -400,9 +421,6 @@ type requestBoundary struct {
 	models       map[string]bool
 	apis         map[requestTargetKey]string
 	converseSafe bool
-	// Context is optional: its alternative checks cannot newly refuse the
-	// existing original primary transport. Never set for a privacy rule.
-	preserveOriginal bool
 }
 
 type requestTargetKey struct{ provider, upstream string }
@@ -451,7 +469,7 @@ func (b *requestBoundary) intersect(names []string) {
 func (b requestBoundary) filter(chain []ChainTarget, automatic bool) []ChainTarget {
 	st := b.in.State
 	var out []ChainTarget
-	for i, ct := range chain {
+	for _, ct := range chain {
 		ct.Model = st.Canonical(ct.Model)
 		if !b.router.allowsInState(b.in.Principal, ct.Model, st) {
 			continue
@@ -490,14 +508,7 @@ func (b requestBoundary) filter(chain []ChainTarget, automatic bool) []ChainTarg
 		if b.models != nil && (!b.models[ct.Model] || ct.DataBoundary != "internal") {
 			continue
 		}
-		// Exempt only the captured original PRIMARY for context-only rules.
-		// Same-model retries and newly selected models still use the strict
-		// compatibility ceiling. Membership, RBAC and regions above always
-		// apply, and privacy never receives this exception.
-		original := b.preserveOriginal && !automatic && i == 0 && len(b.in.Chain) > 0 &&
-			ct.Model == b.in.Model && ct.ProviderName == b.in.Chain[0].ProviderName &&
-			ct.Upstream == b.in.Chain[0].Upstream
-		if !original && !requestCompatible(b.in.Protocol, p, target, b.inspection, b.converseSafe) {
+		if !requestCompatible(b.in.Protocol, p, target, b.inspection, b.converseSafe) {
 			continue
 		}
 		if b.inspection != nil && (automatic || ct.Model != b.in.Model) {

@@ -154,7 +154,7 @@ func TestRequestRoutingContextOriginalExceptionNeverCoversAlternatives(t *testin
 	}
 }
 
-func TestRequestRoutingContextOnlyOriginalRetryIsStrict(t *testing.T) {
+func TestRequestRoutingPassiveContextPreservesCompleteChain(t *testing.T) {
 	cfg := routingConfig()
 	m := cfg.Models["premium"]
 	m.Targets = append(m.Targets, config.Target{Provider: "private", Model: "private-upstream"}, config.Target{Provider: "private2", Model: "private-retry"})
@@ -166,7 +166,125 @@ func TestRequestRoutingContextOnlyOriginalRetryIsStrict(t *testing.T) {
 	in.Protocol = "openai"
 	installRoutingPolicies(r, contextPolicy("optional", v1alpha1.Shadow, "economy"))
 	got, err := r.RouteRequest(context.Background(), in)
-	if err != nil || len(got.Chain) != 2 || got.Chain[0].ProviderName != "public" || got.Chain[1].ProviderName != "private2" {
-		t.Fatalf("Shadow must retain original but refuse incompatible retry: %+v %v", got, err)
+	if err != nil || !reflect.DeepEqual(got.Chain, in.Chain) {
+		t.Fatalf("Shadow changed an existing authorized retry chain: %+v %v", got, err)
+	}
+}
+
+// The decision's planned target may differ from the model whose context the
+// ingress checked before policy routing existed. Preserve both meanings.
+func TestRequestRoutingPassiveModelAndChain(t *testing.T) {
+	for _, scenario := range []string{"no-rule", "shadow", "unavailable", "unpriced", "unchanged", "ineligible", "inspection-error", "conflict"} {
+		for _, alias := range []bool{false, true} {
+			t.Run(scenario+map[bool]string{false: "/canonical", true: "/alias"}[alias], func(t *testing.T) {
+				cfg := routingConfig()
+				cfg.ModelFallbacks["premium"] = "private"
+				m := cfg.Models["premium"]
+				m.Aliases = []string{"premium-alias"}
+				cfg.Models["premium"] = m
+				m = cfg.Models["private"]
+				m.ContextWindow = 0
+				m.Capabilities = nil
+				cfg.Models["private"] = m
+				delete(cfg.Pricing.Overrides, "private")
+				delete(cfg.Pricing.Overrides, "private2")
+				if scenario == "unpriced" {
+					// Reach the candidate's pricing check, not an earlier
+					// physical incompatibility refusal.
+					pc := cfg.Providers["private"]
+					pc.Type = "request-routing-openai_compatible"
+					cfg.Providers["private"] = pc
+				}
+				r, in := routingSetup(t, cfg)
+				in.Protocol = "openai" // existing Anthropic transports are intentionally legacy
+				in.AllowedRegions = []string{"eu"}
+				in.Chain = FilterRegions(in.Chain, in.AllowedRegions)
+				if alias {
+					in.Model = "premium-alias"
+				}
+				wantReason := "unchanged"
+				if scenario != "no-rule" {
+					mode := v1alpha1.Enforce
+					target := "missing"
+					switch scenario {
+					case "shadow":
+						mode = v1alpha1.Shadow
+						wantReason = "context_shadow"
+					case "unavailable":
+						wantReason = "context_unavailable"
+					case "unpriced":
+						target = "economy"
+						wantReason = "context_unavailable"
+					case "unchanged":
+						target = "premium"
+						wantReason = "context_unchanged"
+					case "ineligible":
+						in.RawBody = []byte(`{"messages":[{"role":"assistant","content":"history"},{"role":"user","content":"hi"}]}`)
+						wantReason = "context_ineligible"
+					case "inspection-error":
+						in.RawBody = []byte(`{`)
+						wantReason = "context_inspection_failed"
+					case "conflict":
+						wantReason = "context_conflict"
+					}
+					docs := []*policy.Policy{contextPolicy("optional", mode, target)}
+					if scenario == "conflict" {
+						docs = append(docs, contextPolicy("different", mode, "premium"))
+					}
+					installRoutingPolicies(r, docs...)
+				}
+				got, err := r.RouteRequest(context.Background(), in)
+				if err != nil || got.Model != in.Model || got.Decision.SelectedModel != "private" || got.Decision.Reason != wantReason || got.State != in.State || !reflect.DeepEqual(got.Chain, in.Chain) {
+					t.Fatalf("passive request model/chain drifted: result=%+v err=%v wantModel=%s wantReason=%s", got, err, in.Model, wantReason)
+				}
+				got.Chain[0].ProviderName = "mutated"
+				if in.Chain[0].ProviderName == "mutated" {
+					t.Fatal("passive result borrowed chain storage")
+				}
+			})
+		}
+	}
+}
+
+// Passive legacy exemptions must never be copied into an actually selected
+// model's chain, even when its fallback points back to the original model.
+func TestRequestRoutingSelectedFallbackToOriginalStaysStrict(t *testing.T) {
+	for _, constraint := range []string{"valid", "physical", "unknown-context", "small-context", "unpriced"} {
+		t.Run(constraint, func(t *testing.T) {
+			cfg := routingConfig()
+			pc := cfg.Providers["private"]
+			pc.Type = "request-routing-openai_compatible"
+			cfg.Providers["private"] = pc
+			pc = cfg.Providers["public"]
+			if constraint != "physical" {
+				pc.Type = "request-routing-openai_compatible"
+			}
+			cfg.Providers["public"] = pc
+			cfg.ModelFallbacks["economy"] = "premium"
+			m := cfg.Models["premium"]
+			switch constraint {
+			case "unknown-context":
+				m.ContextWindow = 0
+			case "small-context":
+				m.ContextWindow = 1
+			case "unpriced":
+				delete(cfg.Pricing.Overrides["public"], "premium-upstream")
+			}
+			cfg.Models["premium"] = m
+			r, in := routingSetup(t, cfg)
+			in.Protocol = "openai"
+			installRoutingPolicies(r, contextPolicy("select", v1alpha1.Enforce, "economy"))
+			got, err := r.RouteRequest(context.Background(), in)
+			want := 1
+			if constraint == "valid" {
+				want = 2
+			}
+			if err != nil || got.Model != "economy" || got.Decision.Reason != "context_selected" || len(got.Chain) != want || got.Chain[0].ProviderName != "private" {
+				t.Fatalf("selected fallback inherited passive exemption: %+v %v", got, err)
+			}
+			if constraint == "valid" && got.Chain[1].Model != "premium" {
+				t.Fatal("valid selected-chain fallback control was lost")
+			}
+		})
 	}
 }
