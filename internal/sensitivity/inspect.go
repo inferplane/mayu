@@ -204,6 +204,11 @@ func (w *walker) value(d *json.Decoder, depth, encodedDepth int) (any, error) {
 		}
 	case json.Number:
 		w.inputTokens += int64(len(token))
+		// Scan the exact JSON spelling without float conversion. Accounting
+		// already happened above; text() would charge these bytes twice.
+		if err := w.visit(string(token)); err != nil {
+			return nil, err
+		}
 	}
 	return token, nil
 }

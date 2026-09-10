@@ -23,6 +23,7 @@ import (
 	"github.com/inferplane/inferplane/internal/pricing"
 	"github.com/inferplane/inferplane/internal/principal"
 	"github.com/inferplane/inferplane/internal/router"
+	"github.com/inferplane/inferplane/internal/server/requestpolicy"
 	"github.com/inferplane/inferplane/internal/telemetry"
 	"github.com/inferplane/inferplane/internal/tracing"
 	"github.com/inferplane/inferplane/pkg/schema"
@@ -115,6 +116,7 @@ func (h *InvokeHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// (resolveModel above, not router.ResolveModel) so it needs its own call
 	// site, or it would be a cost-leak path around the same policy the other
 	// two ingresses enforce.
+	requestedModel := model // resolved PRE-TIER model; raw client aliases/fallbacks are already handled
 	if served, tierSubstituted := h.r.SubstituteTier(p, model); tierSubstituted {
 		// ADR-041: substitution never denies. SubstituteTier checks the
 		// target is routed and allowed in general, but not that any of its
@@ -157,13 +159,7 @@ func (h *InvokeHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			filtered = append(filtered, ct)
 		}
 	}
-	if len(filtered) == 0 {
-		h.audit(req.Context(), p, model, "", &audit.OutcomeRef{Status: http.StatusNotFound}, false, traceID)
-		h.metrics.ObserveRequest(ingressName, model, "", p.Team, http.StatusNotFound, time.Since(start).Seconds(), 0)
-		tracing.SetStatus(span, false, "no bedrock target")
-		writeErr(w, http.StatusNotFound, "model not found")
-		return
-	}
+	noBedrockTarget := len(filtered) == 0
 	chain = filtered
 
 	var teamRec keystore.TeamRecord
@@ -173,16 +169,41 @@ func (h *InvokeHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	if len(teamRec.AllowedRegions) > 0 {
-		if filtered := router.FilterRegions(chain, teamRec.AllowedRegions); len(filtered) == 0 {
-			h.audit(req.Context(), p, model, "", &audit.OutcomeRef{Status: http.StatusForbidden, Error: audit.DenyRegionBlocked.Ptr()}, false, traceID)
-			h.metrics.ObserveRequest(ingressName, model, "", p.Team, http.StatusForbidden, time.Since(start).Seconds(), 0)
-			tracing.SetStatus(span, false, "region blocked")
-			writeErr(w, http.StatusForbidden, "no allowed-region target for model")
-			return
-		} else {
-			chain = filtered
-		}
+		chain = router.FilterRegions(chain, teamRec.AllowedRegions)
 	}
+	result, routeErr := h.r.RouteRequest(req.Context(), router.RequestRoutingInput{
+		Principal: p, Protocol: "bedrock", RawBody: raw, RequestedModel: requestedModel,
+		Model: model, Chain: chain, State: st, AllowedRegions: teamRec.AllowedRegions,
+	})
+	req = requestpolicy.Observe(w, req, result, h.metrics)
+	if routeErr != nil {
+		// Legacy filtered-chain errors retain their established wire/audit shape.
+		// The chain is NEVER restored, even when no policy was applicable.
+		if !requestpolicy.Active(result.Decision) {
+			if noBedrockTarget {
+				h.audit(req.Context(), p, model, "", &audit.OutcomeRef{Status: http.StatusNotFound}, false, traceID)
+				h.metrics.ObserveRequest(ingressName, model, "", p.Team, http.StatusNotFound, time.Since(start).Seconds(), 0)
+				tracing.SetStatus(span, false, "no bedrock target")
+				writeErr(w, http.StatusNotFound, "model not found")
+				return
+			}
+			if len(chain) == 0 && len(teamRec.AllowedRegions) > 0 {
+				h.audit(req.Context(), p, model, "", &audit.OutcomeRef{Status: http.StatusForbidden, Error: audit.DenyRegionBlocked.Ptr()}, false, traceID)
+				h.metrics.ObserveRequest(ingressName, model, "", p.Team, http.StatusForbidden, time.Since(start).Seconds(), 0)
+				tracing.SetStatus(span, false, "region blocked")
+				writeErr(w, http.StatusForbidden, "no allowed-region target for model")
+				return
+			}
+		}
+		reason := result.Decision.Reason
+		h.audit(req.Context(), p, model, "", &audit.OutcomeRef{Status: http.StatusForbidden, Error: &reason}, false, traceID)
+		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, http.StatusForbidden, time.Since(start).Seconds(), 0)
+		tracing.SetStatus(span, false, reason)
+		writeErr(w, http.StatusForbidden, routeErr.Error())
+		return
+	}
+	model, chain, st = result.Model, result.Chain, result.State
+	tracing.SetGenAIRequest(span, model)
 
 	piiMasked := false
 	if h.mask.Enabled(p.Team) {
@@ -214,7 +235,7 @@ func (h *InvokeHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// Context-window fast-fail (same rule and rationale as anthropicapi's —
 	// estimate-only, before PreCheck, clear message; deliberate per-package
 	// duplication like subjectOf).
-	if win := h.r.ContextWindow(model); win > 0 {
+	if win := requestpolicy.ContextWindow(st, model); win > 0 {
 		if est := estimateTokens(raw); est > win {
 			msg := fmt.Sprintf("request is ~%d tokens but model %s has a %d-token context window — reduce the input (or raise models.%s.context_window if the declaration is wrong)", est, model, win, model)
 			h.audit(req.Context(), p, model, chain[0].Upstream, &audit.OutcomeRef{Status: http.StatusBadRequest}, piiMasked, traceID)
@@ -271,11 +292,12 @@ func (h *InvokeHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				w.Header().Set("x-inferplane-model-fallback", ct.Model)
 			}
 		}
+		attemptReq := req.WithContext(audit.WithRoutingAttempt(req.Context(), ct.Model, ct.ProviderName, ct.DataBoundary))
 		var retriable bool
 		if h.streaming {
-			retriable = h.serveStream(w, req, ct.Provider, pr, p, ct.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, crossModelNext, start, table)
+			retriable = h.serveStream(w, attemptReq, ct.Provider, pr, p, ct.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, crossModelNext, start, table)
 		} else {
-			retriable = h.serveComplete(w, req, ct.Provider, pr, p, ct.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, crossModelNext, start, table)
+			retriable = h.serveComplete(w, attemptReq, ct.Provider, pr, p, ct.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, crossModelNext, start, table)
 		}
 		if !retriable {
 			return
@@ -580,7 +602,7 @@ func (h *InvokeHandler) audit(ctx context.Context, p keystore.Principal, model, 
 		Principal:     audit.PrincipalRef{KeyID: p.KeyID, Team: p.Team},
 		Request: audit.RequestRef{
 			Ingress: "bedrock", ModelRequested: model, ModelResolved: upstream,
-			Stream: h.streaming, PIIMasked: piiMasked, ModelSubstitutedFrom: audit.SubstitutedFrom(ctx),
+			Stream: h.streaming, PIIMasked: piiMasked, ModelSubstitutedFrom: audit.SubstitutedFrom(ctx), Routing: audit.RoutingFrom(ctx),
 		},
 		Outcome: outcome,
 	}
@@ -602,7 +624,7 @@ func (h *InvokeHandler) auditCompleted(ctx context.Context, id string, p keystor
 		Principal:     audit.PrincipalRef{KeyID: p.KeyID, Team: p.Team},
 		Request: audit.RequestRef{
 			Ingress: "bedrock", ModelRequested: model, ModelResolved: upstream, Stream: h.streaming,
-			ModelSubstitutedFrom: audit.SubstitutedFrom(ctx),
+			ModelSubstitutedFrom: audit.SubstitutedFrom(ctx), Routing: audit.RoutingFrom(ctx),
 		},
 		Outcome: &audit.OutcomeRef{Status: status},
 		Usage:   usage,
@@ -636,7 +658,7 @@ func (h *InvokeHandler) auditCompletedPartial(ctx context.Context, p keystore.Pr
 		ID:            ulid.New(),
 		TS:            time.Now().UTC().Format(time.RFC3339Nano),
 		Principal:     audit.PrincipalRef{KeyID: p.KeyID, Team: p.Team},
-		Request:       audit.RequestRef{Ingress: "bedrock", ModelRequested: model, ModelResolved: upstream, Stream: h.streaming, ModelSubstitutedFrom: audit.SubstitutedFrom(ctx)},
+		Request:       audit.RequestRef{Ingress: "bedrock", ModelRequested: model, ModelResolved: upstream, Stream: h.streaming, ModelSubstitutedFrom: audit.SubstitutedFrom(ctx), Routing: audit.RoutingFrom(ctx)},
 		Outcome:       &audit.OutcomeRef{Status: 200, Partial: true},
 		Usage:         usage,
 		Cost:          cost,

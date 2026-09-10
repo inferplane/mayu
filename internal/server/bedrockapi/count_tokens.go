@@ -6,15 +6,21 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/filter"
 	"github.com/inferplane/inferplane/internal/keystore"
 	"github.com/inferplane/inferplane/internal/live"
+	"github.com/inferplane/inferplane/internal/metrics"
 	"github.com/inferplane/inferplane/internal/principal"
 	"github.com/inferplane/inferplane/internal/router"
+	"github.com/inferplane/inferplane/internal/server/requestpolicy"
 	"github.com/inferplane/inferplane/providers"
 )
 
 type CountTokensHandler struct {
+	ready      func() (bool, string)
+	aud        *audit.Writer
+	metrics    *metrics.Metrics
 	r          *router.Router
 	holder     *live.Holder
 	mask       *filter.Masking
@@ -34,17 +40,34 @@ func (h *CountTokensHandler) SetTeamPolicy(fn func(team string) (keystore.TeamRe
 	h.teamPolicy = fn
 }
 
+// SetGovernanceGate installs the SAME gate used by DataMux generation admission.
+func (h *CountTokensHandler) SetGovernanceGate(gate func() (bool, string)) { h.ready = gate }
+
+// SetObservability enables safe policy evidence; legacy count traffic stays silent.
+func (h *CountTokensHandler) SetObservability(aud *audit.Writer, m *metrics.Metrics) {
+	h.aud, h.metrics = aud, m
+}
+
 // ServeHTTP NEVER returns a non-200 / non-JSON response. A non-200 here
 // crashes Claude Code, so every failure falls back to a local estimate.
 func (h *CountTokensHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	raw, _ := io.ReadAll(req.Body)
-	n := h.count(req, raw)
+	raw, readErr := io.ReadAll(req.Body)
+	n := estimateTokens(raw)
+	ready := true
+	if h.ready != nil {
+		ready, _ = h.ready()
+	}
+	// Even a valid JSON prefix from MaxBytesReader is NOT a complete request.
+	// Never forward partial content, including declared oversized requests.
+	if readErr == nil && ready && !requestpolicy.LocalCount(req.Context()) {
+		n = h.count(w, req, raw)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]int64{"inputTokens": n})
 }
 
-func (h *CountTokensHandler) count(req *http.Request, raw []byte) int64 {
+func (h *CountTokensHandler) count(w http.ResponseWriter, req *http.Request, raw []byte) int64 {
 	var wrapper struct {
 		Input struct {
 			InvokeModel struct {
@@ -78,17 +101,7 @@ func (h *CountTokensHandler) count(req *http.Request, raw []byte) int64 {
 		return estimateTokens(innerBody)
 	}
 
-	if p, ok := principal.From(req.Context()); ok && h.mask.Enabled(p.Team) {
-		masked, n, err := maskBody(innerBody, h.mask.Filter)
-		if err != nil {
-			return estimateTokens(innerBody)
-		}
-		if n > 0 {
-			innerBody = masked
-		}
-	}
-
-	chain, _, err := h.r.ResolveChain(model)
+	chain, st, err := h.r.ResolveChain(model)
 	if err != nil {
 		return estimateTokens(innerBody)
 	}
@@ -108,19 +121,46 @@ func (h *CountTokensHandler) count(req *http.Request, raw []byte) int64 {
 	}
 	chain = filtered
 
-	if p, ok := principal.From(req.Context()); ok && h.teamPolicy != nil {
-		if rec, ok := h.teamPolicy(p.Team); ok && len(rec.AllowedRegions) > 0 {
-			chain = router.FilterRegions(chain, rec.AllowedRegions)
+	p, authenticated := principal.From(req.Context())
+	if !authenticated {
+		return estimateTokens(innerBody)
+	}
+	var regions []string
+	if h.teamPolicy != nil {
+		if rec, ok := h.teamPolicy(p.Team); ok {
+			regions = rec.AllowedRegions
 		}
 	}
-	if len(chain) == 0 {
+	if len(regions) > 0 {
+		chain = router.FilterRegions(chain, regions)
+	}
+	result, routeErr := h.r.RouteRequest(req.Context(), router.RequestRoutingInput{
+		Principal: p, Protocol: "bedrock", RawBody: innerBody, RequestedModel: model,
+		Model: model, Chain: chain, State: st, AllowedRegions: regions, CountOnly: true,
+	})
+	req = requestpolicy.Observe(w, req, result, h.metrics)
+	requestpolicy.CountRecord(h.aud, req, "bedrock", false)
+	// Evaluate the final request context at return, after an actual attempt if any.
+	defer func() { requestpolicy.CountRecord(h.aud, req, "bedrock", true) }()
+	if routeErr != nil {
 		return estimateTokens(innerBody)
+	}
+	chain = result.Chain
+	if p, ok := principal.From(req.Context()); ok && h.mask.Enabled(p.Team) {
+		masked, n, err := maskBody(innerBody, h.mask.Filter)
+		if err != nil {
+			return estimateTokens(innerBody)
+		}
+		if n > 0 {
+			innerBody = masked
+		}
 	}
 
 	ct := chain[0]
 	if tc, ok := ct.Provider.(providers.TokenCounter); ok {
+		req = req.WithContext(audit.WithRoutingAttempt(req.Context(), ct.Model, ct.ProviderName, ct.DataBoundary))
 		pr := &providers.ProxyRequest{
-			Model: model, Upstream: ct.Upstream, RawBody: innerBody, Headers: req.Header,
+			Model: ct.Model, IngressProtocol: "bedrock", Upstream: ct.Upstream, RawBody: innerBody, Headers: req.Header,
 		}
 		if got, err := tc.CountTokens(req.Context(), pr); err == nil && got > 0 {
 			return got

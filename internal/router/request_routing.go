@@ -142,20 +142,36 @@ func (r *Router) RouteRequest(ctx context.Context, in RequestRoutingInput) (Requ
 	if !r.allowsInState(in.Principal, st.Canonical(requested), st) || !r.allowsInState(in.Principal, in.Model, st) {
 		return denyRouting(out, "model_forbidden", nil)
 	}
-	boundary := requestBoundary{router: r, in: in, apis: requestAPIs(st)}
-	safe := boundary.filter(in.Chain, false)
 	if len(rules) == 0 {
+		// Installing this ingress seam must not opt legacy traffic into new
+		// physical/capability restrictions. Preserve the resolved attempt
+		// chain and its ordering, while retaining existing RBAC and regions.
+		// Lookup rejection and original/current model authorization above
+		// still apply. An empty filtered chain is never reconstructed here.
+		safe := make([]ChainTarget, 0, len(in.Chain))
+		for _, ct := range in.Chain {
+			if !r.allowsInState(in.Principal, st.Canonical(ct.Model), st) {
+				continue
+			}
+			region := st.Region(ct.ProviderName)
+			if len(in.AllowedRegions) > 0 && (region == "" || !slices.Contains(in.AllowedRegions, region)) {
+				continue
+			}
+			safe = append(safe, ct)
+		}
 		return finishRouting(out, safe)
 	}
+	hasPrivacy := false
+	for _, rule := range rules {
+		hasPrivacy = hasPrivacy || rule.sensitive != nil
+	}
+	boundary := requestBoundary{router: r, in: in, apis: requestAPIs(st), preserveOriginal: !hasPrivacy}
+	safe := boundary.filter(in.Chain, false)
 	inspector := r.requestInspector
 	if inspector == nil {
 		inspector = sensitivity.NewInspector()
 	}
 	inspected, err := inspector.Inspect(ctx, in.Protocol, in.RawBody)
-	hasPrivacy := false
-	for _, rule := range rules {
-		hasPrivacy = hasPrivacy || rule.sensitive != nil
-	}
 	if err != nil {
 		out.Decision.Inspection = "failed"
 		if hasPrivacy {
@@ -384,6 +400,9 @@ type requestBoundary struct {
 	models       map[string]bool
 	apis         map[requestTargetKey]string
 	converseSafe bool
+	// Context is optional: its alternative checks cannot newly refuse the
+	// existing original primary transport. Never set for a privacy rule.
+	preserveOriginal bool
 }
 
 type requestTargetKey struct{ provider, upstream string }
@@ -432,7 +451,7 @@ func (b *requestBoundary) intersect(names []string) {
 func (b requestBoundary) filter(chain []ChainTarget, automatic bool) []ChainTarget {
 	st := b.in.State
 	var out []ChainTarget
-	for _, ct := range chain {
+	for i, ct := range chain {
 		ct.Model = st.Canonical(ct.Model)
 		if !b.router.allowsInState(b.in.Principal, ct.Model, st) {
 			continue
@@ -471,7 +490,14 @@ func (b requestBoundary) filter(chain []ChainTarget, automatic bool) []ChainTarg
 		if b.models != nil && (!b.models[ct.Model] || ct.DataBoundary != "internal") {
 			continue
 		}
-		if !requestCompatible(b.in.Protocol, p, target, b.inspection, b.converseSafe) {
+		// Exempt only the captured original PRIMARY for context-only rules.
+		// Same-model retries and newly selected models still use the strict
+		// compatibility ceiling. Membership, RBAC and regions above always
+		// apply, and privacy never receives this exception.
+		original := b.preserveOriginal && !automatic && i == 0 && len(b.in.Chain) > 0 &&
+			ct.Model == b.in.Model && ct.ProviderName == b.in.Chain[0].ProviderName &&
+			ct.Upstream == b.in.Chain[0].Upstream
+		if !original && !requestCompatible(b.in.Protocol, p, target, b.inspection, b.converseSafe) {
 			continue
 		}
 		if b.inspection != nil && (automatic || ct.Model != b.in.Model) {
