@@ -1,4 +1,4 @@
-<!-- generated-by: co-agent · source: CLAUDE.md · claude-md-sha: 6dabbf7d502d · generated-at: 2026-09-10 · DO NOT EDIT — edit CLAUDE.md then run /co-agent sync-context -->
+<!-- generated-by: co-agent · source: CLAUDE.md · claude-md-sha: d2b747e60bfc · generated-at: 2026-09-10 · DO NOT EDIT — edit CLAUDE.md then run /co-agent sync-context -->
 > You are an external reviewer for this repo — project context below, distilled
 > from CLAUDE.md. This file is shared verbatim by Kiro, Codex, and Agy (not a
 > per-AI copy).
@@ -85,7 +85,9 @@ credentials, or a real IdP (httptest fakes only).
 - Context requires FailOpen, defaults to Shadow, and cannot relax privacy.
   Privacy always enforces, even with Shadow. Enforce switches only completely
   inspectable single-user-turn requests without history/tools/media/reasoning/
-  structured output. Alternatives need declared context/capabilities, pricing,
+  structured output. The input threshold chooses simple versus complex, not
+  eligibility; a distinct compatible complex target can be selected above it.
+  Alternatives need declared context/capabilities, pricing,
   RBAC/regions, and physical transport compatibility; metadata cannot override
   translator losses. No-rule/passive paths preserve existing authorized behavior.
 - Requested is resolved pre-tier; context sources match post-tier before privacy;

@@ -30,7 +30,9 @@ Add `routing.context` alongside the mutually exclusive affinity and budget-tier
 forms. Context requires `FailOpen`; omitted mode is `Shadow`. Recommendations use
 a conservative input estimate, an operator threshold, and case-insensitive
 keywords. Multiple recommendations must agree; any Shadow match prevents context
-switching. Privacy is enforced independently in both modes. An unusable context
+switching. The input threshold selects simple versus complex, not Enforce
+eligibility: an eligible request above it can select a distinct compatible complex
+target. Privacy is enforced independently in both modes. An unusable context
 preference retains the already-safe route.
 
 Enforce is opt-in and switches only completely inspectable single-user-turn
@@ -103,7 +105,8 @@ version skew is not a privacy rollout strategy.
 Start context in Shadow on a representative workload; separately test privacy
 negative cases and every retry path. Compare task success, total settled cost
 including cold-cache writes and retries, and p95 latency with the baseline. Define
-acceptable thresholds before enabling Enforce for eligible short requests. Unit
+acceptable rollout thresholds before enabling Enforce for eligible single-user-turn
+requests. Unit
 and assembly tests establish enforcement behavior, not measured savings or
 production readiness. Disable context enforcement if quality/cost gates regress;
 retain privacy restrictions. See [operator guide](../policy-routing.md).

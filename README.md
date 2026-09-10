@@ -58,8 +58,11 @@ more than one team is on it.
 `GovernancePolicy.sensitiveData` restricts protected requests to approved internal
 models or blocks them, including retries. Independent `routing.context` rules
 record recommendations in **Shadow** by default; opt-in **Enforce** switches only
-eligible short, single-user-turn requests without tools/history. Privacy always
-enforces, even alongside Shadow (ADR-043).
+completely inspectable single-user-turn requests without history, tools, media,
+reasoning, or structured-output requirements. The input threshold chooses simple
+versus complex; it does not disable Enforce above the threshold. A distinct,
+compatible complex target can be selected there. Privacy always enforces, even
+alongside Shadow (ADR-043).
 
 Start with [the operator guide](docs/policy-routing.md) and the isolated
 [config](examples/config.policy-routing.json) /

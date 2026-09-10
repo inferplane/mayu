@@ -59,7 +59,9 @@ S3 anchoring (ADR-012/018) · optional Postgres usage analytics (ADR-036).
 
 Local finite inspection and an enforced destination restriction now constrain every
 attempt. Independent context preferences start in Shadow; Enforce is opt-in for
-short, single-user-turn requests without tools/history. Privacy always enforces.
+completely inspectable single-user-turn requests without history/tools/media/
+reasoning/structured output. The input threshold chooses simple versus complex;
+a distinct compatible complex target can be selected above it. Privacy always enforces.
 The implemented actions are InternalOnly and Block; legacy masking remains separate.
 Boundary labels are operator assertions, detector coverage is finite, unsupported
 content can fail closed, and known translator losses still constrain alternatives.

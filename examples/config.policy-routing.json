@@ -44,7 +44,7 @@
       "base_url": "https://private-models.example.invalid/v1",
       "data_boundary": "internal",
       "api_key_ref": {
-        "file": "/run/secrets/policy-routing-private-key"
+        "env": "POLICY_ROUTING_PRIVATE_KEY"
       }
     }
   },

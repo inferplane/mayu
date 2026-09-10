@@ -19,9 +19,9 @@ replace the illustrative USD-per-million-token rates with your chargeback rates.
 The provider marked internal must really meet your approved processing boundary;
 `data_boundary` is an operator assertion, never inferred from a hostname or model.
 
-Supply `INFERPLANE_ADMIN_TOKEN`, `POLICY_ROUTING_PUBLIC_KEY`, and the private
-provider's `/run/secrets/policy-routing-private-key` file through your secret
-manager. Configuration contains env/file references only. Create the demo state
+Supply `INFERPLANE_ADMIN_TOKEN`, `POLICY_ROUTING_PUBLIC_KEY`, and
+`POLICY_ROUTING_PRIVATE_KEY` through your secret manager. This runnable example
+uses environment references only; no inline secret values are stored. Create the demo state
 directory and use the usual key-issuance flow for team `engineering`:
 
 ```bash
@@ -76,6 +76,11 @@ routing:
     maxSimpleInputTokens: 4096
     complexKeywords: [security, authentication, migration]
 ```
+
+`maxSimpleInputTokens` chooses simple versus complex; it is not an Enforce length
+ceiling. An eligible request above the threshold can switch to a distinct compatible
+`complexModel`. In this example the complex target equals the source, so context
+alone leaves an above-threshold `premium-coder` request on that model.
 
 Keep `failurePolicy: FailOpen` on this rule. Enforce selects only completely
 inspectable single-user-turn requests without assistant/tool history, tool

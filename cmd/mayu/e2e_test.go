@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/inferplane/inferplane/internal/alert"
 	"github.com/inferplane/inferplane/internal/audit"
 )
 
@@ -494,6 +495,52 @@ func TestE2EAdminActionsAudited(t *testing.T) {
 	}
 }
 
+// waitRecentBudgetAlert waits for the notifier's published delivery result.
+// The webhook handler records receipt BEFORE responding; deliver records Recent
+// only AFTER Do returns and the response body is drained/closed. Receipt alone
+// therefore cannot synchronize an assertion against the admin API.
+func waitRecentBudgetAlert(t *testing.T, adminURL, team, keyID string, threshold float64) {
+	t.Helper()
+	// Retain the existing eight-second bound (webhook timeout is two seconds).
+	// The context also bounds each HTTP request; the ticker only paces polling.
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	var recent struct {
+		Fires []alert.Fire `json:"fires"`
+	}
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, adminURL+"/admin/alerts/recent", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+e2eAdminToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET /admin/alerts/recent: %v (last fires: %+v)", err, recent.Fires)
+		}
+		err = json.NewDecoder(resp.Body).Decode(&recent)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || err != nil {
+			t.Fatalf("GET /admin/alerts/recent: status %d, decode: %v", resp.StatusCode, err)
+		}
+		for _, fire := range recent.Fires {
+			if fire.Team == team && fire.KeyID == keyID && fire.Threshold == threshold {
+				if !fire.Delivered || fire.Error != "" {
+					t.Fatalf("matching alert delivery failed: %+v", fire)
+				}
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("/admin/alerts/recent missing team=%q key_id=%q threshold=%v: %+v", team, keyID, threshold, recent.Fires)
+		case <-ticker.C:
+		}
+	}
+}
+
 // TestE2EBudgetAlertFires (D5b, ADR-017): a team crossing a configured budget
 // threshold fires a webhook POST and shows up in /admin/alerts/recent.
 func TestE2EBudgetAlertFires(t *testing.T) {
@@ -543,26 +590,10 @@ func TestE2EBudgetAlertFires(t *testing.T) {
 		t.Fatalf("request: status %d, want 200", resp.StatusCode)
 	}
 
-	// The webhook delivery is async (fire-and-forget) — poll briefly. The
-	// break decision and the snapshot are taken under the SAME lock
-	// acquisition so a second POST arriving between them can't be observed
-	// only in the snapshot (that would make len(fires) disagree with the
-	// break condition that just fired).
-	// Poll deadline exceeds the 2s webhook timeout above, leaving CI margin
-	// for webhook + delivery latency (a deadline equal to the timeout would
-	// leave zero slack on a loaded runner).
-	deadline := time.Now().Add(8 * time.Second)
-	var fires []map[string]any
-	for {
-		mu.Lock()
-		if len(gotFires) > 0 || time.Now().After(deadline) {
-			fires = append([]map[string]any{}, gotFires...)
-			mu.Unlock()
-			break
-		}
-		mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitRecentBudgetAlert(t, adminURL, "alerted", "", 0.5)
+	mu.Lock()
+	fires := append([]map[string]any{}, gotFires...)
+	mu.Unlock()
 	if len(fires) != 1 {
 		t.Fatalf("webhook received %d POSTs, want 1: %+v", len(fires), fires)
 	}
@@ -571,22 +602,6 @@ func TestE2EBudgetAlertFires(t *testing.T) {
 	}
 	if got, want := fires[0]["threshold"], 0.5; got != want {
 		t.Fatalf("threshold = %v, want %v", got, want)
-	}
-
-	// GET /admin/alerts/recent (full-admin only) reflects the same fire.
-	req, _ := http.NewRequest(http.MethodGet, adminURL+"/admin/alerts/recent", nil)
-	req.Header.Set("Authorization", "Bearer "+e2eAdminToken)
-	arec, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("GET /admin/alerts/recent: %v", err)
-	}
-	defer arec.Body.Close()
-	body, _ := io.ReadAll(arec.Body)
-	if arec.StatusCode != http.StatusOK {
-		t.Fatalf("GET /admin/alerts/recent: status %d: %s", arec.StatusCode, body)
-	}
-	if !bytes.Contains(body, []byte(`"team":"alerted"`)) {
-		t.Fatalf("/admin/alerts/recent missing the fire: %s", body)
 	}
 }
 
@@ -665,18 +680,10 @@ func TestE2EKeyBudgetAlertFires(t *testing.T) {
 		t.Fatalf("request: status %d, want 200", mresp.StatusCode)
 	}
 
-	deadline := time.Now().Add(8 * time.Second)
-	var fires []map[string]any
-	for {
-		mu.Lock()
-		if len(gotFires) > 0 || time.Now().After(deadline) {
-			fires = append([]map[string]any{}, gotFires...)
-			mu.Unlock()
-			break
-		}
-		mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitRecentBudgetAlert(t, adminURL, "unbudgeted", created.KeyID, 0.5)
+	mu.Lock()
+	fires := append([]map[string]any{}, gotFires...)
+	mu.Unlock()
 	if len(fires) != 1 {
 		t.Fatalf("webhook received %d POSTs, want 1: %+v", len(fires), fires)
 	}
@@ -685,21 +692,6 @@ func TestE2EKeyBudgetAlertFires(t *testing.T) {
 	}
 	if got, want := fires[0]["threshold"], 0.5; got != want {
 		t.Fatalf("threshold = %v, want %v", got, want)
-	}
-
-	arecReq, _ := http.NewRequest(http.MethodGet, adminURL+"/admin/alerts/recent", nil)
-	arecReq.Header.Set("Authorization", "Bearer "+e2eAdminToken)
-	arec, err := http.DefaultClient.Do(arecReq)
-	if err != nil {
-		t.Fatalf("GET /admin/alerts/recent: %v", err)
-	}
-	defer arec.Body.Close()
-	arecBody, _ := io.ReadAll(arec.Body)
-	if arec.StatusCode != http.StatusOK {
-		t.Fatalf("GET /admin/alerts/recent: status %d: %s", arec.StatusCode, arecBody)
-	}
-	if !bytes.Contains(arecBody, []byte(`"key_id":"`+created.KeyID+`"`)) {
-		t.Fatalf("/admin/alerts/recent missing the key-scoped fire's key_id: %s", arecBody)
 	}
 }
 

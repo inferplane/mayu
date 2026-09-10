@@ -49,7 +49,9 @@ original bytes once, and returns a complete retry chain tied to the supplied
 Sensitive rules intersect; Block wins; no safe route denies before masking,
 admission, capture, or provider calls. Context is FailOpen/Shadow by default and
 never relaxes privacy. Enforce switches only completely inspectable single user
-turns without history/tools/media/reasoning/structured output. No-policy/passive
+turns without history/tools/media/reasoning/structured output. The input threshold
+chooses simple versus complex, not eligibility; a distinct compatible complex target
+can be selected above it. No-policy/passive
 results preserve the input preflight Model and chain behavior. Requested is the
 resolved pre-tier model; context sources match the post-tier model; selected,
 proposed, and actual attempt have distinct meanings.

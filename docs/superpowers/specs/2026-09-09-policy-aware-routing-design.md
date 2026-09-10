@@ -14,7 +14,8 @@ either savings or privacy. Decisions must be inspectable without retaining promp
 
 This release implements the four development steps approved in that conversation:
 typed local inspection, sensitive-data routing, observable context selection, and
-opt-in selection for short requests. Actual task-success/cost improvement remains a
+opt-in selection for eligible single-user-turn requests. Actual task-success/cost
+improvement remains a
 rollout evaluation gate, not a claim made by this implementation.
 
 ## Existing behavior and constraints
@@ -130,7 +131,10 @@ models, and positive `maxSimpleInputTokens` are required. Keywords must be nonem
 strings when present. Context rules require FailOpen: an unusable recommendation
 leaves the already-safe route unchanged. The threshold is an operator rule, not a
 quality score. Context chooses complex when input is above threshold or any
-configured keyword matches decoded request text case-insensitively.
+configured keyword matches decoded request text case-insensitively. The input
+threshold is not an Enforce length ceiling: an eligible single-user-turn request
+above it can switch to a distinct compatible complexModel. The example's complex
+target equals its source, so context alone leaves that above-threshold route unchanged.
 
 With no matching new rules, preserve the existing authorized route rather than
 applying new transport restrictions. Context-only Shadow, or an unusable context
@@ -177,7 +181,8 @@ that satisfies those same restrictions. Original-model RBAC must already pass.
    context and capability checks. Never reinsert a public fallback.
 5. Evaluate context recommendations within that safe candidate boundary.
 6. In Shadow mode, record proposed model while retaining the safe actual chain.
-   In Enforce mode switch only an eligible short request to a compatible candidate.
+   In Enforce mode switch only an eligible single-user-turn request without the
+   excluded features to a compatible candidate, whether simple or complex.
    A missing/denied/unpriced/incompatible recommendation leaves the safe chain.
 7. Return a decision containing only bounded reasons, inspection state, category
    names, policy references/generations, requested/selected/proposed models and mode.

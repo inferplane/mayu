@@ -350,7 +350,7 @@ func TestGatewayRoutingAdmissionBeforeProvider(t *testing.T) {
 
 func TestPolicyRoutingExampleLoadsWithMatchingTopology(t *testing.T) {
 	// Exercise the checked-in config/policy through their real loaders and builder,
-	// substituting only local secret references; no provider call or socket needed.
+	// supplying only referenced environment values; no provider call or socket needed.
 	t.Setenv("INFERPLANE_ADMIN_TOKEN", "example-placeholder")
 	cfg, err := config.LoadRaw("../../examples/config.policy-routing.json")
 	if err != nil {
@@ -360,13 +360,7 @@ func TestPolicyRoutingExampleLoadsWithMatchingTopology(t *testing.T) {
 		t.Fatalf("example policy must stay isolated: %v", cfg.Policies)
 	}
 	t.Setenv("POLICY_ROUTING_PUBLIC_KEY", "example-placeholder")
-	privateKey := filepath.Join(t.TempDir(), "private-key")
-	if err := os.WriteFile(privateKey, []byte("example-placeholder"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	p := cfg.Providers["approved-private"]
-	p.APIKeyRef = &config.SecretRef{File: privateKey}
-	cfg.Providers["approved-private"] = p
+	t.Setenv("POLICY_ROUTING_PRIVATE_KEY", "example-placeholder")
 	if err := config.ResolveProviders(cfg); err != nil {
 		t.Fatal(err)
 	}

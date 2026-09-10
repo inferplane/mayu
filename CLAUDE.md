@@ -31,7 +31,10 @@ stated explicitly (see the HA vs. rate-limit-accuracy tension below).
    Sonnet → GLM) when cost, not just capability, is the deciding factor.
    Enforceable via `routing.budgetTiers` (ADR-041): `router.SubstituteTier`.
    ADR-043 adds independent privacy restrictions and Shadow-default context
-   recommendations; opt-in Enforce switches only eligible short requests.
+   recommendations; opt-in Enforce switches eligible single-user-turn requests
+   without history/tools/media/reasoning/structured output. The input threshold
+   selects simple versus complex, not eligibility; a distinct compatible complex
+   target can be selected above it.
    Task success, total cost including cold-cache/retries, p95 latency, and privacy
    negative cases are rollout gates, not benefits established by unit tests.
 4. **Budget control with visibility** — set spend limits per team and per

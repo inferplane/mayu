@@ -49,9 +49,12 @@ Sprint plan (each phase = separate PR(s), reviewed before the next):
 
 Implemented: original-byte local inspection; FailClosed sensitiveData destination
 restrictions on every attempt; Shadow-default context recommendations; opt-in
-Enforce for eligible short requests; persisted topology metadata; ingress/count
+Enforce for completely inspectable single-user-turn requests without history/tools/
+media/reasoning/structured output; persisted topology metadata; ingress/count
 integration; bounded audit/headers/counter evidence; startup and policy-apply target
-validation. This extends cost-driven routing without replacing ADR-041 budgets.
+validation. The input threshold chooses simple versus complex, not eligibility;
+a distinct compatible complex target can be selected above it. This extends
+cost-driven routing without replacing ADR-041 budgets.
 
 Rollout evaluation remains open: task success, total cost including cold-cache
 writes/retries, p95 latency, and privacy-policy negative cases must pass declared

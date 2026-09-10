@@ -183,6 +183,8 @@ attempt before optional context preferences, masking, admission, or capture.
 
 `routing.context` is Shadow-default and FailOpen; Enforce requires a completely
 inspectable single user turn without history/tools/media/reasoning/structured output.
+The input threshold chooses simple versus complex rather than excluding larger
+requests; an eligible request can select a distinct compatible complex target.
 Privacy remains enforced alongside Shadow. Automatically selected alternatives
 need declared `context_window`, observed `capabilities`, pricing, RBAC/regions and
 compatible transport. Capabilities are exactly tools/vision/reasoning/structured_output;

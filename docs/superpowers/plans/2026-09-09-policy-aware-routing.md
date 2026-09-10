@@ -257,7 +257,8 @@ docs/enterprise-strategy.md and affected reference docs. Add acceptance tests in
   pinning, measured savings, HA, or new Responses support.
 - [x] Record the product goal and observable rollout gates: task success,
   total cost including cold-cache/retries, p95 latency, and privacy-policy
-  negative cases. Show explicit opt-in Enforce for short requests.
+  negative cases. Show explicit opt-in Enforce for eligible single-user-turn
+  requests; the input threshold selects simple/complex, not Enforce eligibility.
 - [x] Update module docs and reference schemas. Regenerate the managed AGENTS.md
   from updated CLAUDE.md using the standalone co-agent sync-context procedure,
   rather than hand-editing the generated instructions. Read
