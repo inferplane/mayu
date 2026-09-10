@@ -170,6 +170,7 @@ func (r *Router) RouteRequest(ctx context.Context, in RequestRoutingInput) (Requ
 	}
 	out.Decision.Categories = boundedCategories(inspected.Categories)
 	boundary.inspection = &inspected
+	boundary.converseSafe = conversePreservesRequest(in.RawBody)
 	// All triggered privacy rules apply, regardless of document delivery order.
 	// A nil model set means unrestricted; a non-nil empty intersection denies.
 	block := false
@@ -333,6 +334,24 @@ func (r *Router) applyContext(out RequestRoutingResult, boundary requestBoundary
 		out.Decision.Reason = "context_unchanged"
 		return out
 	}
+	// Context optimization is optional. If the recommendation's leading path
+	// cannot preserve this request, retain the already-safe route instead of
+	// promoting another provider to make that recommendation appear available.
+	// Privacy recovery is independent and can use any approved safe attempt.
+	mc, ok := boundary.in.State.Route(proposed)
+	if !ok || len(mc.Targets) == 0 {
+		out.Decision.Reason = "context_unavailable"
+		return out
+	}
+	first := mc.Targets[0]
+	if api, ok := boundary.apis[requestTargetKey{first.Provider, first.Model}]; ok {
+		first.API = api
+	}
+	provider, ok := boundary.in.State.Provider(first.Provider)
+	if !ok || provider == nil || !requestCompatible(boundary.in.Protocol, provider, first, boundary.inspection, boundary.converseSafe) {
+		out.Decision.Reason = "context_unavailable"
+		return out
+	}
 	candidate := r.requestChain(boundary, proposed)
 	// An unavailable recommendation may not silently switch to its fallback.
 	if len(candidate) == 0 || candidate[0].Model != proposed {
@@ -359,11 +378,12 @@ func (r *Router) allowsInState(p keystore.Principal, model string, st *live.Stat
 }
 
 type requestBoundary struct {
-	router     *Router
-	in         RequestRoutingInput
-	inspection *sensitivity.Result
-	models     map[string]bool
-	apis       map[requestTargetKey]string
+	router       *Router
+	in           RequestRoutingInput
+	inspection   *sensitivity.Result
+	models       map[string]bool
+	apis         map[requestTargetKey]string
+	converseSafe bool
 }
 
 type requestTargetKey struct{ provider, upstream string }
@@ -451,7 +471,7 @@ func (b requestBoundary) filter(chain []ChainTarget, automatic bool) []ChainTarg
 		if b.models != nil && (!b.models[ct.Model] || ct.DataBoundary != "internal") {
 			continue
 		}
-		if !requestCompatible(b.in.Protocol, p, target, b.inspection) {
+		if !requestCompatible(b.in.Protocol, p, target, b.inspection, b.converseSafe) {
 			continue
 		}
 		if b.inspection != nil && (automatic || ct.Model != b.in.Model) {
@@ -483,7 +503,7 @@ func fitsRequest(mc config.ModelConfig, s sensitivity.Result) bool {
 // declarations. Bedrock InvokeModel accepts Anthropic-shaped bytes; Converse
 // drops image/reasoning blocks. Cross-wire canonical conversion cannot preserve
 // vision/reasoning/structured output. Unproven paths stay conservative.
-func requestCompatible(ingress string, provider providers.Provider, target config.Target, s *sensitivity.Result) bool {
+func requestCompatible(ingress string, provider providers.Provider, target config.Target, s *sensitivity.Result, converseSafe bool) bool {
 	if ingress != "anthropic" && ingress != "openai" && ingress != "bedrock" {
 		return false
 	}
@@ -510,7 +530,8 @@ func requestCompatible(ingress string, provider providers.Provider, target confi
 			return ingress != "openai"
 		case "converse":
 			// Converse consumes the raw Anthropic-shaped tools, not Parsed.
-			return !feature && !(ingress == "openai" && s != nil && s.HasTools)
+			return !feature && !(ingress == "openai" && s != nil && s.HasTools) &&
+				(s == nil || converseSafe)
 		case "mantle":
 			return !feature
 		default:
@@ -558,7 +579,10 @@ func (r *Router) requestChain(boundary requestBoundary, model string) []ChainTar
 			all = append(all, ct)
 		}
 	}
-	all = boundary.filter(all, true)
+	// Rebuilding the explicitly selected model after its safe breakers opened
+	// is recovery, not model substitution. Keep its metadata exemption; filter
+	// still requires metadata for every other model appended to that chain.
+	all = boundary.filter(all, model != boundary.in.Model)
 	for _, ct := range all {
 		if r.brk.Allow(ct.Identity) {
 			allowed = append(allowed, ct)
