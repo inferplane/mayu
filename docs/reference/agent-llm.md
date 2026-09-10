@@ -171,3 +171,28 @@ supported on this route" (probed live 2026-09-02, matching its model card) while
 - Related modules: `internal/router` (resolution/fallback), `internal/openai` (conversion), `internal/keystore` (team-record guardrail override)
 - Related ADRs: docs/decisions/ADR-019-bedrock-guardrails-data-plane.md, docs/decisions/ADR-022-bedrock-legacy-thinking-rewrite.md
 - Related runbooks: docs/runbooks/
+
+### Policy-aware routing (ADR-043)
+
+`internal/sensitivity` inspects original Anthropic/OpenAI/decoded native-Bedrock
+JSON without mutation. Its finite email/phone/Luhn-card/SSN/IPv4/Korean-ID detectors
+include nested tool JSON and exact numeric spellings. Opaque media, redacted
+thinking, unknown blocks/shapes are uninspectable; there is no remote classifier
+or universal PII guarantee. `internal/router.RouteRequest` applies privacy to every
+attempt before optional context preferences, masking, admission, or capture.
+
+`routing.context` is Shadow-default and FailOpen; Enforce requires a completely
+inspectable single user turn without history/tools/media/reasoning/structured output.
+Privacy remains enforced alongside Shadow. Automatically selected alternatives
+need declared `context_window`, observed `capabilities`, pricing, RBAC/regions and
+compatible transport. Capabilities are exactly tools/vision/reasoning/structured_output;
+provider `data_boundary` is internal/external/unknown (omitted = unknown). They are
+operator metadata, not proof of endpoint trust or translator support. OpenAI cannot
+select direct Anthropic; native Bedrock remains restricted; Converse/cross-wire
+feature losses remain binding. No Responses support or session pinning is added.
+
+Requested means resolved pre-tier model, while context sources match the post-tier
+model before privacy substitution. Proposed is observation only. Passive results
+retain the input preflight model; actual attempts are recorded separately. One
+returned `live.State` supplies attempts, context checks and pricing. See
+[policy-routing guide](../policy-routing.md) for schema and rollout gates.

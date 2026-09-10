@@ -53,6 +53,25 @@ more than one team is on it.
 - **No embeddings, image, audio, or rerank support in v1.** Chat/completions
   traffic only until that lane is proven (see `docs/roadmap.md`).
 
+## Policy-aware routing
+
+`GovernancePolicy.sensitiveData` restricts protected requests to approved internal
+models or blocks them, including retries. Independent `routing.context` rules
+record recommendations in **Shadow** by default; opt-in **Enforce** switches only
+eligible short, single-user-turn requests without tools/history. Privacy always
+enforces, even alongside Shadow (ADR-043).
+
+Start with [the operator guide](docs/policy-routing.md) and the isolated
+[config](examples/config.policy-routing.json) /
+[policy](examples/policy-routing/governance.yaml). Detectors are finite heuristics;
+provider boundary labels and model capabilities are operator assertions. Unknown
+content can fail closed, and existing transport limits still apply. Upgrade all
+participating binaries and the CRD before activating new rules. For protection
+before first control-plane sync, set `require_sync`; both count APIs remain local
+HTTP 200 while unready. Evaluate task success, total cost including cold-cache
+writes/retries, p95 latency, and privacy negative cases before Enforce. This adds
+no Responses support or measured-savings claim.
+
 ## Current limits
 
 **Single-replica `mayu` only, today.** `internal/keystore` is SQLite-only and

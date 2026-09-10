@@ -100,3 +100,19 @@ mayu login  --gateway <url> [--team <t>] [--id-token-command <cmd>]  # ADR-028
 mayu token  [--export] [--raw]                                      # ADR-028, meant to run as apiKeyHelper
 mayu logout                                                         # ADR-028
 ```
+
+## Policy-aware request routing (ADR-043)
+
+Anthropic Messages, OpenAI Chat Completions and native Bedrock generation use the
+same privacy-constrained attempt chain; security refusals return an ingress-shaped
+403. Anthropic and Bedrock token-count endpoints instead return local HTTP-200
+estimates with zero upstream calls on routing refusal, unready/stale governance,
+or oversized/unreadable bodies. This does not add a Responses endpoint.
+
+`x-inferplane-routing-reason` is a bounded decision reason and
+`x-inferplane-routed-model` identifies applied privacy/context selection. Context
+Shadow still enforces privacy. Budget's earlier `x-inferplane-substituted-model`
+may differ from final selection. The audit `request.routing` object records
+requested (resolved pre-tier), selected, proposed and actual-attempt evidence
+separately, including provider/boundary. See [schema, upgrade requirements and
+limits](policy-routing.md) before enabling rules.

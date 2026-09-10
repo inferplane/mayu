@@ -327,6 +327,18 @@ func newGateway(cfgPath string) (*gateway, error) {
 	}
 	holder := &live.Holder{}
 	holder.Swap(st)
+	if polStore != nil {
+		polStore.SetRoutedAndPriced(holder.RoutedAndPriced)
+		// The initial file load precedes topology construction. Revalidate now,
+		// before listeners or policy delivery start, against effective DB/file
+		// routes and prices. Future Reload/ApplyWire calls use the same holder.
+		if len(raw.Policies) > 0 {
+			if err := polStore.Reload(); err != nil {
+				closeAll(pstore, pgstoreQ, store, aud)
+				return nil, fmt.Errorf("policies: %w", err)
+			}
+		}
+	}
 	r := router.New(holder)
 	r.SetMetrics(m) // circuit_state
 

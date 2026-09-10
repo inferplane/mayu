@@ -1,4 +1,4 @@
-<!-- generated-by: co-agent · source: CLAUDE.md · claude-md-sha: 44c6da2c807e · generated-at: 2026-08-26 · DO NOT EDIT — edit CLAUDE.md then run /co-agent sync-context -->
+<!-- generated-by: co-agent · source: CLAUDE.md · claude-md-sha: 6dabbf7d502d · generated-at: 2026-09-10 · DO NOT EDIT — edit CLAUDE.md then run /co-agent sync-context -->
 > You are an external reviewer for this repo — project context below, distilled
 > from CLAUDE.md. This file is shared verbatim by Kiro, Codex, and Agy (not a
 > per-AI copy).
@@ -36,6 +36,7 @@ chain.
 
 ```bash
 CGO_ENABLED=0 go build -trimpath -o bin/mayu ./cmd/mayu
+CGO_ENABLED=0 go build -trimpath -o bin/inferplaned ./cmd/inferplaned
 go test ./... -race
 go vet ./... && gofmt -l .
 bash tests/run-all.sh   # harness tests (bash, not Go)
@@ -69,6 +70,39 @@ credentials, or a real IdP (httptest fakes only).
 - A budget-tier substitution TARGET must pass RBAC and be routed on the
   enforcing data plane, or the ORIGINAL model is served — substitution must
   never widen access and must never itself deny a request.
+
+## Policy-aware routing (ADR-043)
+
+- `sensitivity` is a stdlib-only leaf inspecting original bytes without mutation
+  or retained text. Finite email/phone/Luhn-card/SSN/IPv4/Korean-ID signals include
+  exact numeric spellings; opaque/unknown content is incomplete, errors explicit.
+  No universal PII guarantee, remote classifier, session pinning, or Responses
+  ingress is implied. Boundary labels are operator assertions.
+- `Store.MatchingRoutingPolicies` supplies one snapshot and a rejection gate.
+  SensitiveData requires FailClosed: Block wins, internal-model sets intersect,
+  each attempt needs an approved model AND an explicitly internal provider.
+  Rejected distributed sensitive generations deny until valid recovery.
+- Context requires FailOpen, defaults to Shadow, and cannot relax privacy.
+  Privacy always enforces, even with Shadow. Enforce switches only completely
+  inspectable single-user-turn requests without history/tools/media/reasoning/
+  structured output. Alternatives need declared context/capabilities, pricing,
+  RBAC/regions, and physical transport compatibility; metadata cannot override
+  translator losses. No-rule/passive paths preserve existing authorized behavior.
+- Requested is resolved pre-tier; context sources match post-tier before privacy;
+  selected and proposed differ from actual attempts. Passive results preserve the
+  input preflight Model. Attempts/context/pricing use the same live.State.
+- `cmd/mayu` installs `live.Holder.RoutedAndPriced` after usable topology and
+  reloads local policy before listeners; future Reload/ApplyWire validate too.
+  Runtime candidate checks remain required after topology changes. Metadata must
+  survive DB seed/overlay, admin read/write/export, and reload.
+- Both count APIs remain local/200 on routing refusal and unready/stale gates.
+  CP privacy from first request needs require_sync. Upgrade binaries/CRD before
+  new-rule activation. Evaluate task success, total cost including cold-cache/
+  retries, p95 latency, and privacy negative cases before Enforce; tests establish
+  neither measured savings nor production readiness.
+- Routing audit fields are append-only/omitempty, with planned/actual provider
+  and boundary. Counter labels only team/mode/reason; no prompt, detection value,
+  session ID, user, or key ID. Existing optional body logging is independent.
 
 ## Banned patterns / security mandates (violations are CRITICAL)
 

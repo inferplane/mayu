@@ -1,6 +1,6 @@
 # Enterprise product strategy
 
-Status: canonical product direction · Last reviewed: 2026-08-28 · Release posture: **alpha**
+Status: canonical product direction · Last reviewed: 2026-09-10 · Release posture: **alpha**
 
 Owns: target market, enterprise contracts, release gates.
 Does not own: implementation status ([roadmap.md](roadmap.md)), current system
@@ -32,7 +32,7 @@ authorization languages, MCP traffic routing.
 | Durable identity | `UserID = (OIDC issuer, subject)`. Key rotation, re-login, restart, and a second device must not split policy, budget, quota, or audit attribution. Email/owner strings/key IDs are not identities. | ❌ P0 |
 | Duty separation | Fixed roles (`platform-admin`, `policy-admin`, `provider-admin`, `budget-admin`, `auditor`, `team-admin`) with org/team scope. Every control-plane endpoint authorizes after authenticating. Every policy/provider/pricing/budget/role mutation records actor, capability, scope, before/after hash, generation. | ❌ P0 |
 | Two-pool user budget | Premium pool + total hard cap in one explicit window. Premium exhausted → first compatible model in an admin-approved fallback set; total exhausted → deny before egress. Token quotas must state fallback-or-block explicitly, never inherit monetary behavior. | ❌ P0 |
-| Pre-egress PII policy | Typed detector result; the policy engine (not the plugin) picks `external-unmodified` \| `external-masked` \| `internal-only` \| `blocked` and attaches it as an **egress ceiling**. Later stages may only narrow it. Detector/masker failure is fail-closed. `external-unmodified` requires a completed detector chain reporting nothing protected. | ❌ P0 |
+| Pre-egress PII policy | Typed detector result; the policy engine (not the plugin) picks `external-unmodified` \| `external-masked` \| `internal-only` \| `blocked` and attaches it as an **egress ceiling**. Later stages may only narrow it. Detector/masker failure is fail-closed. `external-unmodified` requires a completed detector chain reporting nothing protected. | 🔶 partial (ADR-043 local inspection + InternalOnly/Block; broader contract remains open) |
 | Fleet enforcement accuracy | Enforcement key ≥ `(org, UserID, pool, windowID)` in a durable ledger. A lease is spend authority already reserved centrally — non-overlapping, immediately reducing central balance, expiry returning only provably-uncommitted authority. Rate/quota must not multiply by data-plane count. | ❌ P0 |
 | Guardrail / residency | A configured guardrail and region lock apply on **every** egress path, with no opt-out reachable from routing config. | ❌ P0 (regressed) |
 | Cost explainability | Every served request settles observed usage against an immutable pricing version; every request mutation the gateway performs is recorded. Cache reads, 5m/1h writes, hit ratio, write-without-reuse, and masking/model-switch cache loss are reported. | 🔶 partial |
@@ -54,6 +54,23 @@ pricing, round-half-even · separate cache-read/5m/1h accounting, including
 interrupted streams · OIDC login, short-lived virtual keys, STS credential
 brokering (ADR-028/040) · hash-chained audit, optional encrypted body capture,
 S3 anchoring (ADR-012/018) · optional Postgres usage analytics (ADR-036).
+
+### Policy-aware routing increment (ADR-043)
+
+Local finite inspection and an enforced destination restriction now constrain every
+attempt. Independent context preferences start in Shadow; Enforce is opt-in for
+short, single-user-turn requests without tools/history. Privacy always enforces.
+The implemented actions are InternalOnly and Block; legacy masking remains separate.
+Boundary labels are operator assertions, detector coverage is finite, unsupported
+content can fail closed, and known translator losses still constrain alternatives.
+This does not complete the broader enterprise PII/masking or durable user fallback
+contract, add Responses ingress, or improve shared-state HA.
+
+Before promoting context to Enforce, compare task success, total settled cost
+including cold-cache writes/retries, p95 latency, and privacy negative cases against
+predeclared baseline gates. No measured savings or production readiness follows
+from passing tests. Upgrade binaries/CRD before activation and use require_sync for
+CP protection before first policy delivery. [Operator guide](policy-routing.md).
 
 ### P0 — blocks the enterprise-ready claim
 
@@ -115,9 +132,12 @@ in-memory with approximate window rollover and prunes dead data-plane spend
 (`internal/controlplane/controlplane.go:39`). Standalone and per-key budgets
 get no lease. Helm pins `replicaCount: 1`.
 
-**PII handling is masking-only.** The `filter` seam and `piimask` plugin
-transform and fail closed, but produce no typed detection result, no
-policy-selected action, no destination classification, and no egress ceiling.
+**The broader PII/masking contract remains partial.** ADR-043 adds typed local
+inspection and policy-selected InternalOnly/Block restrictions across the complete
+attempt chain. Detectors remain finite heuristics; opaque/unknown content is
+uninspectable and boundary labels are operator assertions. The existing `filter`
+and `piimask` transformation path is independent and does not cover every inspected
+surface. Policy-selected external-masked handling still needs a separate contract.
 
 ### P1 — operational competitiveness
 

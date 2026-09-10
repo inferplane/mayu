@@ -1,8 +1,8 @@
 # API
 
 ### 1. Overview
-The HTTP surface: a data plane with two ingresses (Anthropic Messages and OpenAI Chat
-Completions) and an admin plane (health, metrics, key management). Full endpoint
+The HTTP surface: a data plane with Anthropic Messages, OpenAI Chat
+Completions, and native Bedrock ingresses and an admin plane (health, metrics, key management). Full endpoint
 contract is in [docs/api-reference.md](../api-reference.md).
 
 ### 2. Components
@@ -41,7 +41,7 @@ contract is in [docs/api-reference.md](../api-reference.md).
 - Verbatim body forwarding on protocol match; canonical conversion only on mismatch. Model **aliases** (config `models.<name>.aliases`, ADR-021) are normalized to the canonical name BEFORE RBAC/routing/audit/metrics; on the anthropic verbatim path the only body change is a cache-safe top-level `model` rewrite (nested `cache_control` preserved, HTML escaping off).
 - Errors are returned in the ingress protocol's own error shape; the unknown/disallowed-model messages append the allow-filtered available-model list (ADR-021).
 - **Model-level fallback (ADR-029, D5).** `model_fallbacks` (config, requested → served model, one hop) plus a default same-family heuristic (`model_fallback_family`, default on: an unrouted `claude-opus-5` falls back to the highest configured `claude-opus-*` version below it) substitutes a served model for an unconfigured requested one BEFORE the allow-list check — a key allowed only the requested name is denied, never silently downgraded. A configured model whose upstream 404s (or Bedrock 400s `ValidationException`) also crosses to the fallback model within the existing priority-fallback loop; the ingress re-checks RBAC on that cross-model target (`router.FilterModelAllowed`) since it was appended after the original allow-list check. Either path sets `x-inferplane-model-fallback: <served model>` on the response (independent of the existing per-provider `x-inferplane-fallback: <provider>`).
-- **Budget-tier model substitution (ADR-041, `routing.budgetTiers`).** A GovernancePolicy `routing` rule's OTHER half (mutually exclusive with `onAffinityConflict`): `budgetRef` names a numeric-limit budget rule in the same document; each tier's `thresholdPercent`/`substitute` map takes effect once that budget rule's utilization — judged GLOBALLY by the control plane from the ADR-034 lease ledger, latched monotone per budget window — crosses the threshold. `router.SubstituteTier` applies it at ingress on an ALREADY-routed model (distinct from the D5 seam above, which only ever fires on an UNROUTED one, and the two compose: an unrouted model may first take a `model_fallbacks` target, then that target may itself be tier-substituted). Fires only when the original request already passes `Allows`, and only if the substitution TARGET also passes RBAC and is routed on this data plane — never widens access, never turns into a denial; a target that fails either check leaves the original model served. Sets `x-inferplane-substituted-model: <served model>` (a third, independent `x-inferplane-*` header) and stamps the audit record's `model_substituted_from` with the client's original request (`model_requested` already carries the served model, per the convention above). Apply-time validation additionally requires the substitution target to be routed+priced on the enforcing data plane (`policy.Store.SetRoutedAndPriced`) — an unrouted/unpriced target rejects the whole document via the existing rejection-report channel rather than silently billing 0.
+- **Budget-tier model substitution (ADR-041, `routing.budgetTiers`).** A GovernancePolicy `routing` subtype (mutually exclusive with `onAffinityConflict` and `context`): `budgetRef` names a numeric-limit budget rule in the same document; each tier's `thresholdPercent`/`substitute` map takes effect once that budget rule's utilization — judged GLOBALLY by the control plane from the ADR-034 lease ledger, latched monotone per budget window — crosses the threshold. `router.SubstituteTier` applies it at ingress on an ALREADY-routed model (distinct from the D5 seam above, which only ever fires on an UNROUTED one, and the two compose: an unrouted model may first take a `model_fallbacks` target, then that target may itself be tier-substituted). Fires only when the original request already passes `Allows`, and only if the substitution TARGET also passes RBAC and is routed on this data plane — never widens access, never turns into a denial; a target that fails either check leaves the original model served. Sets `x-inferplane-substituted-model: <served model>` (a third, independent `x-inferplane-*` header) and stamps the audit record's `model_substituted_from` with the client's original request (`model_requested` already carries the served model, per the convention above). Apply-time validation additionally requires the substitution target to be routed+priced on the enforcing data plane (`policy.Store.SetRoutedAndPriced`) — an unrouted/unpriced target rejects the whole document via the existing rejection-report channel rather than silently billing 0.
 
 - **Budget windows (ADR-042).** A GovernancePolicy `budget` rule carries an optional `period` — `CalendarDay` or `CalendarMonth`; omitting it means `CalendarMonth`, so every existing document keeps its meaning. It must not be combined with `unlimited: true` ("no cap" has no window). A daily cap and a monthly cap are TWO rules in `spec.rules`, never two fields on one rule — `hardCap`/`failurePolicy`/`lease`/`adminContact` are per-rule, so each window carries its own.
 
@@ -54,3 +54,29 @@ contract is in [docs/api-reference.md](../api-reference.md).
 - Related modules: `internal/router`, `internal/tier`, `internal/governance`, `internal/alert`, `internal/bodystore`, `providers/`
 - Related ADRs: docs/decisions/ADR-016-teams-as-keystore-records.md, docs/decisions/ADR-017-budget-alert-webhooks.md, docs/decisions/ADR-018-opt-in-body-logging.md, docs/decisions/ADR-021-ticket-driven-ux-fixes.md, docs/decisions/ADR-028-cli-oidc-login-short-lived-keys.md, docs/decisions/ADR-029-model-level-fallback.md, docs/decisions/ADR-040-credential-brokering.md, docs/decisions/ADR-041-budget-tier-model-substitution.md, docs/decisions/ADR-042-budget-windows.md
 - Related runbooks: docs/runbooks/, docs/runbooks/cli-login.md
+
+### Policy-routing schema and evidence (ADR-043)
+
+`GovernancePolicy.spec.rules[].sensitiveData` has required `onDetected` and
+`onUninspectable` (`InternalOnly` or `Block`) and explicit `internalModels` (required
+for InternalOnly, no wildcards). It requires FailClosed. `routing.context` requires
+FailOpen, `fromModels`, `simpleModel`, `complexModel`, positive
+`maxSimpleInputTokens`, optional nonblank `complexKeywords`, and mode Shadow
+(default) or Enforce. It is mutually exclusive with affinity/budgetTiers. All
+matching privacy rules intersect; Block wins. See [full schema contract and
+example](../policy-routing.md#policy-fields).
+
+Provider config/admin DTOs accept `data_boundary` internal/external/unknown; omitted
+means unknown. Model DTOs accept nonnegative `context_window` (zero unknown) and
+`capabilities` from tools/vision/reasoning/structured_output. GET config, PUT
+providers/models, and export preserve these fields; unknown enum values reject.
+
+All generation ingresses consume the shared safe chain and return routing refusals
+in their own error shape (403). Both count APIs return local HTTP 200 estimates
+without upstream calls on privacy refusal, unready/stale governance, and body-size
+failures. `x-inferplane-routing-reason` is bounded;
+`x-inferplane-routed-model` advertises applied privacy/context selection. Budget's
+`x-inferplane-substituted-model` remains earlier-stage evidence. Audit requested,
+selected, proposed, and actual-attempt meanings are distinct; see the guide. This
+release adds no Responses endpoint. Upgrade binaries/CRD before new-rule activation;
+CP privacy before first sync requires `require_sync`.

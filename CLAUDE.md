@@ -29,7 +29,11 @@ stated explicitly (see the HA vs. rate-limit-accuracy tension below).
 2. **Per-user model choice** — each user can pick which model they talk to.
 3. **Cost-driven model substitution** — swap to a cheaper model (e.g.
    Sonnet → GLM) when cost, not just capability, is the deciding factor.
-   Enforceable today via `routing.budgetTiers` (ADR-041): `router.SubstituteTier`.
+   Enforceable via `routing.budgetTiers` (ADR-041): `router.SubstituteTier`.
+   ADR-043 adds independent privacy restrictions and Shadow-default context
+   recommendations; opt-in Enforce switches only eligible short requests.
+   Task success, total cost including cold-cache/retries, p95 latency, and privacy
+   negative cases are rollout gates, not benefits established by unit tests.
 4. **Budget control with visibility** — set spend limits per team and per
    individual, block on breach, and always be able to answer "how much have
    we spent."
@@ -75,11 +79,16 @@ when a change spans packages:
    routing in every ingress handler: a fallback target appended after the
    original allow-list check is otherwise unchecked (see internal/CLAUDE.md
    Invariants).
-5. **Governance PreCheck** (`internal/governance` + `internal/proxy.LeaseTable`)
-   — rate/quota/budget with estimated tokens, lease gate for hard caps;
-   deny BEFORE any counter is charged.
-6. **Filters** (`internal/filter` seam, `plugins/piimask`) — opt-in request
-   text transforms; a masker error fails closed.
+5. **Policy-aware request routing** (`internal/router.RouteRequest`, ADR-043) —
+   inspect original bytes once; intersect sensitive-data rules; compute optional
+   context preferences; return the complete safe chain on one topology snapshot.
+   Privacy enforces even in Shadow. Original-model RBAC must pass. Passive results
+   preserve the input preflight model; requested is resolved pre-tier, selected is
+   the policy choice, proposed is observational, actual attempt is separate.
+6. **Filters and admission** — explicit masking (`internal/filter`, `plugins/piimask`)
+   runs after privacy inspection; context preflight uses the returned topology.
+   Governance PreCheck (`internal/governance`, `internal/proxy.LeaseTable`) runs
+   before provider billing; body capture cannot precede the routing decision.
 7. **Provider** (`providers/<name>`) — verbatim `RawBody` when protocols
    match (the cache invariant); Bedrock routes Claude models via
    InvokeModel and every other model family (GPT, GLM, …) via Converse
@@ -110,6 +119,7 @@ internal/          - Private packages (gateway internals)
   proxy/ cache/ telemetry/ - proxy/ owns the control-plane Syncer + LeaseTable (ADR-034) and the UsagePusher (ADR-036); telemetry/ is live (ADR-036): usage wire types, window collector, memory/postgres/durable aggregators; cache/ owns VolatileStore (unimplemented, ADR-031 consolidation target)
   server/          - HTTP data plane + admin plane, ingress handlers
   router/          - Model→provider resolution, fallback chain, circuit breaker; SubstituteTier applies ADR-041 budget-tier substitution
+  sensitivity/     - Stdlib-only original-byte inspection; finite detector categories and request-shape signals (ADR-043)
   tier/            - ADR-041 budget-tier substitution: per-team Table, window-latched activation, shared by controlplane/ and proxy/
   governance/      - Rate / quota / budget enforcement (PreCheck + Settle)
   keystore/        - Virtual-key store (SQLite), Principal + RBAC
@@ -145,6 +155,17 @@ tests/             - Harness tests (hooks, secret patterns, structure) — bash,
 - **Provider isolation:** a new provider adds **one package** under `providers/<name>/` plus a blank-import line in `cmd/mayu/main.go`. Provider PRs touch only `providers/<name>/` and provider docs — **zero core diff**.
 - **Canonical schema invariant:** same-protocol round-trip is lossless. Pipeline-interpreted fields are typed; everything else is preserved verbatim (`Extra map[string]json.RawMessage`). Streaming-frame string fields are `*string` so empty values survive.
 - **Cache invariant:** when provider protocol == ingress protocol, forward the request body **verbatim** (`RawBody`) so `cache_control` and prompt-cache hits are never corrupted.
+- **Policy-aware routing (ADR-043):** privacy can deny; optional context preferences
+  cannot loosen the safe route. All attempts require RBAC/regions; privacy and
+  selected alternatives also require boundary/transport checks. Alternatives need
+  declared context/capabilities and pricing. Boundary labels are operator assertions;
+  finite detectors do not guarantee universal PII detection. No session pinning or
+  Responses ingress is added. Upgrade binaries/CRD before activating new rules.
+- **Policy assembly:** install `live.Holder.RoutedAndPriced` on Store after effective
+  topology construction; revalidate local policy before listeners; future ApplyWire
+  validates too. Rejected sensitive generations fail closed until valid recovery.
+  CP privacy from first request requires `require_sync`; both count APIs use local
+  HTTP-200 estimates while unready/stale or privacy-denied.
 - **Two-phase governance:** pre-check BEFORE billing, settle AFTER. `on_exceeded` is `block` | `warn` (block wins on tie).
 - **Cost is integer microUSD** — never float. Round-half-even via `math/big`.
 - **`mayu` runs standalone by design** — a control plane is optional. `policies` (local file channel) and `control_plane` (ADR-034 heartbeat to `inferplaned`) are mutually exclusive config: one policy source at a time.
@@ -162,8 +183,9 @@ tests/             - Harness tests (hooks, secret patterns, structure) — bash,
 ## Key Commands
 
 ```bash
-# Build the static binary
+# Build both static binaries
 CGO_ENABLED=0 go build -trimpath -o bin/mayu ./cmd/mayu
+CGO_ENABLED=0 go build -trimpath -o bin/inferplaned ./cmd/inferplaned
 
 # Test (race detector) / vet / format check
 go test ./... -race

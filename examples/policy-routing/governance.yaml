@@ -1,0 +1,27 @@
+# Isolated from examples/policies/: these targets belong to config.policy-routing.json.
+apiVersion: inferplane.dev/v1alpha1
+kind: GovernancePolicy
+metadata:
+  name: engineering-policy-routing
+  generation: 1
+spec:
+  subject:
+    team: engineering
+  rules:
+    - name: protected-content
+      failurePolicy: FailClosed
+      sensitiveData:
+        onDetected: InternalOnly
+        onUninspectable: Block
+        internalModels: [private-coder]
+    - name: short-task-preference
+      failurePolicy: FailOpen
+      routing:
+        context:
+          # Privacy is enforced even while context selection is Shadow.
+          mode: Shadow
+          fromModels: [premium-coder]
+          simpleModel: economy-coder
+          complexModel: premium-coder
+          maxSimpleInputTokens: 4096
+          complexKeywords: [security, authentication, migration]
