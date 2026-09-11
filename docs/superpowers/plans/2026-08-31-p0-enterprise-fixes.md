@@ -47,7 +47,7 @@ Status here is implementation evidence, not completion of an entire P0 contract.
 | 2 / billing | `providers/bedrock/mantle.go` refuses unparseable or usage-less successful responses; cache-aware settlement already exists | Preserve observed-usage accounting, partial-stream behavior and immutable pricing across every path |
 | 3–6 / user governance | ADR-042 user-budget rules and `Governor.SetUserLookup` are implemented | Durable issuer/subject identity, user-rate authority, premium/total pools and fleet-wide admission |
 | 7–8 / management trust | Dedicated policy-write token, mutation logging and admin-only provider/model writes exist after #71 | Organization/team capability matrix, durable authorization bindings and complete mutation evidence |
-| 9–11 / fleet enforcement | Team budget leases exist; instance-local and nondurable enforcement limits remain documented | Durable reservations/settlement, authoritative window IDs, safe rate-share issuance and rebalance |
+| 9–11 / fleet enforcement | Team budget leases exist; instance-local and nondurable enforcement limits remain documented | Durable reservations/settlement, authoritative window IDs, safe rate shares and fleet-wide token quotas |
 | 12–13 / PII | Main still has the legacy opt-in masking seam | Integrate or independently implement the approved detection/egress contract, then close the broader masking contract |
 
 There is also a separately reviewed **local, unmerged** implementation:
@@ -106,7 +106,7 @@ support.
 | A: baseline and designs | 1–2, phase design reconciliation | Confirm existing fixes; identify exact remaining behavior before adding code |
 | B: identity and management trust | 3–4 and 7–8 | Verified identities, scoped authorization and accountable mutations |
 | C: durable authority | 9–10 | Shared atomic reserve/settle/release plus durable window IDs |
-| D: fleet user admission | 5–6, then 11 | B and C complete; concurrent/restart/multi-device admission tests pass |
+| D: fleet user admission | 5–6, then 11 | B and C complete; concurrent/restart/multi-device budget, rate and quota tests pass |
 | E: protected-data handling | 12–13 | Approved detection/transform/egress design, dependency review and all ingress tests |
 
 Existing local user-budget behavior remains available with its documented limits.
@@ -319,6 +319,10 @@ implicitly selected SQLite-plus-Redis architecture.
 
 - [ ] Define atomic reserve/settle/release and idempotent reports against the
   full governed key, not only `(policy, rule, window, dataplane)`.
+- [ ] Include token-quota authority alongside monetary authority with distinct
+  typed units and balances. A correct microUSD ledger alone does not enforce
+  `tokens_per_day`; bind quota reservations and settlement to the governed
+  identity/scope and authoritative quota window.
 - [ ] Issuing a grant reserves authority centrally immediately. Concurrent
   issuers cannot issue overlapping authority; a disconnected node's spend is
   never discarded just because its registry entry is pruned.
@@ -351,6 +355,10 @@ Commit: `git commit -s -m "feat: persist and reserve shared budget authority ato
   competing epochs.
 - [ ] Separate daily/monthly rules, identity/pool scopes and pricing/reservation
   generations. Define old-window late settlement and duplicate handling.
+- [ ] Specify token-quota window semantics separately. The current
+  `tokens_per_day` counter uses a duration-based 24-hour window in
+  `internal/limiter`; do not silently turn it into a calendar-day budget window.
+  Define durable window anchoring and an explicit migration if semantics change.
 - [ ] Rollover cannot resurrect spent authority or refund uncertain requests.
   Reconnect/restart cannot re-arm a consumed allowance.
 - [ ] Update tier-latch/window consumers consistently; do not leave the current
@@ -362,7 +370,7 @@ Verify the affected policy, control-plane, proxy, budget and tier packages with 
 
 Commit: `git commit -s -m "feat: distribute durable authoritative budget window identities"`.
 
-## Task 11: Finite rate authority and safe rebalance (P0-05)
+## Task 11: Finite rate authority, token quotas and safe rebalance (P0-05)
 
 **Dependencies:** Tasks 7, 9 and 10, plus an approved rate-share wire/consumer contract.
 
@@ -370,6 +378,18 @@ Commit: `git commit -s -m "feat: distribute durable authoritative budget window 
 `internal/limiter` and Governor admission. Wire delivery currently lives in
 `internal/policy/sync.go`; do not assume `api/v1alpha1/sync.go` already exists.
 
+- [ ] Define token-quota fallback-or-block explicitly, independently of monetary
+  premium-pool substitution. A fallback needs its own sufficient quota authority
+  and must satisfy all restrictions; it cannot bypass an exhausted hard quota.
+  Preserve legacy warn behavior as explicitly non-hard enforcement.
+- [ ] Replace optimistic local quota checks with durable reservation/settlement
+  for the fleet contract. Count actual usage including cache tiers, retain
+  uncertain reservations, and preserve independent team/key/user constraints.
+  Do not assume distributing RPM/TPM shares distributes daily token quota.
+- [ ] Test near-quota concurrent requests across two data planes/devices, key
+  rotation, restart, duplicate reports and quota-window expiry. Total authorized
+  tokens must stay within each hard quota; denied requests make no upstream call.
+  Fleet enterprise readiness remains blocked until these quota tests pass.
 - [ ] Represent unlimited policy separately from a finite allocation. A finite
   zero allocation means **no authority**, not the existing limiter's zero-value
   unlimited sentinel. The consumer must deny/queue it without calling a legacy
@@ -391,7 +411,7 @@ Commit: `git commit -s -m "feat: distribute durable authoritative budget window 
 
 Verify control-plane, proxy, limiter and governance tests with `-race`.
 
-Commit: `git commit -s -m "feat: allocate finite fleet rate authority without overcommit"`.
+Commit: `git commit -s -m "feat: enforce finite fleet rate and token quota authority"`.
 
 ## Task 12: Detection, transformation and destination contracts (P0-06)
 
@@ -652,9 +672,10 @@ phase's local Postgres integration environment; skipping it is not a fleet
 acceptance pass. Tests use fakes/local disposable stores, never production
 credentials, a real IdP or real model invocation.
 
-Before an enterprise-ready claim, demonstrate agreement among admission authority,
-actual provider/model, usage/cost ledger and audit across concurrency, failure,
-restart, key rotation, multiple data planes and every protected-data path.
+Before an enterprise-ready claim, demonstrate agreement among budget/rate/quota
+admission authority, actual provider/model, usage/cost ledger and audit across
+concurrency, failure, restart, key rotation, multiple data planes and every
+protected-data path.
 
 After pushing, inspect AI findings and inline comments for the **latest HEAD**.
 Resolve substantive findings against actual code, commit with `-s`, push and
