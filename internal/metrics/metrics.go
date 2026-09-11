@@ -142,7 +142,7 @@ func (m *Metrics) ObserveRoutingDecision(team, mode, reason string) {
 		"context_shadow", "context_ineligible", "context_unchanged", "context_unavailable",
 		"context_selected", "policy_lookup_failed", "model_forbidden", "inspection_failed",
 		"sensitive_blocked", "no_safe_route", "context_affinity", "mask_failed",
-		"budget_target", "budget_target_unavailable":
+		"budget_target", "budget_target_unavailable", "legacy_mask":
 	default:
 		reason = "unknown"
 	}

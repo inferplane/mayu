@@ -50,6 +50,21 @@ func TestPolicyMaskCannotExemptAnEnabledLegacyFilter(t *testing.T) {
 		})
 	}
 }
+
+func TestResponsesLegacyFilterHandlesCleanAndProtectedRequests(t *testing.T) {
+	for _, text := range []string{"hello", "2125551212"} {
+		f := routingtest.New(t, nil)
+		in, out := int64(2), int64(1)
+		f.Public.Usage = &schema.Usage{InputTokens: &in, OutputTokens: &out}
+		h := responsesapi.NewHandler(f.Router, nil, nil, nil)
+		h.SetMasking(&filter.Masking{Global: true, Filter: piimask.New(piimask.Options{})})
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, routingtest.Request("/", `{"model":"premium","input":"`+text+`"}`))
+		if rec.Code != 200 || len(f.Public.Calls) != 1 || strings.Contains(f.Public.Calls[0].Body, "2125551212") {
+			t.Fatalf("legacy filter could not serve safely: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+}
 func maskRoutingPolicy() *policy.Policy {
 	return &policy.Policy{Name: "mask", Generation: 1, Rules: []policy.Rule{{
 		Name: "protected", SensitiveData: &policy.SensitiveData{

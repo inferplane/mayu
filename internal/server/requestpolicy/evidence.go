@@ -17,7 +17,7 @@ import (
 // Active excludes legacy traffic, preserving its audit bytes and headers.
 // A rejected policy lookup is evidence even when no rule could be loaded.
 func Active(d router.RoutingDecision) bool {
-	return len(d.Policies) > 0 || d.Reason == "policy_lookup_failed" ||
+	return len(d.Policies) > 0 || d.Masked || d.Reason == "mask_failed" || d.Reason == "policy_lookup_failed" ||
 		d.Reason == "budget_target" || d.Reason == "budget_target_unavailable"
 }
 

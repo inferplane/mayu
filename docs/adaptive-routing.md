@@ -112,6 +112,10 @@ OpenAI reference material used:
 
 ## Privacy and cache limits
 
+An enabled legacy PII filter also applies to Responses through the complete
+request transformer. Clean inspectable requests remain usable; protected text
+must satisfy both detector sets, and opaque/unsafe transformations still refuse.
+
 Finite detectors cover email, supported phone formats, Luhn-valid cards, SSNs,
 IPv4 and Korean resident-ID shapes. This is not universal PII recognition.
 Unknown/opaque content takes the configured internal/block path. Masking refuses

@@ -3,6 +3,7 @@
 package responsesapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -20,6 +21,7 @@ import (
 	"github.com/inferplane/inferplane/internal/principal"
 	"github.com/inferplane/inferplane/internal/responses"
 	"github.com/inferplane/inferplane/internal/router"
+	"github.com/inferplane/inferplane/internal/sensitivity"
 	"github.com/inferplane/inferplane/internal/server/requestpolicy"
 	"github.com/inferplane/inferplane/internal/telemetry"
 	"github.com/inferplane/inferplane/internal/tracing"
@@ -108,8 +110,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		SessionHint: requestpolicy.SessionHint(req), Compatible: compatible,
 		Redactor: requestpolicy.CombinedRedactor(h.mask, p.Team),
 	})
-	req = requestpolicy.Observe(w, req, result, h.metrics)
 	if routeErr != nil {
+		req = requestpolicy.Observe(w, req, result, h.metrics)
 		status, reason := 403, result.Decision.Reason
 		if !requestpolicy.Active(result.Decision) && len(chain) > 0 && !slices.ContainsFunc(chain, compatible) {
 			status, reason = 400, "unsupported_conversion"
@@ -129,10 +131,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		raw = result.SanitizedBody
 	}
 	if h.mask.Enabled(p.Team) && !result.Decision.Masked {
-		h.denied(req, p, model, 403, "masking_unavailable", start)
-		writeError(w, 403, "permission_error", "Responses traffic requires a complete sensitiveData masking policy")
-		return
+		sanitized, maskErr := sensitivity.NewRedactorWithMasker(h.mask.Filter).Redact(req.Context(), "responses", raw)
+		if maskErr != nil {
+			result.Decision.Reason = "mask_failed"
+			req = requestpolicy.Observe(w, req, result, h.metrics)
+			h.denied(req, p, model, 403, "mask_failed", start)
+			writeError(w, 403, "permission_error", "request could not be completely masked")
+			return
+		}
+		parsed, err = responses.RequestToCanonical(sanitized)
+		if err != nil {
+			writeError(w, 403, "permission_error", "request could not be completely masked")
+			return
+		}
+		result.Decision.Masked = !bytes.Equal(raw, sanitized)
+		if result.Decision.Masked && len(result.Decision.Policies) == 0 {
+			result.Decision.Reason = "legacy_mask"
+		}
+		raw = sanitized
 	}
+	req = requestpolicy.Observe(w, req, result, h.metrics)
 	// A defensive final check protects native-only fields even on a legacy
 	// no-policy chain, and prevents accidentally adding a lossy adapter.
 	for _, ct := range chain {
