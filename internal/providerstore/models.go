@@ -3,13 +3,14 @@ package providerstore
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 )
 
 const seededKey = "seeded"
 
-// SetModel replaces a model's aliases and ordered target chain. Replace-all in
+// SetModel replaces a model's metadata, aliases, and ordered target chain. Replace-all in
 // one transaction: every existing target position AND every existing alias for
 // the model are deleted, then the new chain/aliases are inserted, so the stored
 // state is exactly route's.
@@ -25,9 +26,19 @@ func (s *SQLiteStore) SetModel(ctx context.Context, name string, route ModelRout
 	return tx.Commit()
 }
 
-// replaceModel does the delete-then-insert for one model's targets and aliases
-// on an open tx (shared by SetModel and Seed).
+// replaceModel replaces model-level metadata and its targets/aliases on one
+// open transaction (shared by SetModel and Seed).
 func replaceModel(ctx context.Context, tx *sql.Tx, name string, route ModelRoute) error {
+	if err := validateRouteMetadata(route); err != nil {
+		return fmt.Errorf("providerstore: model metadata: %w", err)
+	}
+	caps, err := json.Marshal(route.Capabilities)
+	if err != nil {
+		return fmt.Errorf("providerstore: encode model metadata: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO model_metadata (model,context_window,capabilities) VALUES (?,?,?) ON CONFLICT(model) DO UPDATE SET context_window=excluded.context_window, capabilities=excluded.capabilities`, name, route.ContextWindow, string(caps)); err != nil {
+		return fmt.Errorf("providerstore: set model metadata: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM model_targets WHERE model = ?`, name); err != nil {
 		return fmt.Errorf("providerstore: set model: %w", err)
 	}
@@ -52,8 +63,12 @@ func replaceModel(ctx context.Context, tx *sql.Tx, name string, route ModelRoute
 
 func (s *SQLiteStore) ListModels(ctx context.Context) (map[string]ModelRoute, error) {
 	out := map[string]ModelRoute{}
-
-	rows, err := s.db.QueryContext(ctx,
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx,
 		`SELECT model, provider, model_id, api FROM model_targets ORDER BY model, position`)
 	if err != nil {
 		return nil, err
@@ -75,7 +90,7 @@ func (s *SQLiteStore) ListModels(ctx context.Context) (map[string]ModelRoute, er
 	}
 	rows.Close()
 
-	aliasRows, err := s.db.QueryContext(ctx, `SELECT model, alias FROM model_aliases ORDER BY model, alias`)
+	aliasRows, err := tx.QueryContext(ctx, `SELECT model, alias FROM model_aliases ORDER BY model, alias`)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +104,36 @@ func (s *SQLiteStore) ListModels(ctx context.Context) (map[string]ModelRoute, er
 		r.Aliases = append(r.Aliases, alias)
 		out[model] = r
 	}
-	return out, aliasRows.Err()
+	if err := aliasRows.Err(); err != nil {
+		return nil, err
+	}
+	aliasRows.Close()
+	metaRows, err := tx.QueryContext(ctx, `SELECT model, context_window, capabilities FROM model_metadata ORDER BY model`)
+	if err != nil {
+		return nil, err
+	}
+	defer metaRows.Close()
+	for metaRows.Next() {
+		var name, caps string
+		var window int64
+		if err := metaRows.Scan(&name, &window, &caps); err != nil {
+			return nil, err
+		}
+		route := out[name]
+		route.ContextWindow = window
+		if err := json.Unmarshal([]byte(caps), &route.Capabilities); err != nil {
+			return nil, fmt.Errorf("providerstore: decode model metadata: %w", err)
+		}
+		out[name] = route
+	}
+	if err := metaRows.Err(); err != nil {
+		return nil, err
+	}
+	metaRows.Close()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (s *SQLiteStore) DeleteModel(ctx context.Context, name string) error {
@@ -103,7 +147,12 @@ func (s *SQLiteStore) DeleteModel(ctx context.Context, name string) error {
 		return err
 	}
 	n, _ := res.RowsAffected()
-	if n == 0 {
+	metaRes, err := tx.ExecContext(ctx, `DELETE FROM model_metadata WHERE model = ?`, name)
+	if err != nil {
+		return err
+	}
+	metaN, _ := metaRes.RowsAffected()
+	if n == 0 && metaN == 0 {
 		return ErrNotFound
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM model_aliases WHERE model = ?`, name); err != nil {
@@ -148,10 +197,13 @@ func (s *SQLiteStore) Seed(ctx context.Context, providers []ProviderRow, models 
 	}
 
 	for _, p := range providers {
+		if err := validateProviderMetadata(p); err != nil {
+			return false, fmt.Errorf("providerstore: provider metadata: %w", err)
+		}
 		if _, err := tx.ExecContext(ctx, `
-INSERT INTO providers (name, type, base_url, region, auth_mode, auth_profile, api_key_ref_env, api_key_ref_file, auth_header, guardrail_id, guardrail_version)
-VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-			p.Name, p.Type, p.BaseURL, p.Region, p.AuthMode, p.AuthProfile, p.APIKeyRefEnv, p.APIKeyRefFile, p.AuthHeader, p.GuardrailID, p.GuardrailVersion); err != nil {
+INSERT INTO providers (name, type, base_url, region, auth_mode, auth_profile, api_key_ref_env, api_key_ref_file, auth_header, guardrail_id, guardrail_version, data_boundary)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+			p.Name, p.Type, p.BaseURL, p.Region, p.AuthMode, p.AuthProfile, p.APIKeyRefEnv, p.APIKeyRefFile, p.AuthHeader, p.GuardrailID, p.GuardrailVersion, p.DataBoundary); err != nil {
 			return false, fmt.Errorf("providerstore: seed provider %q: %w", p.Name, err)
 		}
 	}

@@ -61,8 +61,14 @@ func OverlayFrom(rawFileCfg *config.Config, provs []ProviderRow, models map[stri
 // was seeded and later emptied is NOT re-seeded — the marker, not a row count,
 // gates this.
 func SeedIfEmpty(ctx context.Context, store Store, rawFileCfg *config.Config) error {
+	if err := config.ValidateModelAliases(rawFileCfg.Models); err != nil {
+		return err
+	}
 	provs := make([]ProviderRow, 0, len(rawFileCfg.Providers))
 	for name, pc := range rawFileCfg.Providers {
+		if err := config.ValidateDataBoundary(pc.DataBoundary); err != nil {
+			return fmt.Errorf("providerstore: seed provider %q: %w", name, err)
+		}
 		// Validate the ref SHAPE through the SAME shared guard the UI write path
 		// uses, BEFORE any DB insert (P4 CRITICAL): a malformed/secret-shaped file
 		// ref must never be persisted/exported/audited via the seed path.
@@ -88,7 +94,7 @@ func SeedIfEmpty(ctx context.Context, store Store, rawFileCfg *config.Config) er
 // providerConfigFromRow maps a DB row to a config.ProviderConfig carrying the
 // ref only (APIKey stays empty — caller resolves).
 func providerConfigFromRow(p ProviderRow) config.ProviderConfig {
-	pc := config.ProviderConfig{Type: p.Type, BaseURL: p.BaseURL, Region: p.Region, AuthHeader: p.AuthHeader, GuardrailID: p.GuardrailID, GuardrailVersion: p.GuardrailVersion}
+	pc := config.ProviderConfig{Type: p.Type, BaseURL: p.BaseURL, Region: p.Region, DataBoundary: p.DataBoundary, AuthHeader: p.AuthHeader, GuardrailID: p.GuardrailID, GuardrailVersion: p.GuardrailVersion}
 	pc.Auth.Mode = p.AuthMode
 	pc.Auth.Profile = p.AuthProfile
 	switch {
@@ -104,7 +110,7 @@ func providerConfigFromRow(p ProviderRow) config.ProviderConfig {
 // REF only — never the resolved APIKey (which is dropped here by construction).
 func rowFromProviderConfig(name string, pc config.ProviderConfig) ProviderRow {
 	r := ProviderRow{
-		Name: name, Type: pc.Type, BaseURL: pc.BaseURL, Region: pc.Region,
+		Name: name, Type: pc.Type, BaseURL: pc.BaseURL, Region: pc.Region, DataBoundary: pc.DataBoundary,
 		AuthMode: pc.Auth.Mode, AuthProfile: pc.Auth.Profile, AuthHeader: pc.AuthHeader, GuardrailID: pc.GuardrailID, GuardrailVersion: pc.GuardrailVersion,
 	}
 	if pc.APIKeyRef != nil {
@@ -118,8 +124,10 @@ func rowFromProviderConfig(name string, pc config.ProviderConfig) ProviderRow {
 // analog of providerConfigFromRow.
 func modelConfigFromRoute(r ModelRoute) config.ModelConfig {
 	return config.ModelConfig{
-		Aliases: append([]string(nil), r.Aliases...),
-		Targets: targetsToConfig(r.Targets),
+		Aliases:       append([]string(nil), r.Aliases...),
+		ContextWindow: r.ContextWindow,
+		Capabilities:  append([]string(nil), r.Capabilities...),
+		Targets:       targetsToConfig(r.Targets),
 	}
 }
 
@@ -127,8 +135,10 @@ func modelConfigFromRoute(r ModelRoute) config.ModelConfig {
 // analog of rowFromProviderConfig.
 func routeFromModelConfig(mc config.ModelConfig) ModelRoute {
 	return ModelRoute{
-		Aliases: append([]string(nil), mc.Aliases...),
-		Targets: targetsFromConfig(mc.Targets),
+		Aliases:       append([]string(nil), mc.Aliases...),
+		ContextWindow: mc.ContextWindow,
+		Capabilities:  append([]string(nil), mc.Capabilities...),
+		Targets:       targetsFromConfig(mc.Targets),
 	}
 }
 
@@ -146,4 +156,14 @@ func targetsFromConfig(ts []config.Target) []Target {
 		out[i] = Target{Provider: t.Provider, Model: t.Model, API: t.API}
 	}
 	return out
+}
+
+// Metadata validation shares the config vocabulary while keeping SQL storage
+// independent of config types, like the existing row/route conversion seam.
+func validateProviderMetadata(p ProviderRow) error {
+	return config.ValidateDataBoundary(p.DataBoundary)
+}
+
+func validateRouteMetadata(r ModelRoute) error {
+	return config.ValidateModelMetadata(r.ContextWindow, r.Capabilities)
 }

@@ -59,9 +59,11 @@ type SecretRef struct {
 }
 
 type ProviderConfig struct {
-	Type      string     `json:"type"`
-	BaseURL   string     `json:"base_url"`
-	APIKeyRef *SecretRef `json:"api_key_ref,omitempty"`
+	// DataBoundary is an operator attestation; empty/unknown never grants internal trust.
+	DataBoundary string     `json:"data_boundary,omitempty"`
+	Type         string     `json:"type"`
+	BaseURL      string     `json:"base_url"`
+	APIKeyRef    *SecretRef `json:"api_key_ref,omitempty"`
 	// APIKey is the RESOLVED secret, filled at load. Tagged "-" so a config
 	// file can never set it inline (defense-in-depth alongside the scan below).
 	APIKey string `json:"-"`
@@ -94,8 +96,10 @@ type Target struct {
 }
 
 type ModelConfig struct {
-	Aliases []string `json:"aliases,omitempty"`
-	Targets []Target `json:"targets"`
+	// Capabilities is the closed operator-declared set: tools, vision, reasoning, structured_output.
+	Capabilities []string `json:"capabilities,omitempty"`
+	Aliases      []string `json:"aliases,omitempty"`
+	Targets      []Target `json:"targets"`
 	// ContextWindow is the model's total context limit in TOKENS
 	// (input + output), operator-declared. 0 (unset) = unknown: no gateway
 	// pre-flight and no exposure. When set, the gateway (a) advertises it in
@@ -700,6 +704,11 @@ func LoadRaw(path string) (*Config, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
 	}
+	for name, p := range cfg.Providers {
+		if err := ValidateDataBoundary(p.DataBoundary); err != nil {
+			return nil, fmt.Errorf("config: provider %q: %w", name, err)
+		}
+	}
 	for i := range cfg.Server.AdminAuth.TokenRefs {
 		ref := cfg.Server.AdminAuth.TokenRefs[i]
 		tok, err := ResolveSecretRef(&ref)
@@ -823,8 +832,8 @@ func ValidateModelAliases(models map[string]ModelConfig) error {
 func validateModelAliases(models map[string]ModelConfig) error {
 	seen := make(map[string]string)
 	for model, mc := range models {
-		if mc.ContextWindow < 0 {
-			return fmt.Errorf("config: model %q context_window must be >= 0 (tokens; 0 = unknown)", model)
+		if err := ValidateModelMetadata(mc.ContextWindow, mc.Capabilities); err != nil {
+			return fmt.Errorf("config: model %q: %w", model, err)
 		}
 		for _, alias := range mc.Aliases {
 			if _, ok := models[alias]; ok {
@@ -1158,6 +1167,9 @@ func validateOTel(o *OTelConfig) error {
 // file) is an error.
 func ResolveProviders(cfg *Config) error {
 	for name, p := range cfg.Providers {
+		if err := ValidateDataBoundary(p.DataBoundary); err != nil {
+			return fmt.Errorf("config: provider %q: %w", name, err)
+		}
 		secret, err := ResolveSecretRef(p.APIKeyRef)
 		if err != nil {
 			return fmt.Errorf("config: provider %q secret: %w", name, err)
@@ -1340,4 +1352,28 @@ func ResolveSecretRef(ref *SecretRef) (string, error) {
 	default:
 		return "", fmt.Errorf("empty secret ref")
 	}
+}
+
+// ValidateDataBoundary validates operator-declared endpoint trust. Empty is unknown.
+func ValidateDataBoundary(boundary string) error {
+	switch boundary {
+	case "", "unknown", "internal", "external":
+		return nil
+	}
+	return fmt.Errorf("data_boundary must be internal, external, or unknown")
+}
+
+// ValidateModelMetadata validates the closed capability vocabulary and context size.
+func ValidateModelMetadata(contextWindow int64, capabilities []string) error {
+	if contextWindow < 0 {
+		return fmt.Errorf("context_window must be >= 0 (tokens; 0 = unknown)")
+	}
+	for _, c := range capabilities {
+		switch c {
+		case "tools", "vision", "reasoning", "structured_output":
+		default:
+			return fmt.Errorf("unknown model capability %q", c)
+		}
+	}
+	return nil
 }

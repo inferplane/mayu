@@ -24,6 +24,7 @@ import (
 type Table struct {
 	mu     sync.RWMutex
 	byTeam map[string]map[string]string
+	strict map[string]map[string]string
 }
 
 // NewTable returns an empty table.
@@ -43,6 +44,23 @@ func (t *Table) Get(team string) map[string]string {
 	out := make(map[string]string, len(m))
 	for k, v := range m {
 		out[k] = v
+	}
+	return out
+}
+
+// Constraints returns an owned map of strict source->target restrictions.
+// An empty target denotes conflicting restrictions and must deny, never restore
+// the original model. Legacy tiers cannot loosen these independent constraints.
+func (t *Table) Constraints(team string) map[string]string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	m := t.strict[team]
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for from, to := range m {
+		out[from] = to
 	}
 	return out
 }
@@ -79,7 +97,20 @@ func higherPressure(cand, cur winner) bool {
 func (t *Table) Set(active []policy.ActiveTier) {
 	byTeam := make(map[string]map[string]string, len(active))
 	chosen := make(map[string]map[string]winner, len(active))
+	strict := make(map[string]map[string]string)
 	for _, a := range active {
+		if a.EnforceTargets {
+			if strict[a.Team] == nil {
+				strict[a.Team] = make(map[string]string)
+			}
+			for from, to := range a.Substitute {
+				if old, exists := strict[a.Team][from]; exists && old != to {
+					strict[a.Team][from] = ""
+				} else {
+					strict[a.Team][from] = to
+				}
+			}
+		}
 		m, ok := byTeam[a.Team]
 		if !ok {
 			m = map[string]string{}
@@ -101,6 +132,7 @@ func (t *Table) Set(active []policy.ActiveTier) {
 	}
 	t.mu.Lock()
 	t.byTeam = byTeam
+	t.strict = strict
 	t.mu.Unlock()
 }
 

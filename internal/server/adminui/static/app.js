@@ -363,7 +363,22 @@ function providerActions(p) {
   const cell = document.createElement("td");
   const edit = document.createElement("button");
   edit.className = "ghost"; edit.textContent = msg("common.edit");
-  edit.addEventListener("click", () => fillProviderForm(p));
+  edit.addEventListener("click", async () => {
+    const generation = ++providerEditGeneration;
+    try {
+      // The table's summary omits auth.profile/auth_header. Replacement edits
+      // need the existing secret-free export, never a resolved credential.
+      const exported = await api("GET", "/admin/config/export");
+      if (generation !== providerEditGeneration) return;
+      const original = exported.providers[p.name];
+      if (!original) throw new Error(msg("prov.editUnavailable"));
+      fillProviderForm(p, original);
+    } catch (err) {
+      if (generation !== providerEditGeneration) return;
+      $("provider-form-status").className = "status err";
+      $("provider-form-status").textContent = String(err.message || err);
+    }
+  });
   const del = document.createElement("button");
   del.className = "ghost"; del.textContent = "✕";
   del.addEventListener("click", async () => {
@@ -408,6 +423,15 @@ const PROVIDER_FIELD_IDS = ["pf-baseurl", "pf-refkind", "pf-refval", "pf-region"
 let lastProviders = [];
 let catalogCache = {};
 let targetSeq = 0;
+let providerEditGeneration = 0;
+let providerEdit = null;
+let modelEdit = null;
+const MODEL_CAPABILITIES = {
+  tools: "mf-cap-tools",
+  vision: "mf-cap-vision",
+  reasoning: "mf-cap-reasoning",
+  structured_output: "mf-cap-structured-output",
+};
 
 // loadCatalog returns known model ids for a provider type (ADR-014 D3),
 // memoized. Advisory only — failures degrade to free-text (empty list).
@@ -432,32 +456,39 @@ function applyProviderTypeFields() {
   for (const id of PROVIDER_FIELD_IDS) $(id).hidden = !shown.includes(id);
 }
 
-// fillProviderForm prefills the register/edit form from a provider view row.
-// The auth STRING is parsed back to the ref kind/name (never a secret value).
-function fillProviderForm(p) {
+// fillProviderForm prefills from the complete secret-free export. The summary
+// row supplies only the name; auth refs/profile are never reconstructed from text.
+function fillProviderForm(p, original) {
+  providerEdit = { name: p.name, body: JSON.parse(JSON.stringify(original)) };
+  // Prefill from the same complete snapshot that will be replaced.
+  p = { name: p.name, ...original };
   $("pf-name").value = p.name;
   $("pf-type").value = p.type;
   applyProviderTypeFields();
   $("pf-baseurl").value = (p.base_url && p.base_url !== "(default)") ? p.base_url : "";
   $("pf-region").value = p.region || "";
-  $("pf-authmode").value = "";
+  $("pf-data-boundary").value = p.data_boundary === "unknown" ? "" : (p.data_boundary || "");
+  $("pf-authmode").value = (p.auth && p.auth.mode) || "";
   $("pf-guardrail-id").value = p.guardrail_id || "";
   $("pf-guardrail-version").value = p.guardrail_version || "";
   $("pf-refkind").value = "none";
   $("pf-refval").value = "";
-  const a = p.auth || "";
-  if (a.indexOf("IAM · ") === 0) {
-    $("pf-authmode").value = a.slice("IAM · ".length);
-  } else if (a.indexOf("api key · env:") === 0) {
-    $("pf-refkind").value = "env"; $("pf-refval").value = a.slice("api key · env:".length);
-  } else if (a.indexOf("api key · file:") === 0) {
-    $("pf-refkind").value = "file"; $("pf-refval").value = a.slice("api key · file:".length);
+  const ref = p.api_key_ref || {};
+  if (ref.env) {
+    $("pf-refkind").value = "env"; $("pf-refval").value = ref.env;
+  } else if (ref.file) {
+    $("pf-refkind").value = "file"; $("pf-refval").value = ref.file;
   }
 }
 
 // fillModelForm prefills the model-route form from a route view row.
 function fillModelForm(m) {
+  modelEdit = { name: m.name, aliases: [...(m.aliases || [])] };
   $("mf-name").value = m.name;
+  $("mf-context-window").value = m.context_window || "";
+  for (const [capability, id] of Object.entries(MODEL_CAPABILITIES)) {
+    $(id).checked = (m.capabilities || []).includes(capability);
+  }
   $("mf-targets").textContent = "";
   for (const t of m.targets || []) addTargetRow(t.provider, t.model, t.api);
   if (!(m.targets || []).length) addTargetRow();
@@ -516,15 +547,26 @@ function addTargetRow(provider, model, apiv) {
 // and the connection-test paths (ADR-014 D2).
 function providerFormBody() {
   const name = $("pf-name").value.trim();
-  const body = { type: $("pf-type").value };
+  const type = $("pf-type").value;
+  const body = providerEdit && providerEdit.name === name && providerEdit.body.type === type
+    ? JSON.parse(JSON.stringify(providerEdit.body)) : {};
+  body.type = type;
+  body.data_boundary = $("pf-data-boundary").value;
+  // Delete form-owned optional fields before rebuilding them so blank really
+  // clears them in the full replacement. Keep unexposed fields from the export.
+  for (const field of ["base_url", "region", "guardrail_id", "guardrail_version", "api_key_ref"]) delete body[field];
   const bu = $("pf-baseurl").value.trim(); if (bu) body.base_url = bu;
   const region = $("pf-region").value.trim(); if (region) body.region = region;
-  const mode = $("pf-authmode").value.trim(); if (mode) body.auth = { mode: mode };
-  if ($("pf-guardrail-id").value.trim()) body.guardrail_id = $("pf-guardrail-id").value.trim();
-  if ($("pf-guardrail-version").value.trim()) body.guardrail_version = $("pf-guardrail-version").value.trim();
-  const kind = $("pf-refkind").value, val = $("pf-refval").value.trim();
-  if (kind === "env" && val) body.api_key_ref = { env: val };
-  else if (kind === "file" && val) body.api_key_ref = { file: val };
+  if (type === "bedrock") {
+    const mode = $("pf-authmode").value.trim();
+    body.auth = { ...(body.auth || {}), mode: mode };
+    if ($("pf-guardrail-id").value.trim()) body.guardrail_id = $("pf-guardrail-id").value.trim();
+    if ($("pf-guardrail-version").value.trim()) body.guardrail_version = $("pf-guardrail-version").value.trim();
+  } else {
+    const kind = $("pf-refkind").value, val = $("pf-refval").value.trim();
+    if (kind === "env" && val) body.api_key_ref = { env: val };
+    else if (kind === "file" && val) body.api_key_ref = { file: val };
+  }
   return { name, body };
 }
 
@@ -587,7 +629,7 @@ $("pf-test").addEventListener("click", async () => {
   }
 });
 
-// Model route save: PUT replaces the named route's ordered target chain.
+// Model route save: PUT replaces metadata, aliases and the ordered target chain.
 $("model-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const name = $("mf-name").value.trim();
@@ -608,9 +650,16 @@ $("model-form").addEventListener("submit", async (e) => {
     return;
   }
   try {
-    await api("PUT", "/admin/models/" + encodeURIComponent(name), { targets: targets });
+    const contextWindow = Number($("mf-context-window").value);
+    if (!Number.isSafeInteger(contextWindow) || contextWindow < 0) throw new Error(msg("prov.invalidContext"));
+    const capabilities = Object.entries(MODEL_CAPABILITIES)
+      .filter(([, id]) => $(id).checked).map(([capability]) => capability);
+    const aliases = modelEdit && modelEdit.name === name ? [...modelEdit.aliases] : [];
+    await api("PUT", "/admin/models/" + encodeURIComponent(name), {
+      targets: targets, aliases: aliases, context_window: contextWindow, capabilities: capabilities,
+    });
     status.className = "status"; status.textContent = msg("common.savedPrefix") + name;
-    $("mf-name").value = ""; $("mf-targets").textContent = ""; addTargetRow();
+    $("model-form").reset();
     await refreshProviders();
   } catch (err) {
     status.className = "status err"; status.textContent = String(err.message || err);
@@ -618,6 +667,20 @@ $("model-form").addEventListener("submit", async (e) => {
 });
 
 $("mf-add-target").addEventListener("click", () => addTargetRow());
+
+$("provider-form").addEventListener("reset", () => {
+  ++providerEditGeneration; // a pending edit fetch must not refill a new draft
+  providerEdit = null;
+  // The reset event precedes native control reset; select the default now so
+  // visibility also returns to the new-provider form immediately.
+  $("pf-type").value = "anthropic";
+  applyProviderTypeFields();
+});
+$("model-form").addEventListener("reset", () => {
+  modelEdit = null;
+  $("mf-targets").textContent = "";
+  addTargetRow();
+});
 
 // Morph the provider form to the selected type (ADR-014 D1).
 $("pf-type").addEventListener("change", applyProviderTypeFields);

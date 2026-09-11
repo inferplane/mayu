@@ -15,6 +15,7 @@ import (
 	"io"
 	"iter"
 	"net/http"
+	"strings"
 
 	"github.com/inferplane/inferplane/internal/openai"
 	"github.com/inferplane/inferplane/pkg/schema"
@@ -34,7 +35,10 @@ func factory(cfg providers.Config) (providers.Provider, error) {
 	if client == nil {
 		client = &http.Client{}
 	}
-	return &provider{baseURL: cfg.BaseURL, apiKey: cfg.APIKey, client: client}, nil
+	// Accept the same root or /v1 base form operators use for Responses and
+	// OpenAI SDK clients; both generation and health append their own /v1 path.
+	baseURL := strings.TrimSuffix(strings.TrimRight(cfg.BaseURL, "/"), "/v1")
+	return &provider{baseURL: baseURL, apiKey: cfg.APIKey, client: client}, nil
 }
 
 func (p *provider) Name() string { return "openai_compatible" }

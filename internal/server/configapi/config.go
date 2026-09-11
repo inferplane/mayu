@@ -17,6 +17,7 @@ import (
 // of holding a secret value — Auth carries only the ref NAME (env var / file
 // path) or IAM mode, which are operationally essential and not sensitive.
 type ProviderView struct {
+	DataBoundary     string `json:"data_boundary,omitempty"`
 	Name             string `json:"name"`
 	Type             string `json:"type"`
 	BaseURL          string `json:"base_url,omitempty"`
@@ -37,9 +38,11 @@ type TargetView struct {
 // category as a provider's Region/GuardrailID) — echoed so the console can
 // prefill an edit (ADR-021 follow-up).
 type ModelView struct {
-	Name    string       `json:"name"`
-	Aliases []string     `json:"aliases,omitempty"`
-	Targets []TargetView `json:"targets"`
+	ContextWindow int64        `json:"context_window,omitempty"`
+	Capabilities  []string     `json:"capabilities,omitempty"`
+	Name          string       `json:"name"`
+	Aliases       []string     `json:"aliases,omitempty"`
+	Targets       []TargetView `json:"targets"`
 }
 
 type View struct {
@@ -63,6 +66,7 @@ func ViewFrom(providers map[string]config.ProviderConfig, models map[string]conf
 			Type:             p.Type,
 			BaseURL:          p.BaseURL,
 			Region:           p.Region,
+			DataBoundary:     p.DataBoundary,
 			GuardrailID:      p.GuardrailID,
 			GuardrailVersion: p.GuardrailVersion,
 			Auth:             authString(p),
@@ -71,7 +75,7 @@ func ViewFrom(providers map[string]config.ProviderConfig, models map[string]conf
 	sort.Slice(v.Providers, func(i, j int) bool { return v.Providers[i].Name < v.Providers[j].Name })
 
 	for name, mc := range models {
-		mv := ModelView{Name: name, Aliases: mc.Aliases, Targets: make([]TargetView, 0, len(mc.Targets))}
+		mv := ModelView{Name: name, Aliases: append([]string(nil), mc.Aliases...), ContextWindow: mc.ContextWindow, Capabilities: append([]string(nil), mc.Capabilities...), Targets: make([]TargetView, 0, len(mc.Targets))}
 		for _, t := range mc.Targets {
 			mv.Targets = append(mv.Targets, TargetView{Provider: t.Provider, Model: t.Model, API: t.API})
 		}

@@ -1,0 +1,12 @@
+apiVersion: inferplane.dev/v1alpha1
+kind: GovernancePolicy
+metadata: {name: engineering-private, generation: 1}
+spec:
+  subject: {team: engineering}
+  rules:
+    - name: protected-input
+      failurePolicy: FailClosed
+      sensitiveData:
+        onDetected: InternalOnly
+        onUninspectable: Block
+        internalModels: [economy]

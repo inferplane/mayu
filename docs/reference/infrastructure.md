@@ -66,3 +66,23 @@ wires an optional IRSA ServiceAccount for Bedrock.
 - Related modules: [docs/architecture.md](../architecture.md) (Infrastructure section)
 - Related ADRs: docs/decisions/ (none yet)
 - Related runbooks: docs/runbooks/ (create `deploy-production.md`)
+
+### Routing rollout (ADR-043)
+
+Upgrade all mayu instances, inferplaned, and the GovernancePolicy CRD when used
+before activating sensitiveData/context rules. Install routes, explicit pricing,
+and verified boundary/capability metadata first. Local policy is revalidated after
+effective topology assembly and before listening; CP ApplyWire validates targets
+on each data plane. Set `control_plane.require_sync` for privacy from first request,
+optionally `max_policy_age` for staleness. Counts stay local/200 while unready/stale.
+Use the isolated `examples/policy-routing/governance.yaml`, not the quick-start
+`examples/policies/` directory. Shadow applies only to context preferences; privacy
+already enforces. No fleet HA or durability improvement is implied. See
+[operator guide](../policy-routing.md).
+
+ADR-044 keeps adaptive decisions and bounded affinity state node-local, with no
+central classifier/cache dependency. Backend failover remains inside approved
+privacy/cost constraints. Already installed rules remain usable during a control
+plane outage while required authority is valid; expired hard leases still deny.
+The Postgres-authoritative durable ledger/window migration remains unimplemented,
+so this is not shared-state HA. See [failure domains](../decisions/ADR-044-adaptive-coding-gateway.md).

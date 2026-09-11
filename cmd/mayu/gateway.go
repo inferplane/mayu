@@ -35,6 +35,7 @@ import (
 	"github.com/inferplane/inferplane/internal/providerstore"
 	"github.com/inferplane/inferplane/internal/proxy"
 	"github.com/inferplane/inferplane/internal/router"
+	"github.com/inferplane/inferplane/internal/sensitivity"
 	"github.com/inferplane/inferplane/internal/server"
 	"github.com/inferplane/inferplane/internal/server/analyticsapi"
 	"github.com/inferplane/inferplane/internal/server/authapi"
@@ -327,6 +328,18 @@ func newGateway(cfgPath string) (*gateway, error) {
 	}
 	holder := &live.Holder{}
 	holder.Swap(st)
+	if polStore != nil {
+		polStore.SetRoutedAndPriced(holder.RoutedAndPriced)
+		// The initial file load precedes topology construction. Revalidate now,
+		// before listeners or policy delivery start, against effective DB/file
+		// routes and prices. Future Reload/ApplyWire calls use the same holder.
+		if len(raw.Policies) > 0 {
+			if err := polStore.Reload(); err != nil {
+				closeAll(pstore, pgstoreQ, store, aud)
+				return nil, fmt.Errorf("policies: %w", err)
+			}
+		}
+	}
 	r := router.New(holder)
 	r.SetMetrics(m) // circuit_state
 
@@ -416,7 +429,9 @@ func newGateway(cfgPath string) (*gateway, error) {
 		}
 		budgetMicros, budgetExceeded := base.BudgetMicrosPerMonth, base.BudgetExceeded
 		if tl.BudgetMicrosPerMonth > 0 {
-			budgetMicros = tl.BudgetMicrosPerMonth
+			if budgetMicros == 0 || tl.BudgetMicrosPerMonth < budgetMicros {
+				budgetMicros = tl.BudgetMicrosPerMonth
+			}
 			// Block wins on tie (CLAUDE.md): a soft policy budget layered
 			// on a base that blocks must NOT loosen enforcement to warn —
 			// the base's on_exceeded is not a dimension the policy rule
@@ -429,7 +444,9 @@ func newGateway(cfgPath string) (*gateway, error) {
 		}
 		budgetDayMicros, budgetDayExceeded := base.BudgetMicrosPerDay, base.BudgetDayExceeded
 		if tl.BudgetMicrosPerDay > 0 {
-			budgetDayMicros = tl.BudgetMicrosPerDay
+			if budgetDayMicros == 0 || tl.BudgetMicrosPerDay < budgetDayMicros {
+				budgetDayMicros = tl.BudgetMicrosPerDay
+			}
 			// Same block-wins-on-tie rule as the month window above, resolved
 			// independently: the two windows are separate rules with separate
 			// hardCap flags, so a soft DAY rule must not soften a blocking
@@ -477,6 +494,15 @@ func newGateway(cfgPath string) (*gateway, error) {
 			}
 			budgetMicros, budgetExceeded = clamp(budgetMicros, budgetExceeded, v1alpha1.PeriodCalendarMonth)
 			budgetDayMicros, budgetDayExceeded = clamp(budgetDayMicros, budgetDayExceeded, v1alpha1.PeriodCalendarDay)
+		}
+		// A strict tier's soft reference is a switching threshold, not a
+		// smaller hard admission cap. If no real cap exists for this window,
+		// a warn-only meter still keeps actual usage available to its judge.
+		if budgetMicros == 0 && tl.RoutingBudgetMicrosPerMonth > 0 {
+			budgetMicros, budgetExceeded = tl.RoutingBudgetMicrosPerMonth, "warn"
+		}
+		if budgetDayMicros == 0 && tl.RoutingBudgetMicrosPerDay > 0 {
+			budgetDayMicros, budgetDayExceeded = tl.RoutingBudgetMicrosPerDay, "warn"
 		}
 		// The daily budget is now a first-class policy window: a
 		// period: CalendarDay budget rule folds into tl.BudgetMicrosPerDay
@@ -551,11 +577,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 	// modelAccess rules narrow every ingress RBAC decision through the router's
 	// policy gate (key allow-list must pass AND the policy must allow); team-
 	// and user-subject rules both apply, user matched on the key's Owner.
-	if polStore != nil {
-		r.SetPolicyGate(func(p keystore.Principal, model string, canonical func(string) string) bool {
-			return polStore.ModelAllowed(p.Team, p.Owner, model, canonical)
-		})
-	}
+	wireRoutingPolicyGates(r, polStore)
 	// ADR-041 budget-tier substitution. Control-plane mode: tiers is
 	// populated by the syncer from resp.ActiveTiers (below), judged
 	// GLOBALLY by inferplaned. Standalone mode: no control plane to judge
@@ -564,10 +586,14 @@ func newGateway(cfgPath string) (*gateway, error) {
 	// budget/rate already carries (internal/CLAUDE.md Design Debt).
 	if raw.ControlPlane != nil {
 		r.SetTierGate(func(p keystore.Principal) map[string]string { return tiers.Get(p.Team) })
+		r.SetBudgetConstraintGate(func(p keystore.Principal) map[string]string { return tiers.Constraints(p.Team) })
 	} else if polStore != nil {
 		standaloneTierLatch := tier.NewLatch()
 		r.SetTierGate(func(p keystore.Principal) map[string]string {
-			return standaloneActiveTierSubstitutions(polStore, gov, standaloneTierLatch, p.Team, time.Now())
+			return standaloneTierTable(polStore, gov, standaloneTierLatch, p.Team, time.Now().In(raw.BudgetLocation())).Get(p.Team)
+		})
+		r.SetBudgetConstraintGate(func(p keystore.Principal) map[string]string {
+			return standaloneTierTable(polStore, gov, standaloneTierLatch, p.Team, time.Now().In(raw.BudgetLocation())).Constraints(p.Team)
 		})
 	}
 	// Control-plane heartbeat (ADR-034): lease gate + syncer. The gate fails
@@ -1658,9 +1684,13 @@ func buildSinks(cfgs []config.AuditSink) ([]audit.Sink, error) {
 // policy/rule name) instead of re-implementing it, so standalone and
 // control-plane mode can never disagree on how two active tiers combine.
 func standaloneActiveTierSubstitutions(store *policy.Store, gov *governance.Governor, latch *tier.Latch, team string, now time.Time) map[string]string {
+	return standaloneTierTable(store, gov, latch, team, now).Get(team)
+}
+
+func standaloneTierTable(store *policy.Store, gov *governance.Governor, latch *tier.Latch, team string, now time.Time) *tier.Table {
 	var active []policy.ActiveTier
 	for _, p := range store.Policies() {
-		if p.Subject.Team != team {
+		if p.Subject.Team != team || p.Subject.User != "" {
 			continue
 		}
 		for _, r := range p.Rules {
@@ -1669,10 +1699,12 @@ func standaloneActiveTierSubstitutions(store *policy.Store, gov *governance.Gove
 			}
 			bt := r.Routing.BudgetTiers
 			var budgetLimit int64
+			period := v1alpha1.PeriodCalendarMonth
 			found := false
 			for _, ref := range p.Rules {
 				if ref.Name == bt.BudgetRef && ref.Budget != nil && !ref.Budget.Unlimited {
 					budgetLimit = ref.Budget.LimitMicroUSD
+					period = ref.Budget.Period
 					found = true
 					break
 				}
@@ -1682,15 +1714,17 @@ func standaloneActiveTierSubstitutions(store *policy.Store, gov *governance.Gove
 			}
 			spent := gov.UsageOf(governance.Subject{Team: team}, governance.KeyPolicy{})
 			var spentMicros int64
-			if spent.TeamBudget != nil {
+			if period == v1alpha1.PeriodCalendarDay && spent.TeamBudgetDay != nil {
+				spentMicros = spent.TeamBudgetDay.SpentUSDMicros
+			} else if period != v1alpha1.PeriodCalendarDay && spent.TeamBudget != nil {
 				spentMicros = spent.TeamBudget.SpentUSDMicros
 			}
-			utilizedPercent := int(100 * float64(spentMicros) / float64(budgetLimit))
+			utilizedPercent := tier.UtilizedPercent(spentMicros, 0, budgetLimit)
 			thresholds := make([]int, len(bt.Tiers))
 			for i, t := range bt.Tiers {
 				thresholds[i] = t.ThresholdPercent
 			}
-			idx := latch.Evaluate(p.Name+"/"+r.Name, tier.WindowKey(now), thresholds, utilizedPercent)
+			idx := latch.Evaluate(p.Name+"/"+r.Name, tier.WindowKeyForPeriod(now, period), thresholds, utilizedPercent)
 			if idx < 0 {
 				continue
 			}
@@ -1698,10 +1732,24 @@ func standaloneActiveTierSubstitutions(store *policy.Store, gov *governance.Gove
 			active = append(active, policy.ActiveTier{
 				Policy: p.Name, Rule: r.Name, BudgetRef: bt.BudgetRef, Team: team,
 				ThresholdPercent: t.ThresholdPercent, Substitute: t.Substitute,
+				EnforceTargets: bt.EnforceTargets,
 			})
 		}
 	}
 	table := tier.NewTable()
 	table.Set(active)
-	return table.Get(team)
+	return table
+}
+
+// wireRoutingPolicyGates shares the local/distributed store with both routing
+// gates. Keeping this assembly socket-free allows direct rejection-gate tests.
+func wireRoutingPolicyGates(r *router.Router, store *policy.Store) {
+	r.SetRequestRedactor(sensitivity.NewRedactor())
+	if store == nil {
+		return
+	}
+	r.SetPolicyGate(func(p keystore.Principal, model string, canonical func(string) string) bool {
+		return store.ModelAllowed(p.Team, p.Owner, model, canonical)
+	})
+	r.SetRoutingPolicyLookup(store.MatchingRoutingPolicies)
 }

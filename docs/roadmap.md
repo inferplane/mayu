@@ -21,14 +21,14 @@ already met by earlier work (ADR-031) outside this roadmap.
 
 | Purpose | Status | Evidence |
 |---|---|---|
-| #1 A single entry point for Claude Code/OpenCode/Codex | 🔶 partial | No Codex-specific code, fixture, or test anywhere in the tree (`grep -ri codex internal/ providers/ tests/` → 0 hits, excluding this doc); the OpenAI-compat ingress (`internal/server/openaiapi/chat.go`) is the presumed path but has never been verified against a real Codex client |
+| #1 A single entry point for Claude Code/OpenCode/Codex | 🔶 protocol support implemented; model evaluation remains | Messages, Chat Completions, Bedrock Invoke and Responses ingresses; native Responses plus stateless adapters, original-byte policy enforcement, and opt-in installed Codex CLI tool round trips (ADR-044). Opaque/stateful cross-model transfer and arbitrary model quality are not implied. |
 | #2 Per-user model choice | ✅ done | User-subject `modelAccess` rules are enforced: `Store.ModelAllowed` (`internal/policy/store.go`), wired into the router via `SetPolicyGate` in `cmd/mayu/gateway.go`. (Per-user *rate* is a separate, still-blocked item — see #4b; per-user *budget* is enforced as of ADR-042 Phase 3.) |
-| #3 Cost-driven model substitution via policy (routing) | ✅ done, with caveats (ADR-041) | `routing.budgetTiers` is enforceable: `internal/policy/store.go` `checkEnforceable` now rejects only the cache-affinity half of `routing`; the control plane judges utilization globally from the ADR-034 ledger (`internal/controlplane/controlplane.go` `handleSync`) and latches the active tier per budget window (`internal/tier.Latch`); mayu applies it at ingress via `router.SubstituteTier`, never widening access or turning into a denial. Config-level `model_fallbacks` (`internal/router/router.go` `ResolveModel`) remains the separate availability-triggered substitution. Caveats: the window-latch key is an interim calendar-month-UTC derivation pending item ② below's real `windowID`; providerstore/UI pricing fields for `openai_compatible` GPU targets (ADR-041 item 6) and the full two-plane e2e (item 7) are follow-ups. |
+| #3 Cost-driven model substitution via policy (routing) | ✅ implemented, rollout gates remain (ADR-041/043/044) | Legacy optional tiers retain their behavior. Opt-in `enforceTargets` constrains all choices/retries and allows threshold 100. Soft strict-tier references are switching meters, independent of total hard admission caps. Three-class context and bounded local successful-target affinity compose with privacy constraints. Evaluation uses integer utilization and referenced day/month windows; durable CP-owned window IDs remain item ②. |
 | #4a Team budget + block | ✅ done, with caveats | ADR-034 lease pattern bounds team-level overspend across data planes when a control plane is attached (worst case = Σ outstanding grants, not exact; window edges are approximate — ADR-034 §Known limits). Per-key budgets are not lease-managed. Standalone `mayu` (no control plane) gets no lease at all — budget is plain in-memory there, like rate. |
 | #4b Per-user budget/rate | 🔶 partial | *Budget* is unblocked (ADR-042 Phase 3): `checkEnforceable` (`internal/policy/store.go`) now rejects only user-subject *rate*; user-subject budget rules are merged by `mergeUserLimits`/`Store.UserLimits` and enforced by the Governor via `governance.SetUserLookup`/`UserPolicy`. *Rate* stays blocked — a per-user rate limit needs the rate-share model (item ① below). And per-user budget has no lease: a user-subject rule is excluded from the control-plane ledger and the consumption report, so with N data planes a user's effective cap is up to N× the configured value (ADR-042 §Accepted limitation, Phase 3) |
 | #4c Rate/quota global accuracy under horizontal scale | ❌ blocked | item ① below — in-memory per-replica buckets; N replicas admit up to N× the configured rate/TPM/quota in aggregate |
 | #4d Spend visibility | ✅ done | `internal/analytics` + console + `GET /admin/logs` (`analyticsapi.LogsHandler`, backed by the same analytics index — its `events` rows carry `cost_micros` per request, `internal/analytics/index.go:40`) |
-| #5 No SPOF (control/data plane split) | ✅ done | ADR-031 — scoped to the control plane not gating the inference path; it does not mean any one `mayu` instance is itself highly available (see #4c and "Current limits") |
+| #5 No central inference SPOF | ✅ control/data-plane separation; authority limits remain | Inference-time classification, policy and pins are local. Installed policy remains usable during a CP outage while required authority is valid; expired hard leases/readiness gates deny. This does not establish an individually HA mayu or accurate shared enforcement (ADR-044). |
 
 **The known tension:** #4c and #5 pull against each other — see `CLAUDE.md` →
 Core Purpose. HA work here means closing that gap, not merely adding
@@ -44,6 +44,26 @@ Sprint plan (each phase = separate PR(s), reviewed before the next):
 | S3 (1–2 wk) | ③ phase 2 (signed self-update) + ⑤ embeddings lane | Release pipeline work + first non-chat modality |
 
 ---
+
+## Policy-aware routing v1 (ADR-043, extended by ADR-044)
+
+Implemented: original-byte local inspection; FailClosed sensitiveData destination
+restrictions on every attempt; Shadow-default context recommendations; opt-in
+Enforce for completely inspectable single-user-turn requests without history/tools/
+media/reasoning/structured output; persisted topology metadata; ingress/count
+integration; bounded audit/headers/counter evidence; startup and policy-apply target
+validation. The input threshold chooses simple versus complex, not eligibility;
+a distinct compatible complex target can be selected above it. This extends
+cost-driven routing without replacing ADR-041 budgets.
+
+Rollout evaluation remains open: task success, total cost including cold-cache
+writes/retries, p95 latency, and privacy-policy negative cases must pass declared
+baseline-relative gates before Enforce. Finite detectors and translator capabilities
+remain limits; this is not universal PII detection or measured savings. Durable
+cross-node session pinning, learned/remote classifiers and shared-state HA
+remain separate work. ADR-044 adds bounded local pins, Responses and complete Mask
+policy handling; see [adaptive routing](adaptive-routing.md). Upgrade binaries/CRD before activating rules; require_sync is
+needed for CP privacy before first request. See [guide](policy-routing.md).
 
 ## ① Global rate limits via rate shares (ADR candidate — unassigned; ADR-036 has since shipped as control-plane usage telemetry)
 

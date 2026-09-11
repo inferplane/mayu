@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"sync/atomic"
 	"time"
@@ -40,6 +41,15 @@ type TeamLimits struct {
 	BudgetMicrosPerDay int64
 	BudgetDayHard      bool
 	AdminContactDay    string
+	// RoutingBudgetMicrosPerMonth/Day are finite budget limits referenced by
+	// explicit strict routing tiers, in microUSD. They are accounting thresholds,
+	// NOT admission caps and do not contribute to either BudgetHard flag.
+	// Zero means no routing-only threshold. Multiple thresholds fold to the
+	// smallest nonzero value per window; tier activation still uses each rule's
+	// own budget and percentage. Callers may install warn-only accounting from
+	// these fields only when no actual config/DB/policy admission limit exists.
+	RoutingBudgetMicrosPerMonth int64
+	RoutingBudgetMicrosPerDay   int64
 }
 
 // UserLimits is the merged, enforceable BUDGET view — both calendar windows —
@@ -65,19 +75,14 @@ type UserLimits struct {
 // swaps the whole set at once (the same generation posture as live.Holder,
 // ADR-006). A failed reload keeps the previous snapshot serving.
 //
-// Enforceability gate: this data plane build can enforce team-subject budget
-// and rate rules (via the Governor's team lookup), user-subject budget rules
-// (via the Governor's user lookup, ADR-042 Phase 3), and team- or
-// user-subject modelAccess rules (via the Router's policy gate). Anything
-// else — routing rules, user-subject rate — is REJECTED at load with an
-// explicit *UnsupportedError, never silently accepted-and-ignored (the
-// version-skew stance). The gates lift as the corresponding enforcement
-// lands.
+// Enforceability gate: team budget/rate, user budget and modelAccess retain
+// their existing checks. Budget tiers and the sensitive/context routing forms
+// are exposed to routing consumers; cache affinity and user rate remain rejected.
 type Store struct {
 	paths []string
 	snap  atomic.Pointer[snapshot]
 
-	// routedAndPriced validates a budgetTiers substitution TARGET model
+	// routedAndPriced validates a routing TARGET model
 	// against this data plane's own topology (ADR-041 D1): the target must
 	// be routed (live.State.Route) and priced (pricing.HasRate). nil means
 	// skip the check — the control plane holds no topology of its own and
@@ -86,8 +91,8 @@ type Store struct {
 	routedAndPriced func(model string) error
 }
 
-// SetRoutedAndPriced installs the apply-time target check for budgetTiers
-// substitution rules. A data plane must call this before Reload/ApplyWire so
+// SetRoutedAndPriced installs the apply-time target check for budgetTiers,
+// sensitiveData.internalModels, and routing.context targets. A data plane must call this before Reload/ApplyWire so
 // a rule naming an unrouted or unpriced target is rejected and reported
 // upstream instead of silently billing 0 (ADR-030) once it activates.
 func (s *Store) SetRoutedAndPriced(f func(model string) error) {
@@ -96,9 +101,12 @@ func (s *Store) SetRoutedAndPriced(f func(model string) error) {
 
 type snapshot struct {
 	policies []*Policy
-	files    map[string]time.Time // watched file → mtime at load
-	teams    map[string]TeamLimits
-	users    map[userKey]UserLimits
+	// rejectedRouting retains affected subjects after rejected mandatory privacy
+	// OR strict budget-routing documents, until a valid correction arrives.
+	rejectedRouting map[string][]Subject
+	files           map[string]time.Time // watched file → mtime at load
+	teams           map[string]TeamLimits
+	users           map[userKey]UserLimits
 }
 
 // NewStore loads the given paths (files or directories) and fails on any
@@ -133,9 +141,56 @@ func (s *Store) ApplyWire(docs []v1alpha1.GovernancePolicy) []Rejection {
 	var accepted []*Policy
 	var rejected []Rejection
 	seen := make(map[string]bool, len(docs))
+	counts := make(map[string]int, len(docs))
+	for i := range docs {
+		counts[docs[i].Metadata.Name]++
+	}
+	previous := s.snap.Load()
+	pending := make(map[string][]Subject)
+	if previous != nil {
+		for name, subjects := range previous.rejectedRouting {
+			pending[name] = append([]Subject(nil), subjects...)
+		}
+	}
+	rememberRejection := func(doc *v1alpha1.GovernancePolicy) {
+		name := doc.Metadata.Name
+		subjects := pending[name]
+		add := func(sub Subject) {
+			for _, old := range subjects {
+				if old == sub {
+					return
+				}
+			}
+			subjects = append(subjects, sub)
+		}
+		for _, r := range doc.Spec.Rules {
+			if r.SensitiveData != nil || (r.Routing != nil && r.Routing.BudgetTiers != nil && r.Routing.BudgetTiers.EnforceTargets) {
+				add(Subject{Team: doc.Spec.Subject.Team, User: doc.Spec.Subject.User})
+				break
+			}
+		}
+		if previous != nil {
+			for _, p := range previous.policies {
+				if p.Name == name && hasMandatoryRouting(p) {
+					add(p.Subject)
+				}
+			}
+		}
+		// A duplicate can reject a mandatory document accepted earlier in this
+		// same distribution; preserve legacy first-document acceptance, but gate it.
+		for _, p := range accepted {
+			if p.Name == name && hasMandatoryRouting(p) {
+				add(p.Subject)
+			}
+		}
+		if len(subjects) > 0 {
+			pending[name] = subjects
+		}
+	}
 	for i := range docs {
 		name := docs[i].Metadata.Name
 		if name == "" || seen[name] {
+			rememberRejection(&docs[i])
 			rejected = append(rejected, Rejection{Policy: name, Reason: "metadata.name missing or duplicate in distributed set"})
 			continue
 		}
@@ -145,6 +200,7 @@ func (s *Store) ApplyWire(docs []v1alpha1.GovernancePolicy) []Rejection {
 			err = checkEnforceable(p, s.routedAndPriced)
 		}
 		if err != nil {
+			rememberRejection(&docs[i])
 			rej := Rejection{Policy: name, Reason: err.Error()}
 			var ue *UnsupportedError
 			if errors.As(err, &ue) {
@@ -154,12 +210,21 @@ func (s *Store) ApplyWire(docs []v1alpha1.GovernancePolicy) []Rejection {
 			rejected = append(rejected, rej)
 			continue
 		}
+		if counts[name] == 1 {
+			delete(pending, name)
+		}
 		accepted = append(accepted, p)
 	}
+	// A nameless rejected document has no stable identity to correct individually.
+	// Only a nonempty, entirely valid distribution can correct that ambiguity.
+	if len(rejected) == 0 && len(docs) > 0 {
+		delete(pending, "")
+	}
 	s.snap.Store(&snapshot{
-		policies: accepted,
-		teams:    mergeTeamLimits(accepted),
-		users:    mergeUserLimits(accepted),
+		rejectedRouting: pending,
+		policies:        accepted,
+		teams:           mergeTeamLimits(accepted),
+		users:           mergeUserLimits(accepted),
 	})
 	return rejected
 }
@@ -207,8 +272,29 @@ func checkEnforceable(p *Policy, routedAndPriced func(model string) error) error
 		return &UnsupportedError{APIVersion: SupportedAPIVersions[0], Kind: "GovernancePolicy", Rule: rule, Reason: reason}
 	}
 	for _, r := range p.Rules {
+		if routedAndPriced != nil {
+			var targets []string
+			if r.SensitiveData != nil {
+				targets = append(targets, r.SensitiveData.InternalModels...)
+			}
+			if r.Routing != nil && r.Routing.Context != nil {
+				targets = append(targets, r.Routing.Context.SimpleModel, r.Routing.Context.ComplexModel)
+				if r.Routing.Context.NormalModel != "" {
+					targets = append(targets, r.Routing.Context.NormalModel)
+				}
+			}
+			for _, target := range targets {
+				if err := routedAndPriced(target); err != nil {
+					return reject(r.Name, fmt.Sprintf("routing policy target %q: %v", target, err))
+				}
+			}
+		}
 		if r.Routing != nil && r.Routing.Affinity != nil {
 			return reject(r.Name, "cache-affinity routing rules are not yet enforceable by this data plane build")
+		}
+		if r.Routing != nil && r.Routing.BudgetTiers != nil && r.Routing.BudgetTiers.EnforceTargets &&
+			(p.Subject.Team == "" || p.Subject.User != "") {
+			return reject(r.Name, "strict budget tiers require a team-only subject in this build")
 		}
 		if r.Routing != nil && r.Routing.BudgetTiers != nil && routedAndPriced != nil {
 			for _, tier := range r.Routing.BudgetTiers.Tiers {
@@ -293,9 +379,14 @@ func (s *Store) changed() bool {
 	return false
 }
 
-// Policies returns the current snapshot's policy set (read-only).
+// Policies returns a deep copy of the current snapshot's policy set.
 func (s *Store) Policies() []*Policy {
-	return s.snap.Load().policies
+	policies := s.snap.Load().policies
+	out := make([]*Policy, 0, len(policies))
+	for _, p := range policies {
+		out = append(out, clonePolicy(p))
+	}
+	return out
 }
 
 // TeamLimits returns the merged budget/rate limits of every team-subject
@@ -380,7 +471,9 @@ func allowsModel(allow []string, model string, canon func(string) string) bool {
 // budget windows fold independently, the smallest non-zero limit binds each
 // dimension within its own window, and a window's budget is hard if the
 // binding (smallest) budget rule for that window — or any equal to it — is a
-// hard cap. An unlimited rule touches neither window.
+// hard cap. An unlimited rule touches neither window. A finite soft budget
+// referenced by a strict routing tier contributes only to the separate routing
+// accounting threshold for its window, never to an admission cap.
 //
 // A team gets an entry ONLY when some rule actually contributed a budget or
 // rate: a modelAccess-only policy must not manufacture an all-zero (=
@@ -406,6 +499,14 @@ func mergeTeamLimits(policies []*Policy) map[string]TeamLimits {
 			}
 			if r.Budget != nil {
 				contributed = true
+				if IsRoutingOnlyBudget(p, r.Name) {
+					if r.Budget.Period == v1alpha1.PeriodCalendarDay {
+						tl.RoutingBudgetMicrosPerDay = minNonZero(tl.RoutingBudgetMicrosPerDay, r.Budget.LimitMicroUSD)
+					} else {
+						tl.RoutingBudgetMicrosPerMonth = minNonZero(tl.RoutingBudgetMicrosPerMonth, r.Budget.LimitMicroUSD)
+					}
+					continue
+				}
 				switch {
 				case r.Budget.Unlimited:
 					// An explicit "no cap" declaration must never narrow OR
@@ -564,4 +665,113 @@ func mergeUserLimits(policies []*Policy) map[userKey]UserLimits {
 		}
 	}
 	return out
+}
+
+// ErrRoutingPolicyRejected means mandatory privacy or strict budget routing
+// cannot safely be enforced. Callers must deny before any upstream request.
+var ErrRoutingPolicyRejected = errors.New("mandatory routing policy distribution rejected")
+
+// ErrSensitivePolicyRejected preserves the original sentinel identity for
+// existing callers. It now also covers rejected mandatory budget routing.
+var ErrSensitivePolicyRejected = ErrRoutingPolicyRejected
+
+// MatchingRoutingPolicies loads one snapshot and returns matching sensitiveData
+// and routing.context rules, with policy names/generations and owned nested data.
+// Rejections of current OR formerly mandatory privacy/strict-budget documents
+// fail closed for all affected subjects until a valid replacement is applied.
+// This gate applies even when no context/privacy rules remain to return. A
+// missing subject on a rejected mandatory document matches everyone.
+func (s *Store) MatchingRoutingPolicies(team, user string) ([]*Policy, error) {
+	snap := s.snap.Load()
+	for _, subjects := range snap.rejectedRouting {
+		for _, sub := range subjects {
+			if sub.matches(team, user) {
+				return nil, ErrRoutingPolicyRejected
+			}
+		}
+	}
+	var out []*Policy
+	for _, p := range snap.policies {
+		if !p.Subject.matches(team, user) {
+			continue
+		}
+		cp := *p
+		cp.Rules = nil
+		for _, r := range p.Rules {
+			if r.SensitiveData != nil || (r.Routing != nil && r.Routing.Context != nil) {
+				cp.Rules = append(cp.Rules, cloneRule(r))
+			}
+		}
+		if len(cp.Rules) > 0 {
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
+}
+
+func hasMandatoryRouting(p *Policy) bool {
+	for _, r := range p.Rules {
+		if r.SensitiveData != nil || (r.Routing != nil && r.Routing.BudgetTiers != nil && r.Routing.BudgetTiers.EnforceTargets) {
+			return true
+		}
+	}
+	return false
+}
+
+func clonePolicy(p *Policy) *Policy {
+	cp := *p
+	cp.Rules = make([]Rule, len(p.Rules))
+	for i, r := range p.Rules {
+		cp.Rules[i] = cloneRule(r)
+	}
+	return &cp
+}
+
+func cloneRule(r Rule) Rule {
+	if r.Budget != nil {
+		b := *r.Budget
+		r.Budget = &b
+	}
+	if r.Rate != nil {
+		rate := *r.Rate
+		r.Rate = &rate
+	}
+	if r.ModelAccess != nil {
+		a := *r.ModelAccess
+		a.Allow = append([]string(nil), a.Allow...)
+		r.ModelAccess = &a
+	}
+	if r.SensitiveData != nil {
+		sd := *r.SensitiveData
+		sd.InternalModels = append([]string(nil), sd.InternalModels...)
+		r.SensitiveData = &sd
+	}
+	if r.Routing != nil {
+		rt := *r.Routing
+		r.Routing = &rt
+		if rt.Affinity != nil {
+			a := *rt.Affinity
+			rt.Affinity = &a
+		}
+		if rt.Context != nil {
+			c := *rt.Context
+			c.FromModels = append([]string(nil), c.FromModels...)
+			c.ComplexKeywords = append([]string(nil), c.ComplexKeywords...)
+			if c.Stability != nil {
+				stability := *c.Stability
+				c.Stability = &stability
+			}
+			rt.Context = &c
+		}
+		if rt.BudgetTiers != nil {
+			bt := *rt.BudgetTiers
+			source := bt.Tiers
+			rt.BudgetTiers = &bt
+			bt.Tiers = make([]BudgetTier, len(source))
+			for i, t := range source {
+				bt.Tiers[i] = BudgetTier{ThresholdPercent: t.ThresholdPercent, Substitute: maps.Clone(t.Substitute)}
+			}
+		}
+	}
+	return r
 }

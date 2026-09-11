@@ -1,0 +1,11 @@
+apiVersion: inferplane.dev/v1alpha1
+kind: GovernancePolicy
+metadata: {name: engineering-mask, generation: 1}
+spec:
+  subject: {team: engineering}
+  rules:
+    - name: protected-input
+      failurePolicy: FailClosed
+      sensitiveData:
+        onDetected: Mask
+        onUninspectable: Block
