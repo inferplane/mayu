@@ -52,8 +52,14 @@ stated explicitly (see the HA vs. rate-limit-accuracy tension below).
 Running N node-local data planes removes the SPOF, but in-memory
 per-instance counters mean rate limits and quotas become up to N× the
 configured value unless enforcement is made globally accurate — as ADR-034
-did (with bounded, not exact, overshoot) for team budget in control-plane
-mode, but not yet for rate/quota or standalone budget — see
+originally bounded for team budget. ADR-045 now provides opt-in Postgres
+authority for global GovernancePolicy money budgets (team and user scopes),
+with private durable node journals and per-attempt conservative reservation.
+Control-plane replicas share the ledger; inference needs no database call.
+Restart burns old open node grants; expiry never refunds central authority;
+only complete known usage releases unused local reservations. UTC windows
+belong to database time. Missing/invalid authority fails closed. This does not
+globalize rate/quota, key-local budgets or SQLite key storage — see
 `docs/roadmap.md`. Any HA or multi-replica work must close this gap for #4,
 not just add replicas.
 
@@ -123,6 +129,7 @@ api/v1alpha1/      - Versioned config API wire types (CRD-style shape, gRPC/HTTP
 internal/          - Private packages (gateway internals)
   policy/          - Rule + lease schema shared by both binaries (the single truth, ADR-031); loader/store + sync wire types (ADR-033/034)
   policystore/     - Postgres-authoritative GovernancePolicy store for inferplaned (ADR-038)
+  authority/       - pgstore: transactional global budget authority; local: private SQLite per-attempt journal (ADR-045), opt-in via control_plane.authority
   controlplane/    - inferplaned distribution core: sync heartbeat, lease ledger, dataplane view (ADR-034)
   proxy/ cache/ telemetry/ - proxy/ owns the control-plane Syncer + LeaseTable (ADR-034) and the UsagePusher (ADR-036); telemetry/ is live (ADR-036): usage wire types, window collector, memory/postgres/durable aggregators; cache/ owns VolatileStore (unimplemented, ADR-031 consolidation target)
   server/          - HTTP data plane + admin plane, ingress handlers

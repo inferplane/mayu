@@ -20,11 +20,7 @@ import (
 // zero-dependency default path (this whole test file) must never require one.
 func analyticsModeBTestDSN(t *testing.T) string {
 	t.Helper()
-	dsn := os.Getenv("INFERPLANE_TEST_PG_DSN")
-	if dsn == "" {
-		t.Skip("INFERPLANE_TEST_PG_DSN not set; skipping Mode B gateway integration test")
-	}
-	return dsn
+	return isolatedPostgresDSN(t)
 }
 
 func getAdmin(t *testing.T, url, token string) *http.Response {
@@ -94,6 +90,7 @@ func TestGatewayAnalyticsModeBEndToEnd(t *testing.T) {
 	wg.Add(1)
 	serveErr := make(chan error, 1)
 	go func() { defer wg.Done(); serveErr <- g.serve(ctx) }()
+	t.Cleanup(func() { cancel(); wg.Wait() })
 
 	adminURL := "http://" + g.AdminAddr()
 	token := "mode-b-admin-token"
@@ -118,7 +115,7 @@ func TestGatewayAnalyticsModeBEndToEnd(t *testing.T) {
 		t.Fatal("aggregator never ingested the fixture segment within the deadline")
 	}
 
-	resp := getAdmin(t, adminURL+"/admin/analytics/summary", token)
+	resp := getAdmin(t, adminURL+"/admin/analytics/summary?since=2026-07-07&until=2026-07-08", token)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != 200 || !strings.Contains(string(body), `"cost_micros":777`) {

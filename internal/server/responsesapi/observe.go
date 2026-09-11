@@ -8,6 +8,7 @@ import (
 	"github.com/inferplane/inferplane/internal/governance"
 	"github.com/inferplane/inferplane/internal/keystore"
 	"github.com/inferplane/inferplane/internal/pricing"
+	"github.com/inferplane/inferplane/internal/server/requestpolicy"
 	"github.com/inferplane/inferplane/internal/tracing"
 	"github.com/inferplane/inferplane/pkg/schema"
 	"github.com/inferplane/inferplane/pkg/ulid"
@@ -95,6 +96,7 @@ func (a attempt) finish(status int, u *schema.Usage, body []byte, partial bool, 
 	if partial {
 		tracing.SetPartial(span)
 	}
+	requestpolicy.SettleBudget(a.req, cost, u, status/100 == 2 && !partial)
 	tracing.SetStatus(span, status/100 == 2 && !partial, "")
 	a.h.metrics.ObserveRequest("responses", a.target.Model, a.target.ProviderName, a.principal.Team, status, time.Since(a.started).Seconds(), ttft)
 	id := ulid.New()

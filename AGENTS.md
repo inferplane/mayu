@@ -1,4 +1,4 @@
-<!-- generated-by: co-agent · source: CLAUDE.md · claude-md-sha: 2560a9843d3a · generated-at: 2026-09-11 · DO NOT EDIT — edit CLAUDE.md then run /co-agent sync-context -->
+<!-- generated-by: co-agent · source: CLAUDE.md · claude-md-sha: 07d9ebadf7b3 · generated-at: 2026-09-11 · DO NOT EDIT — edit CLAUDE.md then run /co-agent sync-context -->
 > You are an external reviewer for this repo — project context below, distilled
 > from CLAUDE.md. This file is shared verbatim by Kiro, Codex, and Agy (not a
 > per-AI copy).
@@ -139,15 +139,16 @@ credentials, or a real IdP (httptest fakes only).
 - Audit chain: records are hashed as exact line bytes — new fields are
   append-only with `omitempty`, proven by a mixed-version fixture test.
 - Fail closed: missing identity/lookup errors deny, never default-allow.
-- ADR-044 records node-local failure boundaries and the Postgres-only shared
-  authority direction, narrower than ADR-013's original Postgres+Redis design.
-  Durable reserve/settle/window implementation remains deferred; ADR-013 is
-  not marked superseded and routing changes do not implement shared-state HA. Rate-limit counters, budget/quota
-  stores, and the circuit breaker are all instance-local today. **Suppress**
-  "the in-memory limiter/budget won't scale past one replica" as a new
-  architecture finding — that's the known, tracked gap. **Do flag** any doc,
-  chart value, config comment, or code comment that implies multi-replica/HA
-  works *today* — that's a docs-accuracy bug, not the known gap.
+- ADR-045 implements opt-in Postgres global GovernancePolicy monetary authority
+  across node-local gateways and control-plane replicas. Every provider attempt
+  reserves durable local credit; incomplete/unknown usage retains uncertainty.
+  Expiry never refunds central grants; node restart burns old OPEN grants and
+  fences prior journal users. UTC windows come from database time. Snapshot
+  validation and journal installation precede policy publication. No memory
+  fallback, hidden transport retries, or fabricated actual cost.
+- Shared gateway key storage, rate limits and token quotas remain node-local.
+  Suppress those tracked limitations as new findings, but flag claims that this
+  monetary profile alone provides interchangeable shared-gateway HA.
 
 ## Review checklist
 
