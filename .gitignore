@@ -18,6 +18,9 @@ coverage.out
 # co-agent consensus ephemeral state
 .claude/co-agent-consensus/
 
+# multi-model review output (regenerable; conclusions land in docs/ or an ADR)
+/review/
+
 # operator-local notes (never commit)
 /secrets
 
