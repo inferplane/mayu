@@ -73,6 +73,9 @@ jobs:
             avoid GitHub's 20,000-line diff API limit. Do not treat a failed
             `gh pr diff`, truncated output, or unread patches as completed coverage.
             Read the corresponding checked-out source for context as needed.
+            Perform this review synchronously. Do not delegate to background agents
+            or return a progress update as the final answer. Finish reading all
+            patches and posting the findings before returning the structured verdict.
             Be a rigorous but constructive reviewer. Prioritize:
             - Correctness and bugs
             - Security and the project's NON-NEGOTIABLE invariants in CLAUDE.md:
@@ -98,7 +101,7 @@ jobs:
           # step gates on (see "Enforce no CRITICAL/HIGH findings" below) — this is
           # what turns the review from advisory-only into an actual merge gate once
           # this check is marked required in branch protection.
-          claude_args: '--model ${{ vars.CLAUDE_BEDROCK_MODEL || ''us.anthropic.claude-fable-5'' }} --allowed-tools "Read,Glob,Grep,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh search:*),Bash(gh issue view:*)" --json-schema "{\"type\":\"object\",\"required\":[\"max_severity\",\"verdict\",\"review_complete\",\"reviewed_head_sha\"],\"properties\":{\"max_severity\":{\"type\":\"string\",\"enum\":[\"NONE\",\"LOW\",\"MEDIUM\",\"HIGH\",\"CRITICAL\"]},\"verdict\":{\"type\":\"string\",\"enum\":[\"approve\",\"block\"]},\"review_complete\":{\"type\":\"boolean\"},\"reviewed_head_sha\":{\"type\":\"string\"},\"summary\":{\"type\":\"string\"}}}"'
+          claude_args: '--model ${{ vars.CLAUDE_BEDROCK_MODEL || ''us.anthropic.claude-fable-5'' }} --disallowed-tools "Agent,Task" --allowed-tools "Read,Glob,Grep,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh search:*),Bash(gh issue view:*)" --json-schema "{\"type\":\"object\",\"required\":[\"max_severity\",\"verdict\",\"review_complete\",\"reviewed_head_sha\"],\"properties\":{\"max_severity\":{\"type\":\"string\",\"enum\":[\"NONE\",\"LOW\",\"MEDIUM\",\"HIGH\",\"CRITICAL\"]},\"verdict\":{\"type\":\"string\",\"enum\":[\"approve\",\"block\"]},\"review_complete\":{\"type\":\"boolean\"},\"reviewed_head_sha\":{\"type\":\"string\"},\"summary\":{\"type\":\"string\"}}}"'
 
       - name: Enforce no CRITICAL/HIGH findings
         if: always()
