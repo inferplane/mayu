@@ -245,13 +245,16 @@ type BudgetTiersRule struct {
 	// Tiers must be strictly increasing by ThresholdPercent; the highest
 	// tier whose threshold the current utilization has crossed is active.
 	Tiers []BudgetTier `json:"tiers"`
+	// EnforceTargets constrains every attempt to the active substitution target.
+	// Unlike legacy substitution, an unavailable target refuses the request.
+	EnforceTargets bool `json:"enforceTargets,omitempty"`
 }
 
 // BudgetTier activates its Substitute map once utilization reaches
 // ThresholdPercent of the referenced budget rule's limit.
 type BudgetTier struct {
-	// ThresholdPercent must be in [1, 99] and strictly greater than the
-	// previous tier's in the same rule.
+	// ThresholdPercent must be in [1, 99], or [1, 100] with EnforceTargets,
+	// and strictly greater than the previous tier's in the same rule.
 	ThresholdPercent int `json:"thresholdPercent"`
 	// Substitute maps requested model name -> substitution target. A model
 	// may not appear as both a key and a value in one rule (no chains); the
@@ -259,12 +262,13 @@ type BudgetTier struct {
 	Substitute map[string]string `json:"substitute"`
 }
 
-// SensitiveDataAction is a destination restriction, never an advisory action.
+// SensitiveDataAction is a mandatory destination or transformation obligation.
 type SensitiveDataAction string
 
 const (
 	InternalOnly SensitiveDataAction = "InternalOnly"
 	Block        SensitiveDataAction = "Block"
+	Mask         SensitiveDataAction = "Mask"
 )
 
 // SensitiveDataRule restricts detected or uninspectable request content.
@@ -283,13 +287,26 @@ const (
 	Enforce ContextMode = "Enforce"
 )
 
-// ContextRule recommends one of two explicit models based on local inspection.
-// Omitted mode defaults to Shadow. Context always requires FailOpen.
+// ContextRule recommends among explicit models based on local inspection.
+// NormalModel adds a third class; Stability opts in to compatible history/tool
+// routing and local affinity. Omitted mode defaults to Shadow; nil Stability and
+// omitted NormalModel preserve the legacy behavior. Context requires FailOpen.
 type ContextRule struct {
-	Mode                 ContextMode `json:"mode,omitempty"`
-	FromModels           []string    `json:"fromModels"`
-	SimpleModel          string      `json:"simpleModel"`
-	ComplexModel         string      `json:"complexModel"`
-	MaxSimpleInputTokens int64       `json:"maxSimpleInputTokens"`
-	ComplexKeywords      []string    `json:"complexKeywords,omitempty"`
+	Mode                 ContextMode       `json:"mode,omitempty"`
+	FromModels           []string          `json:"fromModels"`
+	SimpleModel          string            `json:"simpleModel"`
+	ComplexModel         string            `json:"complexModel"`
+	MaxSimpleInputTokens int64             `json:"maxSimpleInputTokens"`
+	ComplexKeywords      []string          `json:"complexKeywords,omitempty"`
+	NormalModel          string            `json:"normalModel,omitempty"`
+	MaxNormalInputTokens int64             `json:"maxNormalInputTokens,omitempty"`
+	Stability            *ContextStability `json:"stability,omitempty"`
+}
+
+// ContextStability explicitly enables compatible history/tool routing and local
+// session affinity. An omitted object preserves legacy context behavior.
+type ContextStability struct {
+	MinHold     string `json:"minHold,omitempty"`
+	MinRequests int    `json:"minRequests,omitempty"`
+	SessionTTL  string `json:"sessionTTL,omitempty"`
 }

@@ -6,12 +6,13 @@
 
 **inferplane** — a control plane for LLM consumption governance.
 Policy and budget are distributed from the center; **`mayu`**, the
-node-local data plane, enforces them without sitting in anyone's critical path.
+node-local data plane, enforces them locally. The control plane stays off the
+inference path.
 
 `mayu` is a component name, not a project name — it holds the same position in
 inferplane that ztunnel/waypoint hold in Istio. It runs on localhost or on each
 Kubernetes node, speaks your coding agent's native protocol (Anthropic Messages,
-OpenAI Chat Completions, Bedrock InvokeModel), and enforces the rules the control
+OpenAI Chat Completions/Responses, Bedrock InvokeModel), and enforces the rules the control
 plane (`inferplaned`) hands it: per-user attribution, budget cutoffs, and model
 routing.
 
@@ -25,15 +26,16 @@ routing.
    Sonnet → GLM) when cost, not just capability, decides.
 4. Set spend limits per team and per individual, block on breach, and always
    show how much has been spent.
-5. Keep the control plane off the inference path, so a control-plane outage
-   never stops request traffic (no SPOF).
+5. Keep the control plane off the inference path: installed policy and valid
+   authority remain locally usable during an outage. Expired hard authority
+   and configured readiness gates still fail closed.
 
 Goal 5 pulls against making goal 4 accurate under horizontal scale — see
 [Current limits](#current-limits) below and `docs/roadmap.md`.
 
-[^codex]: Codex support is a goal, not yet a verified capability — no
-    Codex-specific code, fixture, or test exists in the tree; see the
-    Purpose alignment table in `docs/roadmap.md`.
+[^codex]: Responses ingress and native/stateless adapters have local protocol
+    tests and an opt-in installed Codex CLI tool-round-trip test. Model quality
+    and unsupported stateful features remain separate; see [Codex setup](docs/adaptive-routing.md).
 
 ## Target users
 
@@ -55,14 +57,17 @@ more than one team is on it.
 
 ## Policy-aware routing
 
-`GovernancePolicy.sensitiveData` restricts protected requests to approved internal
-models or blocks them, including retries. Independent `routing.context` rules
-record recommendations in **Shadow** by default; opt-in **Enforce** switches only
-completely inspectable single-user-turn requests without history, tools, media,
-reasoning, or structured-output requirements. The input threshold chooses simple
-versus complex; it does not disable Enforce above the threshold. A distinct,
-compatible complex target can be selected there. Privacy always enforces, even
-alongside Shadow (ADR-043).
+`GovernancePolicy.sensitiveData` selects approved internal destinations, complete
+masking, or refusal before egress. Independent `routing.context` rules classify
+weak/simple, optional normal, and strong/complex tasks. Context starts in **Shadow**;
+explicit stability and **Enforce** support compatible multi-turn/tool workflows
+and retain the actual successful model/provider between related requests.
+Privacy always enforces, including during Shadow (ADR-043/044).
+
+Strict budget tiers (`enforceTargets: true`) constrain every later selection and
+retry after a switching threshold. A separate total hard cap remains binding.
+The soft switching threshold does not become a smaller blocking admission cap.
+Legacy optional tiers and two-class context rules retain their behavior.
 
 Start with [the operator guide](docs/policy-routing.md) and the isolated
 [config](examples/config.policy-routing.json) /
@@ -72,8 +77,11 @@ content can fail closed, and existing transport limits still apply. Upgrade all
 participating binaries and the CRD before activating new rules. For protection
 before first control-plane sync, set `require_sync`; both count APIs remain local
 HTTP 200 while unready. Evaluate task success, total cost including cold-cache
-writes/retries, p95 latency, and privacy negative cases before Enforce. This adds
-no Responses support or measured-savings claim.
+writes/retries, p95 latency, and privacy negative cases before Enforce. For the
+combined three-class, PII, budget and Codex setup, use the
+[adaptive guide](docs/adaptive-routing.md) and
+[example configuration](examples/config.adaptive-routing.json). Local pins and
+protocol tests do not establish measured savings or shared-state HA.
 
 ## Current limits
 

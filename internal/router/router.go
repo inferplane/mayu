@@ -28,14 +28,17 @@ type Router struct {
 	policyGate func(p keystore.Principal, model string, canonical func(string) string) bool
 	// tierGate is an optional ADR-041 budget-tier substitution source (see
 	// SetTierGate). nil = no substitution.
-	tierGate         func(p keystore.Principal) map[string]string
-	routingPolicies  func(team, user string) ([]*policy.Policy, error)
-	requestInspector sensitivity.Inspector
+	tierGate             func(p keystore.Principal) map[string]string
+	routingPolicies      func(team, user string) ([]*policy.Policy, error)
+	requestInspector     sensitivity.Inspector
+	requestRedactor      RequestRedactor
+	budgetConstraintGate func(keystore.Principal) map[string]string
+	affinity             *affinityStore
 }
 
 func New(holder *live.Holder) *Router {
 	// 5 consecutive failures → open, 1s base backoff (doubling, capped 30s).
-	return &Router{live: holder, brk: newBreaker(5, time.Second)}
+	return &Router{live: holder, brk: newBreaker(5, time.Second), affinity: newAffinityStore()}
 }
 
 // SetMetrics attaches the Prometheus metrics sink. The circuit-state gauge is
@@ -137,6 +140,19 @@ func (r *Router) SetRoutingPolicyLookup(lookup func(team, user string) ([]*polic
 // sensitivity.NewInspector default. Assignment is startup-only.
 func (r *Router) SetRequestInspector(inspector sensitivity.Inspector) {
 	r.requestInspector = inspector
+}
+
+// SetRequestRedactor installs a local, complete request transformer at startup.
+// RouteRequest independently reinspects its output before returning any chain.
+func (r *Router) SetRequestRedactor(redactor RequestRedactor) {
+	r.requestRedactor = redactor
+}
+
+// SetBudgetConstraintGate installs the snapshot lookup for mandatory budget
+// source->target restrictions. An empty mapped target is a conflicting deny.
+// The source is always the original requested model, before optional tiers.
+func (r *Router) SetBudgetConstraintGate(gate func(keystore.Principal) map[string]string) {
+	r.budgetConstraintGate = gate
 }
 
 // SubstituteTier applies an active ADR-041 budget-tier substitution to an

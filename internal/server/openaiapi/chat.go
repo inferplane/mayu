@@ -218,6 +218,8 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	result, routeErr := h.r.RouteRequest(req.Context(), router.RequestRoutingInput{
 		Principal: p, Protocol: "openai", RawBody: raw, RequestedModel: requestedModel,
 		Model: model, Chain: chain, State: st, AllowedRegions: teamRec.AllowedRegions,
+		SessionHint: requestpolicy.SessionHint(req),
+		Redactor:    requestpolicy.CombinedRedactor(h.mask, p.Team),
 	})
 	req = requestpolicy.Observe(w, req, result, h.metrics)
 	if routeErr != nil {
@@ -241,12 +243,21 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	model, chain, st = result.Model, result.Chain, result.State
 	tracing.SetGenAIRequest(span, model)
+	if result.MaskRequired {
+		var maskErr error
+		canonical, maskErr = openai.RequestToCanonical(result.SanitizedBody)
+		if len(result.SanitizedBody) == 0 || maskErr != nil {
+			writeErr(w, 400, "invalid_request_error", "request could not be PII-masked")
+			return
+		}
+		raw = result.SanitizedBody
+	}
 
 	// Fail closed for masked teams on the OpenAI ingress (ADR-009 round-2
 	// CRITICAL): v1 masks only the Anthropic ingress, so a masked team must not
 	// bypass PII masking by using /v1/chat/completions. Reject until OpenAI-ingress
 	// masking ships.
-	if h.mask.Enabled(p.Team) {
+	if h.mask.Enabled(p.Team) && !result.Decision.Masked {
 		// Audit the security-critical rejection (a masking-bypass attempt) — a
 		// silent reject would be a blind spot in the tamper-evident chain (P4 gate).
 		h.audit(req.Context(), p, model, "", &audit.OutcomeRef{Status: 400}, traceID)
@@ -324,6 +335,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			}
 		}
 		attemptReq := req.WithContext(audit.WithRoutingAttempt(req.Context(), ct.Model, ct.ProviderName, ct.DataBoundary))
+		attemptReq = requestpolicy.WithAffinityAttempt(attemptReq, h.r, result.AffinityToken, ct)
 		var retriable bool
 		if stream {
 			retriable = h.serveStream(w, attemptReq, ct.Provider, pr, p, ct.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, crossModelNext, start, table)
@@ -376,6 +388,9 @@ func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, pr
 	}
 	if resp.StatusCode < 400 {
 		h.r.RecordResult(providerName, identity, true)
+		if resp.StatusCode/100 == 2 && resp.Parsed != nil && resp.Parsed.Usage != nil {
+			requestpolicy.RecordSuccess(req)
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	var clientBody []byte
@@ -464,6 +479,7 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 	var usage *audit.UsageRef
 	var lastUsage *schema.Usage
 	var ttft float64
+	var streamCompleted, streamFailed bool
 	for ev, err := range seq {
 		if err != nil {
 			// upstream broke mid-stream: the 200 is already committed, so the
@@ -511,6 +527,8 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 		// input and cache counts arrive on message_start (nested under
 		// message.usage) while message_delta commonly carries output alone.
 		if ev.Chunk != nil {
+			streamCompleted = streamCompleted || ev.Chunk.Type == "message_stop"
+			streamFailed = streamFailed || ev.Chunk.Type == "error"
 			if ev.Chunk.Message != nil && ev.Chunk.Message.Usage != nil {
 				lastUsage = schema.MergeUsage(lastUsage, ev.Chunk.Message.Usage)
 			}
@@ -526,6 +544,9 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 		flusher.Flush()
 	}
 	cost := h.settle(p, providerName, upstream, lastUsage, table, estimateTokens(pr.RawBody))
+	if streamCompleted && !streamFailed && lastUsage != nil {
+		requestpolicy.RecordSuccess(req)
+	}
 	h.observeTokens(model, providerName, p.Team, lastUsage)
 	// Body capture (D4, ADR-018): REQUEST ONLY for streams (no buffered
 	// response bytes exist to capture — see messages.go's serveStream).

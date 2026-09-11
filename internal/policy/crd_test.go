@@ -86,13 +86,21 @@ func TestRoutingPolicyCRDSchema(t *testing.T) {
 	}
 	spec := at(crd, "spec")
 	version := spec["versions"].([]any)[0].(map[string]any)
-	rule := at(version, "schema", "openAPIV3Schema", "properties", "spec", "properties", "rules", "items", "properties")
+	rules := at(version, "schema", "openAPIV3Schema", "properties", "spec", "properties", "rules")
+	if rules["maxItems"] != float64(maxPolicyRules) {
+		t.Errorf("CRD rules must match the %d-rule runtime bound for finite CEL cost", maxPolicyRules)
+	}
+	rule := at(rules, "items", "properties")
 	sensitive := at(rule, "sensitiveData")
 	props := at(sensitive, "properties")
 	for _, field := range []string{"onDetected", "onUninspectable"} {
 		action := at(props, field)
 		enum := action["enum"].([]any)
-		if len(enum) != 2 || enum[0] != "InternalOnly" || enum[1] != "Block" {
+		want := 2
+		if field == "onDetected" {
+			want = 3
+		}
+		if len(enum) != want || enum[0] != "InternalOnly" || enum[1] != "Block" || (want == 3 && enum[2] != "Mask") {
 			t.Fatalf("unbounded action %s: %v", field, enum)
 		}
 	}
@@ -105,10 +113,25 @@ func TestRoutingPolicyCRDSchema(t *testing.T) {
 	if mode := at(cp, "mode"); mode["default"] != "Shadow" {
 		t.Fatal("context default not Shadow")
 	}
-	for _, field := range []string{"fromModels", "simpleModel", "complexModel", "maxSimpleInputTokens", "complexKeywords"} {
+	for _, field := range []string{"fromModels", "simpleModel", "complexModel", "maxSimpleInputTokens", "complexKeywords", "normalModel", "maxNormalInputTokens", "stability"} {
 		at(cp, field)
 	}
 	if at(cp, "maxSimpleInputTokens")["minimum"] != float64(1) {
 		t.Fatal("nonpositive threshold allowed")
+	}
+	stability := at(cp, "stability", "properties")
+	if at(stability, "minHold")["default"] != "5m" || at(stability, "sessionTTL")["default"] != "30m" || at(stability, "minRequests")["default"] != float64(3) {
+		t.Fatal("stability defaults differ from Go conversion")
+	}
+	bt := at(rule, "routing", "properties", "budgetTiers")
+	at(bt, "properties", "enforceTargets")
+	if _, ok := bt["x-kubernetes-validations"]; !ok {
+		t.Fatal("strict-only threshold 100 lacks validation")
+	}
+	if at(bt, "properties", "tiers", "items", "properties", "thresholdPercent")["maximum"] != float64(100) {
+		t.Fatal("strict threshold 100 cannot pass CRD")
+	}
+	if at(bt, "properties", "tiers")["maxItems"] != float64(100) {
+		t.Error("CRD tiers must be bounded by the 100 strictly increasing runtime thresholds")
 	}
 }

@@ -28,6 +28,7 @@ import (
 	"github.com/inferplane/inferplane/internal/server/configapi"
 	"github.com/inferplane/inferplane/internal/server/openaiapi"
 	"github.com/inferplane/inferplane/internal/server/requestpolicy"
+	"github.com/inferplane/inferplane/internal/server/responsesapi"
 	"github.com/inferplane/inferplane/internal/server/usageapi"
 	"github.com/inferplane/inferplane/internal/telemetry"
 	"github.com/inferplane/inferplane/pkg/ulid"
@@ -134,6 +135,12 @@ func DataMux(r *router.Router, holder *live.Holder, store keystore.Store, aud *a
 	chat.SetBodyRecorder(bodies)
 	chat.SetUsageCollector(o.usage)
 	mux.Handle("POST /v1/chat/completions", chat)
+	resp := responsesapi.NewHandler(r, aud, gov, m)
+	resp.SetMasking(mask)
+	resp.SetTeamPolicy(teamPolicy)
+	resp.SetBodyRecorder(bodies)
+	resp.SetUsageCollector(o.usage)
+	mux.Handle("POST /v1/responses", resp)
 	invoke := bedrockapi.NewInvokeHandlerMetrics(r, holder, aud, gov, m, false)
 	invoke.SetMasking(mask)
 	invoke.SetTeamPolicy(teamPolicy)

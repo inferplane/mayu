@@ -217,6 +217,8 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	result, routeErr := h.r.RouteRequest(req.Context(), router.RequestRoutingInput{
 		Principal: p, Protocol: "anthropic", RawBody: raw, RequestedModel: requestedModel,
 		Model: model, Chain: chain, State: st, AllowedRegions: teamRec.AllowedRegions,
+		SessionHint: requestpolicy.SessionHint(req),
+		Redactor:    requestpolicy.CombinedRedactor(h.mask, p.Team),
 	})
 	req = requestpolicy.Observe(w, req, result, h.metrics)
 	if routeErr != nil {
@@ -240,13 +242,20 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	model, chain, st = result.Model, result.Chain, result.State
 	tracing.SetGenAIRequest(span, model)
+	if result.MaskRequired {
+		if len(result.SanitizedBody) == 0 || json.Unmarshal(result.SanitizedBody, &parsed) != nil {
+			writeErr(w, 400, "invalid_request_error", "request could not be PII-masked")
+			return
+		}
+		raw = result.SanitizedBody
+	}
 
 	// PII masking (ADR-009): for a masked team, mask request text BEFORE the
 	// governance estimate and the upstream call. Masking updates BOTH RawBody and
 	// the parsed request (the openai_compatible provider converts from Parsed, not
 	// RawBody — masking only one would leak PII). FAIL CLOSED: a masker error
 	// rejects the request; the unmasked body is never forwarded.
-	piiMasked := false
+	piiMasked := result.Decision.Masked
 	if h.mask.Enabled(p.Team) {
 		masked, n, err := maskBody(raw, h.mask.Filter)
 		if err != nil {
@@ -355,6 +364,7 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			}
 		}
 		attemptReq := req.WithContext(audit.WithRoutingAttempt(req.Context(), ct.Model, ct.ProviderName, ct.DataBoundary))
+		attemptReq = requestpolicy.WithAffinityAttempt(attemptReq, h.r, result.AffinityToken, ct)
 		var retriable bool
 		if stream {
 			retriable = h.serveStream(w, attemptReq, ct.Provider, pr, p, ct.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, crossModelNext, start, table)
@@ -453,6 +463,9 @@ func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request
 	// counted (it was teed as the client's real upstream error).
 	if resp.StatusCode < 400 {
 		h.r.RecordResult(providerName, identity, true)
+		if resp.StatusCode/100 == 2 && resp.Parsed != nil && resp.Parsed.Usage != nil {
+			requestpolicy.RecordSuccess(req)
+		}
 	}
 	// resp.Parsed.Usage is the observation hook for M3 audit / M5 quota.
 	var usage *audit.UsageRef
@@ -531,6 +544,7 @@ func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, 
 	var usage *audit.UsageRef
 	var lastUsage *schema.Usage
 	var ttft float64
+	var streamCompleted, streamFailed bool
 	for ev, err := range seq {
 		if err != nil {
 			// upstream broke mid-stream: the 200 is already committed, so the
@@ -569,6 +583,8 @@ func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, 
 		// output_tokens alone. Reading only the top-level usage of the last
 		// frame billed streaming requests for output tokens only.
 		if ev.Chunk != nil {
+			streamCompleted = streamCompleted || ev.Chunk.Type == "message_stop"
+			streamFailed = streamFailed || ev.Chunk.Type == "error"
 			if ev.Chunk.Message != nil && ev.Chunk.Message.Usage != nil {
 				lastUsage = schema.MergeUsage(lastUsage, ev.Chunk.Message.Usage)
 			}
@@ -579,6 +595,9 @@ func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, 
 		}
 	}
 	cost := h.settle(p, providerName, model, upstream, lastUsage, table, estimateTokens(pr.RawBody))
+	if streamCompleted && !streamFailed && lastUsage != nil {
+		requestpolicy.RecordSuccess(req)
+	}
 	h.observeTokens(model, providerName, p.Team, lastUsage)
 	// Body capture (D4, ADR-018): REQUEST ONLY for streams — a streaming
 	// response exists only as per-event ev.Raw, never buffered as a whole

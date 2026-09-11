@@ -25,6 +25,7 @@ import (
 type Call struct {
 	Context               context.Context
 	Body, Model, Protocol string
+	Parsed                *schema.ChatRequest
 }
 
 type Spy struct {
@@ -37,7 +38,7 @@ func (*Spy) Name() string                { return "mock" }
 func (*Spy) SupportsIngress(string) bool { return true }
 func (*Spy) Models() []schema.ModelInfo  { return nil }
 func (s *Spy) record(ctx context.Context, r *providers.ProxyRequest) {
-	s.Calls = append(s.Calls, Call{ctx, string(r.RawBody), r.Model, r.IngressProtocol})
+	s.Calls = append(s.Calls, Call{Context: ctx, Body: string(r.RawBody), Model: r.Model, Protocol: r.IngressProtocol, Parsed: r.Parsed})
 }
 func (s *Spy) Complete(ctx context.Context, r *providers.ProxyRequest) (*providers.ProxyResponse, error) {
 	s.record(ctx, r)

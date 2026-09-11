@@ -1,4 +1,4 @@
-<!-- generated-by: co-agent · source: CLAUDE.md · claude-md-sha: d2b747e60bfc · generated-at: 2026-09-10 · DO NOT EDIT — edit CLAUDE.md then run /co-agent sync-context -->
+<!-- generated-by: co-agent · source: CLAUDE.md · claude-md-sha: 2560a9843d3a · generated-at: 2026-09-11 · DO NOT EDIT — edit CLAUDE.md then run /co-agent sync-context -->
 > You are an external reviewer for this repo — project context below, distilled
 > from CLAUDE.md. This file is shared verbatim by Kiro, Codex, and Agy (not a
 > per-AI copy).
@@ -16,8 +16,8 @@ Kubernetes-native, Apache-2.0, CNCF Sandbox aspirant.
 coding-assistant traffic, (2) per-user model choice, (3) cost-driven model
 substitution — enforceable via `routing.budgetTiers` (ADR-041): a budget
 rule crossing a threshold substitutes a cheaper target for a requested
-model name, judged globally by the control plane, never widening access
-or denying, (4) team/per-user budget control with visibility, (5) no SPOF.
+model name. Legacy substitutions never widen access or deny; opt-in ADR-044
+strict targets constrain every attempt and may refuse. (4) team/per-user budget control with visibility, (5) no SPOF.
 Known tension: (5)'s no-SPOF pulls against making (4)'s enforcement accurate
 under multi-replica — see the HA note below.
 
@@ -64,47 +64,45 @@ credentials, or a real IdP (httptest fakes only).
   once.
 - `internal/cache` (VolatileStore, for cache-affinity routing) is an
   unimplemented interface with no importers today — don't assume
-  cache-affinity is enforced anywhere yet. This is unrelated to `internal/tier`
+  the legacy affinity subtype is enforced. ADR-044 context stability has its own
+  bounded local successful-target store; it is not financial authority. This is unrelated to `internal/tier`
   (ADR-041 budget-tier substitution), which is implemented and does not
   depend on `internal/cache`.
-- A budget-tier substitution TARGET must pass RBAC and be routed on the
-  enforcing data plane, or the ORIGINAL model is served — substitution must
-  never widen access and must never itself deny a request.
+- A legacy budget-tier substitution TARGET must pass RBAC and be routed or
+  the ORIGINAL is served. Opt-in enforceTargets instead restricts every
+  choice/retry to its target; unavailable/conflicting targets deny. Its soft
+  budget reference is an accounting threshold, not an admission lease or a
+  smaller hard cap. Independent hard caps always remain binding.
 
-## Policy-aware routing (ADR-043)
+## Adaptive routing (ADR-043/044)
 
-- `sensitivity` is a stdlib-only leaf inspecting original bytes without mutation
-  or retained text. Finite email/phone/Luhn-card/SSN/IPv4/Korean-ID signals include
-  exact numeric spellings; opaque/unknown content is incomplete, errors explicit.
-  No universal PII guarantee, remote classifier, session pinning, or Responses
-  ingress is implied. Boundary labels are operator assertions.
-- `Store.MatchingRoutingPolicies` supplies one snapshot and a rejection gate.
-  SensitiveData requires FailClosed: Block wins, internal-model sets intersect,
-  each attempt needs an approved model AND an explicitly internal provider.
-  Rejected distributed sensitive generations deny until valid recovery.
-- Context requires FailOpen, defaults to Shadow, and cannot relax privacy.
-  Privacy always enforces, even with Shadow. Enforce switches only completely
-  inspectable single-user-turn requests without history/tools/media/reasoning/
-  structured output. The input threshold chooses simple versus complex, not
-  eligibility; a distinct compatible complex target can be selected above it.
-  Alternatives need declared context/capabilities, pricing,
-  RBAC/regions, and physical transport compatibility; metadata cannot override
-  translator losses. No-rule/passive paths preserve existing authorized behavior.
-- Requested is resolved pre-tier; context sources match post-tier before privacy;
-  selected and proposed differ from actual attempts. Passive results preserve the
-  input preflight Model. Attempts/context/pricing use the same live.State.
-- `cmd/mayu` installs `live.Holder.RoutedAndPriced` after usable topology and
-  reloads local policy before listeners; future Reload/ApplyWire validate too.
-  Runtime candidate checks remain required after topology changes. Metadata must
-  survive DB seed/overlay, admin read/write/export, and reload.
-- Both count APIs remain local/200 on routing refusal and unready/stale gates.
-  CP privacy from first request needs require_sync. Upgrade binaries/CRD before
-  new-rule activation. Evaluate task success, total cost including cold-cache/
-  retries, p95 latency, and privacy negative cases before Enforce; tests establish
-  neither measured savings nor production readiness.
-- Routing audit fields are append-only/omitempty, with planned/actual provider
-  and boundary. Counter labels only team/mode/reason; no prompt, detection value,
-  session ID, user, or key ID. Existing optional body logging is independent.
+- Local original-byte inspection returns finite email/phone/card/SSN/IPv4/Korean-ID
+  signals and coverage. Unknown/opaque input is not clean. No universal PII claim.
+- Privacy requires FailClosed: Block wins, internal-model sets intersect, Mask
+  remains required alongside InternalOnly. Complete and independently reinspect
+  redaction before returning a usable chain; ingresses consume SanitizedBody and
+  reparse. Unsafe structural/numeric changes refuse. Remote tools cannot bypass
+  an internal boundary by selecting an internal model.
+- Legacy context stays single-turn/two-class. Optional normalModel/stability
+  enables compatible tool/history sessions. Extended keywords use latest user
+  intent; full input size still constrains capacity. All context remains Shadow
+  by default and cannot loosen privacy or strict budget targets.
+- Affinity pins an actual successful model/provider/upstream, with bounded TTL
+  and identity-scoped HMAC hints. Revalidate every hit; no raw prompt/session ID
+  in storage, observability or authorization. No network dependency; restart or
+  capacity loss can cause a cold cache, never permission expansion.
+- Responses ingress uses the same identity/readiness/routing/governance gates.
+  Native transport preserves bytes; stateless adapters reject unsupported opaque
+  or provider-owned state. CLI/fake-provider tests do not establish model quality.
+- Requested is resolved pre-tier; selected/proposed differ from actual attempts.
+  All attempts and pricing use one topology snapshot. Policy/metadata changes
+  still require runtime revalidation and an upgraded producer/consumer/CRD set.
+- Rejected privacy or strict-budget distribution gates affected subjects until
+  valid recovery. Count APIs stay local/200 on refusal or unready/stale gates.
+- Audit additions are append-only/omitempty; metric dimensions remain bounded.
+  No prompt, detected value, session ID, user or key ID enters new metric labels.
+- Evaluate task success, total settled cost including cold-cache/retries and
+  latency before enabling Enforce. Model names do not attest privacy or price.
 
 ## Banned patterns / security mandates (violations are CRITICAL)
 
@@ -118,8 +116,9 @@ credentials, or a real IdP (httptest fakes only).
   must be config-bounded — never raw client input).
 - `count_tokens` returning non-200 (it crashes Claude Code).
 - Float cost arithmetic — cost is integer microUSD, round-half-even.
-- Mutating a request body when ingress protocol == provider protocol (cache
-  invariant: verbatim `RawBody` passthrough preserves prompt-cache hits).
+- Mutating same-protocol content outside documented model substitution or
+  explicitly required, completely verified PII masking. Default RawBody
+  passthrough preserves prompt-cache bytes.
 - Admin-plane: JWT-shaped static tokens with OIDC enabled; non-https OIDC
   issuer; email or raw IdP groups in audit records or request context
   (opaque `sub` only); auditing 401s (only authenticated 403s are audited).
@@ -140,11 +139,10 @@ credentials, or a real IdP (httptest fakes only).
 - Audit chain: records are hashed as exact line bytes — new fields are
   append-only with `omitempty`, proven by a mixed-version fixture test.
 - Fail closed: missing identity/lookup errors deny, never default-allow.
-- Data-plane multi-replica HA has a maintainer-stated direction, not yet an
-  ADR (Postgres-only shared state, narrower than ADR-013's original
-  Postgres+Redis design) — implementation is still deferred, ADR-013 itself
-  is not marked superseded,
-  and no implementation ADR exists yet. Rate-limit counters, budget/quota
+- ADR-044 records node-local failure boundaries and the Postgres-only shared
+  authority direction, narrower than ADR-013's original Postgres+Redis design.
+  Durable reserve/settle/window implementation remains deferred; ADR-013 is
+  not marked superseded and routing changes do not implement shared-state HA. Rate-limit counters, budget/quota
   stores, and the circuit breaker are all instance-local today. **Suppress**
   "the in-memory limiter/budget won't scale past one replica" as a new
   architecture finding — that's the known, tracked gap. **Do flag** any doc,

@@ -116,3 +116,16 @@ may differ from final selection. The audit `request.routing` object records
 requested (resolved pre-tier), selected, proposed and actual-attempt evidence
 separately, including provider/boundary. See [schema, upgrade requirements and
 limits](policy-routing.md) before enabling rules.
+
+## Responses and adaptive routing (ADR-044)
+
+`POST /v1/responses` accepts authenticated HTTP Responses requests. Native
+openai_responses targets retain their wire; supported stateless text/tool
+requests can use canonical adapters. Streaming emits the Responses event
+lifecycle and settles observed usage, including interrupted streams.
+Unsupported cross-protocol state is rejected before egress. The endpoint
+shares body/readiness, RBAC, region, PII, strict budget and total admission gates.
+
+New policy fields are `sensitiveData.onDetected: Mask`, context
+`normalModel`, `maxNormalInputTokens`, `stability`, and budget-tier
+`enforceTargets`. See [adaptive configuration and limits](adaptive-routing.md).

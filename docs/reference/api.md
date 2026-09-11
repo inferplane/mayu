@@ -78,5 +78,11 @@ failures. `x-inferplane-routing-reason` is bounded;
 `x-inferplane-routed-model` advertises applied privacy/context selection. Budget's
 `x-inferplane-substituted-model` remains earlier-stage evidence. Audit requested,
 selected, proposed, and actual-attempt meanings are distinct; see the guide. This
-release adds no Responses endpoint. Upgrade binaries/CRD before new-rule activation;
+Responses now has a governed POST `/v1/responses` endpoint (ADR-044). Upgrade binaries/CRD before new-rule activation;
 CP privacy before first sync requires `require_sync`.
+
+ADR-044 adds `sensitiveData.onDetected: Mask`, optional context
+`normalModel`/`maxNormalInputTokens`/`stability`, and budget-tier `enforceTargets`.
+Strict tiers allow threshold 100; their soft budget reference is an accounting
+threshold, not a second admission lease. Local session hints cannot authorize
+access, and every pin/attempt is revalidated. See [fields and Codex setup](../adaptive-routing.md).

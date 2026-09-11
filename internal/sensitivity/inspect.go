@@ -27,9 +27,10 @@ type Result struct {
 	HasVision           bool
 	HasReasoning        bool
 	HasStructuredOutput bool
+	HasRemoteTools      bool
 }
 
-// Inspector accepts only anthropic, openai, and bedrock ingress protocols.
+// Inspector accepts anthropic, openai, responses, and bedrock ingress protocols.
 // Bedrock token-count callers supply the already-decoded inner request body.
 type Inspector interface {
 	Inspect(context.Context, string, []byte) (Result, error)
@@ -63,7 +64,7 @@ func (inspector) Inspect(ctx context.Context, protocol string, raw []byte) (Resu
 		return Result{}, err
 	}
 	switch protocol {
-	case "anthropic", "openai", "bedrock":
+	case "anthropic", "openai", "responses", "bedrock":
 	default:
 		return Result{}, errProtocol
 	}

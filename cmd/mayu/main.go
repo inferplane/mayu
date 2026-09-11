@@ -13,10 +13,11 @@ import (
 	"syscall"
 	_ "time/tzdata" // embed the IANA tz database: distroless/static ships no /usr/share/zoneinfo, so a named-zone LoadLocation would fail only in production
 
-	_ "github.com/inferplane/inferplane/plugins/piimask"        // register "pii-mask" filter (ADR-009)
-	_ "github.com/inferplane/inferplane/providers/anthropic"    // register "anthropic"
-	_ "github.com/inferplane/inferplane/providers/bedrock"      // register "bedrock"
-	_ "github.com/inferplane/inferplane/providers/openaicompat" // register "openai_compatible"
+	_ "github.com/inferplane/inferplane/plugins/piimask"           // register "pii-mask" filter (ADR-009)
+	_ "github.com/inferplane/inferplane/providers/anthropic"       // register "anthropic"
+	_ "github.com/inferplane/inferplane/providers/bedrock"         // register "bedrock"
+	_ "github.com/inferplane/inferplane/providers/openaicompat"    // register "openai_compatible"
+	_ "github.com/inferplane/inferplane/providers/openairesponses" // register "openai_responses"
 )
 
 func main() {

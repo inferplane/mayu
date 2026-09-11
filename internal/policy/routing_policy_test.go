@@ -42,7 +42,7 @@ func TestRoutingPolicyConversion(t *testing.T) {
 	invalid := []string{
 		`{"name":"p","failurePolicy":"FailOpen","sensitiveData":{"onDetected":"Block","onUninspectable":"Block"}}`,
 		`{"name":"p","failurePolicy":"FailClosed","sensitiveData":{"onUninspectable":"Block"}}`,
-		`{"name":"p","failurePolicy":"FailClosed","sensitiveData":{"onDetected":"Mask","onUninspectable":"Block"}}`,
+		`{"name":"p","failurePolicy":"FailClosed","sensitiveData":{"onDetected":"Mask","onUninspectable":"Mask"}}`,
 		`{"name":"p","failurePolicy":"FailClosed","sensitiveData":{"onDetected":"Block","onUninspectable":"Allow"}}`,
 		`{"name":"p","failurePolicy":"FailClosed","sensitiveData":{"onDetected":"InternalOnly","onUninspectable":"Block"}}`,
 		`{"name":"p","failurePolicy":"FailClosed","sensitiveData":{"onDetected":"Block","onUninspectable":"InternalOnly","internalModels":["*"]}}`,

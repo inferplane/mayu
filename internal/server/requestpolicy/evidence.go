@@ -17,7 +17,8 @@ import (
 // Active excludes legacy traffic, preserving its audit bytes and headers.
 // A rejected policy lookup is evidence even when no rule could be loaded.
 func Active(d router.RoutingDecision) bool {
-	return len(d.Policies) > 0 || d.Reason == "policy_lookup_failed"
+	return len(d.Policies) > 0 || d.Reason == "policy_lookup_failed" ||
+		d.Reason == "budget_target" || d.Reason == "budget_target_unavailable"
 }
 
 // Observe copies ONLY safe decision scalars; never marshal result or Chain.
@@ -29,6 +30,7 @@ func Observe(w http.ResponseWriter, req *http.Request, result router.RequestRout
 	ref := &audit.RoutingRef{
 		RequestedModel: d.RequestedModel, SelectedModel: d.SelectedModel, ProposedModel: d.ProposedModel,
 		Mode: d.Mode, Reason: d.Reason, Inspection: d.Inspection, Privacy: d.Privacy, Categories: d.Categories,
+		Masked: d.Masked,
 	}
 	for _, p := range d.Policies {
 		ref.Policies = append(ref.Policies, audit.RoutingPolicyRef{Name: p.Name, Generation: p.Generation, Rule: p.Rule})
@@ -50,7 +52,7 @@ func Observe(w http.ResponseWriter, req *http.Request, result router.RequestRout
 		m.ObserveRoutingDecision(p.Team, d.Mode, d.Reason)
 	}
 	w.Header().Set("x-inferplane-routing-reason", d.Reason)
-	if d.SelectedModel != "" && (d.Privacy == "internal_only" || d.Reason == "context_selected") {
+	if d.SelectedModel != "" && (d.Privacy == "internal_only" || d.Reason == "context_selected" || d.Reason == "context_affinity" || d.Reason == "budget_target") {
 		w.Header().Set("x-inferplane-routed-model", d.SelectedModel)
 	}
 	return req.WithContext(audit.WithRouting(req.Context(), ref))

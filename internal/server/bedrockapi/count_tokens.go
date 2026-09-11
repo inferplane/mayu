@@ -137,6 +137,7 @@ func (h *CountTokensHandler) count(w http.ResponseWriter, req *http.Request, raw
 	result, routeErr := h.r.RouteRequest(req.Context(), router.RequestRoutingInput{
 		Principal: p, Protocol: "bedrock", RawBody: innerBody, RequestedModel: model,
 		Model: model, Chain: chain, State: st, AllowedRegions: regions, CountOnly: true,
+		Redactor: requestpolicy.CombinedRedactor(h.mask, p.Team),
 	})
 	req = requestpolicy.Observe(w, req, result, h.metrics)
 	requestpolicy.CountRecord(h.aud, req, "bedrock", false)
@@ -146,6 +147,12 @@ func (h *CountTokensHandler) count(w http.ResponseWriter, req *http.Request, raw
 		return estimateTokens(innerBody)
 	}
 	chain = result.Chain
+	if result.MaskRequired {
+		if len(result.SanitizedBody) == 0 {
+			return estimateTokens(innerBody)
+		}
+		innerBody = result.SanitizedBody
+	}
 	if p, ok := principal.From(req.Context()); ok && h.mask.Enabled(p.Team) {
 		masked, n, err := maskBody(innerBody, h.mask.Filter)
 		if err != nil {

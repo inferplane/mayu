@@ -34,7 +34,7 @@ func TestRoutingLegacyBytesAndMixedChain(t *testing.T) {
 	hash := func(b []byte) string { s := sha256.Sum256(b); return "sha256:" + hex.EncodeToString(s[:]) }
 	rec.ID = "new"
 	rec.PrevHash = hash([]byte(old))
-	rec.Request.Routing = &RoutingRef{RequestedModel: "m", SelectedModel: "m", Reason: "internal_only", Inspection: "complete", PlannedProvider: "private", PlannedBoundary: "internal"}
+	rec.Request.Routing = &RoutingRef{RequestedModel: "m", SelectedModel: "m", Reason: "internal_only", Inspection: "complete", PlannedProvider: "private", PlannedBoundary: "internal", Masked: true}
 	next, _ := rec.Canonical()
 	rec.ID = "old-again"
 	rec.Request.Routing = nil
@@ -79,7 +79,7 @@ func TestRoutingDTOContainsOnlyScalarMetadata(t *testing.T) {
 	var check func(reflect.Type)
 	check = func(typ reflect.Type) {
 		switch typ.Kind() {
-		case reflect.String, reflect.Int64:
+		case reflect.String, reflect.Int64, reflect.Bool:
 		case reflect.Struct:
 			for i := 0; i < typ.NumField(); i++ {
 				check(typ.Field(i).Type)

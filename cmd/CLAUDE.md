@@ -44,3 +44,12 @@ rules; set `require_sync` for CP privacy from the first request.
 privacy rejection/recovery, DB metadata reload, budget-before-privacy selection,
 and admission before provider calls using in-memory providers and the real mux.
 The bound gateway needs local listener permission; no external service is used.
+
+## Adaptive gateway assembly (ADR-044)
+
+mayu registers openai_responses, injects the complete local sensitivity redactor,
+and wires both optional tier substitutions and strict tier constraints. Local
+evaluation uses the referenced period, configured timezone and integer
+utilization. Soft switching meters do not lower independent hard caps or issue
+admission leases. `TestE2ECodexCLI*` is opt-in local fake-upstream acceptance,
+not a network/model-quality test.

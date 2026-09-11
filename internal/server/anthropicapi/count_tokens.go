@@ -115,6 +115,7 @@ func (h *CountTokensHandler) count(w http.ResponseWriter, req *http.Request, raw
 	result, routeErr := h.r.RouteRequest(req.Context(), router.RequestRoutingInput{
 		Principal: p, Protocol: "anthropic", RawBody: raw, RequestedModel: model,
 		Model: model, Chain: chain, State: st, AllowedRegions: regions, CountOnly: true,
+		Redactor: requestpolicy.CombinedRedactor(h.mask, p.Team),
 	})
 	req = requestpolicy.Observe(w, req, result, h.metrics)
 	requestpolicy.CountRecord(h.aud, req, "anthropic", false)
@@ -124,6 +125,12 @@ func (h *CountTokensHandler) count(w http.ResponseWriter, req *http.Request, raw
 		return estimateTokens(raw)
 	}
 	chain = result.Chain
+	if result.MaskRequired {
+		if len(result.SanitizedBody) == 0 {
+			return estimateTokens(raw)
+		}
+		raw = result.SanitizedBody
+	}
 	// PII masking (ADR-009): mask BEFORE forwarding to the upstream counter so the
 	// count reflects what is sent AND the upstream never sees unmasked PII. On a
 	// masker error, return a LOCAL estimate — never forward unmasked, never 500.

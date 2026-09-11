@@ -174,6 +174,8 @@ func (h *InvokeHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	result, routeErr := h.r.RouteRequest(req.Context(), router.RequestRoutingInput{
 		Principal: p, Protocol: "bedrock", RawBody: raw, RequestedModel: requestedModel,
 		Model: model, Chain: chain, State: st, AllowedRegions: teamRec.AllowedRegions,
+		SessionHint: requestpolicy.SessionHint(req),
+		Redactor:    requestpolicy.CombinedRedactor(h.mask, p.Team),
 	})
 	req = requestpolicy.Observe(w, req, result, h.metrics)
 	if routeErr != nil {
@@ -204,8 +206,15 @@ func (h *InvokeHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 	model, chain, st = result.Model, result.Chain, result.State
 	tracing.SetGenAIRequest(span, model)
+	if result.MaskRequired {
+		if len(result.SanitizedBody) == 0 || json.Unmarshal(result.SanitizedBody, &parsed) != nil {
+			writeErr(w, http.StatusBadRequest, "request could not be PII-masked")
+			return
+		}
+		raw = result.SanitizedBody
+	}
 
-	piiMasked := false
+	piiMasked := result.Decision.Masked
 	if h.mask.Enabled(p.Team) {
 		masked, n, err := maskBody(raw, h.mask.Filter)
 		if err != nil {
@@ -293,6 +302,7 @@ func (h *InvokeHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			}
 		}
 		attemptReq := req.WithContext(audit.WithRoutingAttempt(req.Context(), ct.Model, ct.ProviderName, ct.DataBoundary))
+		attemptReq = requestpolicy.WithAffinityAttempt(attemptReq, h.r, result.AffinityToken, ct)
 		var retriable bool
 		if h.streaming {
 			retriable = h.serveStream(w, attemptReq, ct.Provider, pr, p, ct.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, crossModelNext, start, table)
@@ -390,6 +400,9 @@ func (h *InvokeHandler) serveComplete(w http.ResponseWriter, req *http.Request, 
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(resp.RawBody)
 	h.r.RecordResult(providerName, identity, true)
+	if resp.Parsed != nil && resp.Parsed.Usage != nil {
+		requestpolicy.RecordSuccess(req)
+	}
 
 	recID := ulid.New()
 	var bodyRef string
@@ -443,6 +456,7 @@ func (h *InvokeHandler) serveStream(w http.ResponseWriter, req *http.Request, pr
 	var usage *audit.UsageRef
 	var lastUsage *schema.Usage
 	var ttft float64
+	var streamCompleted, streamFailed bool
 	// partialFinish records a stream that broke mid-flight: 200 is already
 	// committed, so the failure surfaces as an exception frame on the wire
 	// and a Partial audit record — mirroring anthropicapi's
@@ -490,6 +504,8 @@ func (h *InvokeHandler) serveStream(w http.ResponseWriter, req *http.Request, pr
 		if ev.Chunk.Message != nil && ev.Chunk.Message.Usage != nil {
 			lastUsage = schema.MergeUsage(lastUsage, ev.Chunk.Message.Usage)
 		}
+		streamCompleted = streamCompleted || ev.Chunk.Type == "message_stop"
+		streamFailed = streamFailed || ev.Chunk.Type == "error"
 		if ev.Chunk.Usage != nil {
 			lastUsage = schema.MergeUsage(lastUsage, ev.Chunk.Usage)
 		}
@@ -499,6 +515,9 @@ func (h *InvokeHandler) serveStream(w http.ResponseWriter, req *http.Request, pr
 	}
 
 	cost := h.settle(p, providerName, model, upstream, lastUsage, table, estimateTokens(pr.RawBody))
+	if streamCompleted && !streamFailed && lastUsage != nil {
+		requestpolicy.RecordSuccess(req)
+	}
 	h.observeTokens(model, providerName, p.Team, lastUsage)
 	recID := ulid.New()
 	var bodyRef string

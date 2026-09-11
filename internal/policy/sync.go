@@ -102,6 +102,7 @@ type ActiveTier struct {
 	Team             string            `json:"team"`
 	ThresholdPercent int               `json:"thresholdPercent"`
 	Substitute       map[string]string `json:"substitute"`
+	EnforceTargets   bool              `json:"enforceTargets,omitempty"`
 }
 
 // LeaseGrant is one budget lease: the data plane may serve this rule's team

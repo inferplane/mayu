@@ -24,26 +24,29 @@ stated explicitly (see the HA vs. rate-limit-accuracy tension below).
 1. **A single entry point for coding-assistant traffic** — Claude Code,
    OpenCode, and Codex users route through inferplane to reach Anthropic,
    Amazon Bedrock, and OpenAI-compatible (vLLM/Ollama/etc.) providers.
-   Codex support is the goal, not yet verified — no Codex-specific code or
-   test exists (`docs/roadmap.md` Purpose alignment).
+   Codex uses Responses ingress with native/stateless adapters and local
+   protocol/installed-CLI tests; model quality and opaque state transfer remain
+   explicit limits (`docs/adaptive-routing.md`).
 2. **Per-user model choice** — each user can pick which model they talk to.
 3. **Cost-driven model substitution** — swap to a cheaper model (e.g.
    Sonnet → GLM) when cost, not just capability, is the deciding factor.
    Enforceable via `routing.budgetTiers` (ADR-041): `router.SubstituteTier`.
-   ADR-043 adds independent privacy restrictions and Shadow-default context
-   recommendations; opt-in Enforce switches eligible single-user-turn requests
-   without history/tools/media/reasoning/structured output. The input threshold
-   selects simple versus complex, not eligibility; a distinct compatible complex
-   target can be selected above it.
+   ADR-043/044 add independent privacy restrictions, complete Mask transformation,
+   optional normal-class context and explicit session stability. Extended rules
+   support compatible tool/history traffic; legacy rules keep their original
+   eligibility. Strict budget tiers constrain all choices/retries; a soft
+   strict-tier reference meters a switching threshold rather than issuing an
+   admission lease or shrinking another hard cap.
    Task success, total cost including cold-cache/retries, p95 latency, and privacy
    negative cases are rollout gates, not benefits established by unit tests.
 4. **Budget control with visibility** — set spend limits per team and per
    individual, block on breach, and always be able to answer "how much have
    we spent."
-5. **No SPOF** — control plane and data plane are separate processes; a
-   control-plane outage must never stop inference-path request traffic. This
-   is specifically about the control plane, not about any one `mayu`
-   instance's own availability — see "Current limits" in README for that.
+5. **No central inference SPOF** — control plane and data plane are separate
+   processes; installed policy, local classification/pins and valid authority
+   remain usable without an inference-time control-plane call. Expired hard
+   leases and configured stale/initial readiness gates fail closed. A mayu
+   instance's own availability and shared-state enforcement remain separate.
 
 **Known tension:** #5 (no SPOF) pulls against making enforcement accurate.
 Running N node-local data planes removes the SPOF, but in-memory
@@ -71,7 +74,7 @@ when a change spans packages:
 
 1. **KeyAuth** (`internal/server/auth.go`) — `x-api-key` OR `Authorization:
    Bearer`, SHA-256 lookup in `keystore` → `Principal` on the request context.
-2. **Ingress parse** (`internal/server/{anthropicapi,openaiapi,bedrockapi}`) —
+2. **Ingress parse** (`internal/server/{anthropicapi,openaiapi,responsesapi,bedrockapi}`) —
    protocol-specific; the raw body is kept for verbatim forwarding.
 3. **Routing** (`internal/router`) — alias canonicalization → `ResolveModel`
    (config `model_fallbacks` when the requested model has no route) →
@@ -82,14 +85,16 @@ when a change spans packages:
    routing in every ingress handler: a fallback target appended after the
    original allow-list check is otherwise unchecked (see internal/CLAUDE.md
    Invariants).
-5. **Policy-aware request routing** (`internal/router.RouteRequest`, ADR-043) —
-   inspect original bytes once; intersect sensitive-data rules; compute optional
+5. **Policy-aware request routing** (`internal/router.RouteRequest`, ADR-043/044) —
+   inspect original bytes; intersect sensitive-data and strict-budget restrictions;
+   complete/reinspect required masking; revalidate session pins and optional
    context preferences; return the complete safe chain on one topology snapshot.
    Privacy enforces even in Shadow. Original-model RBAC must pass. Passive results
    preserve the input preflight model; requested is resolved pre-tier, selected is
    the policy choice, proposed is observational, actual attempt is separate.
-6. **Filters and admission** — explicit masking (`internal/filter`, `plugins/piimask`)
-   runs after privacy inspection; context preflight uses the returned topology.
+6. **Filters and admission** — consume any sanitized body and regenerate Parsed;
+   legacy masking (`internal/filter`, `plugins/piimask`) remains separately opt-in.
+   Context preflight uses the returned topology.
    Governance PreCheck (`internal/governance`, `internal/proxy.LeaseTable`) runs
    before provider billing; body capture cannot precede the routing decision.
 7. **Provider** (`providers/<name>`) — verbatim `RawBody` when protocols
@@ -122,7 +127,8 @@ internal/          - Private packages (gateway internals)
   proxy/ cache/ telemetry/ - proxy/ owns the control-plane Syncer + LeaseTable (ADR-034) and the UsagePusher (ADR-036); telemetry/ is live (ADR-036): usage wire types, window collector, memory/postgres/durable aggregators; cache/ owns VolatileStore (unimplemented, ADR-031 consolidation target)
   server/          - HTTP data plane + admin plane, ingress handlers
   router/          - Model→provider resolution, fallback chain, circuit breaker; SubstituteTier applies ADR-041 budget-tier substitution
-  sensitivity/     - Stdlib-only original-byte inspection; finite detector categories and request-shape signals (ADR-043)
+  sensitivity/     - Original-byte inspection and complete finite request redaction; latest-user context signals (ADR-043/044)
+  responses/       - Responses observation, stateless tool adapters, native/translated SSE
   tier/            - ADR-041 budget-tier substitution: per-team Table, window-latched activation, shared by controlplane/ and proxy/
   governance/      - Rate / quota / budget enforcement (PreCheck + Settle)
   keystore/        - Virtual-key store (SQLite), Principal + RBAC
@@ -141,7 +147,7 @@ internal/          - Private packages (gateway internals)
   openai/          - OpenAI ⇄ canonical conversion
   config/ principal/ - Config loading; request-scoped principal context
 providers/         - Upstream provider implementations (the extension surface)
-  anthropic/ bedrock/ openaicompat/ - One package per provider; testing/ has mocks
+  anthropic/ bedrock/ openaicompat/ openairesponses/ - One package per provider; testing/ has mocks
 pkg/               - Public packages: schema/ (canonical types), ulid/
 plugins/           - Concrete filter implementations (piimask/, ADR-009)
 docs/              - decisions (ADRs), runbooks, reference, architecture
@@ -158,15 +164,20 @@ tests/             - Harness tests (hooks, secret patterns, structure) — bash,
 - **Provider isolation:** a new provider adds **one package** under `providers/<name>/` plus a blank-import line in `cmd/mayu/main.go`. Provider PRs touch only `providers/<name>/` and provider docs — **zero core diff**.
 - **Canonical schema invariant:** same-protocol round-trip is lossless. Pipeline-interpreted fields are typed; everything else is preserved verbatim (`Extra map[string]json.RawMessage`). Streaming-frame string fields are `*string` so empty values survive.
 - **Cache invariant:** when provider protocol == ingress protocol, forward the request body **verbatim** (`RawBody`) so `cache_control` and prompt-cache hits are never corrupted.
-- **Policy-aware routing (ADR-043):** privacy can deny; optional context preferences
+  Documented top-level model substitution and explicit, completed PII masking
+  are the narrow exceptions. Inspection and affinity never rewrite content.
+- **Policy-aware routing (ADR-043/044):** privacy and opt-in strict budget targets
+  can deny; optional context preferences
   cannot loosen the safe route. All attempts require RBAC/regions; privacy and
   selected alternatives also require boundary/transport checks. Alternatives need
   declared context/capabilities and pricing. Boundary labels are operator assertions;
-  finite detectors do not guarantee universal PII detection. No session pinning or
-  Responses ingress is added. Upgrade binaries/CRD before activating new rules.
+  finite detectors do not guarantee universal PII detection. Local session pins
+  retain successful actual targets, never authorization; hash/scoped hints stay
+  out of audit/metrics. Mask requires complete redaction and reinspection before
+  an egress chain is usable. Upgrade binaries/CRD before activating new rules.
 - **Policy assembly:** install `live.Holder.RoutedAndPriced` on Store after effective
   topology construction; revalidate local policy before listeners; future ApplyWire
-  validates too. Rejected sensitive generations fail closed until valid recovery.
+  validates too. Rejected privacy/strict-budget generations fail closed until valid recovery.
   CP privacy from first request requires `require_sync`; both count APIs use local
   HTTP-200 estimates while unready/stale or privacy-denied.
 - **Two-phase governance:** pre-check BEFORE billing, settle AFTER. `on_exceeded` is `block` | `warn` (block wins on tie).

@@ -1,6 +1,7 @@
 package router
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"errors"
@@ -34,6 +35,16 @@ type RequestRoutingInput struct {
 	State          *live.State
 	AllowedRegions []string
 	CountOnly      bool
+	// SessionHint is untrusted, scoped to authenticated identity and hashed
+	// locally. It never authorizes access or appears in decision evidence.
+	SessionHint string
+	// Redactor optionally accumulates an ingress's separately configured
+	// legacy filter with policy redaction. It cannot skip reinspection.
+	Redactor RequestRedactor `json:"-"`
+	// Compatible is an optional request-specific transport check supplied by
+	// ingress. It only narrows the built-in checks, including every fallback
+	// and affinity hit. Responses canonical adapters require this approval.
+	Compatible func(ChainTarget) bool
 }
 
 // RequestRoutingResult owns its chain and decision slices. State is exactly the
@@ -47,6 +58,12 @@ type RequestRoutingResult struct {
 	Chain    []ChainTarget
 	State    *live.State
 	Decision RoutingDecision
+	// MaskRequired is an obligation; SanitizedBody is populated only after
+	// successful redaction and independent complete/zero-signal reinspection.
+	// Callers must use SanitizedBody for forwarding AND regenerate Parsed.
+	MaskRequired  bool
+	SanitizedBody []byte         `json:"-"`
+	AffinityToken *AffinityToken `json:"-"`
 }
 
 // RoutingPolicyRef identifies an applicable rule without its content or subject.
@@ -78,12 +95,21 @@ type RoutingDecision struct {
 	Categories      []string                `json:"categories,omitempty"`
 	Policies        []RoutingPolicyRef      `json:"policies,omitempty"`
 	Recommendations []RoutingRecommendation `json:"recommendations,omitempty"`
+	Masked          bool                    `json:"masked,omitempty"`
+}
+
+// RequestRedactor transforms a complete ingress body locally. Errors and
+// incomplete/unmasked output refuse the entire request. Implementations need
+// not import router: this is a structural contract.
+type RequestRedactor interface {
+	Redact(context.Context, string, []byte) ([]byte, error)
 }
 
 // RequestRoutingError is a security refusal (StatusCode 403). Ingresses translate
 // it into their own error shape. Count-only endpoints instead estimate locally
 // with HTTP 200 and no upstream call. Error/Unwrap never expose dependency text;
-// only policy.ErrSensitivePolicyRejected is preserved as an optional cause.
+// only policy.ErrRoutingPolicyRejected (including its legacy alias) is
+// preserved as an optional cause.
 type RequestRoutingError struct {
 	StatusCode int
 	Reason     string
@@ -127,8 +153,8 @@ func (r *Router) RouteRequest(ctx context.Context, in RequestRoutingInput) (Requ
 		docs, err = r.routingPolicies(in.Principal.Team, in.Principal.Owner)
 		if err != nil {
 			var cause error
-			if errors.Is(err, policy.ErrSensitivePolicyRejected) {
-				cause = policy.ErrSensitivePolicyRejected
+			if errors.Is(err, policy.ErrRoutingPolicyRejected) {
+				cause = policy.ErrRoutingPolicyRejected
 			}
 			return denyRouting(out, "policy_lookup_failed", cause)
 		}
@@ -147,12 +173,43 @@ func (r *Router) RouteRequest(ctx context.Context, in RequestRoutingInput) (Requ
 	if !r.allowsInState(in.Principal, st.Canonical(requested), st) || !r.allowsInState(in.Principal, in.Model, st) {
 		return denyRouting(out, "model_forbidden", nil)
 	}
-	if !hasPrivacy {
+	budgetModel, strictBudget := r.budgetConstraint(in, requested)
+	if strictBudget && budgetModel == "" {
+		return denyRouting(out, "budget_target_unavailable", nil)
+	}
+	inspector := r.requestInspector
+	if inspector == nil {
+		inspector = sensitivity.NewInspector()
+	}
+	// Responses has no pre-existing permissive legacy transport path. Inspect
+	// once even without policy so canonical adapters can never infer that an
+	// opaque native request is portable. Native providers may retain opaque
+	// content; malformed inspection still refuses.
+	var responsesInspection *sensitivity.Result
+	if in.Protocol == "responses" {
+		result, err := inspector.Inspect(ctx, in.Protocol, in.RawBody)
+		if err != nil {
+			out.Decision.Inspection = "failed"
+			return denyRouting(out, "inspection_failed", nil)
+		}
+		responsesInspection = &result
+		out.Decision.Inspection = "complete"
+		if !result.Complete {
+			out.Decision.Inspection = "incomplete"
+		}
+		out.Decision.Categories = boundedCategories(result.Categories)
+	}
+	if !hasPrivacy && !strictBudget {
 		// Optional context observes this complete authorized legacy chain.
 		// New compatibility/metadata gates apply only if a new chain is
 		// selected. Preserve the input preflight model independently of
 		// the first target (an ingress filter may have promoted a fallback).
-		out.Chain = r.legacyChain(in)
+		if responsesInspection != nil {
+			transport := requestBoundary{router: r, in: in, apis: requestAPIs(st), inspection: responsesInspection}
+			out.Chain = transport.filter(in.Chain, false)
+		} else {
+			out.Chain = r.legacyChain(in)
+		}
 		if len(out.Chain) == 0 {
 			return denyRouting(out, "no_safe_route", nil)
 		}
@@ -161,15 +218,17 @@ func (r *Router) RouteRequest(ctx context.Context, in RequestRoutingInput) (Requ
 			return out, nil
 		}
 	}
-	boundary := requestBoundary{router: r, in: in, apis: requestAPIs(st)}
-	inspector := r.requestInspector
-	if inspector == nil {
-		inspector = sensitivity.NewInspector()
+	boundary := requestBoundary{router: r, in: in, apis: requestAPIs(st), budgetModel: budgetModel}
+	var inspected sensitivity.Result
+	var err error
+	if responsesInspection != nil {
+		inspected = *responsesInspection
+	} else {
+		inspected, err = inspector.Inspect(ctx, in.Protocol, in.RawBody)
 	}
-	inspected, err := inspector.Inspect(ctx, in.Protocol, in.RawBody)
 	if err != nil {
 		out.Decision.Inspection = "failed"
-		if hasPrivacy {
+		if hasPrivacy || strictBudget {
 			return denyRouting(out, "inspection_failed", nil)
 		}
 		out.Decision.Reason = "context_inspection_failed"
@@ -182,7 +241,7 @@ func (r *Router) RouteRequest(ctx context.Context, in RequestRoutingInput) (Requ
 	out.Decision.Categories = boundedCategories(inspected.Categories)
 	boundary.inspection = &inspected
 	boundary.converseSafe = conversePreservesRequest(in.RawBody)
-	if !hasPrivacy {
+	if !hasPrivacy && !strictBudget {
 		if in.CountOnly {
 			return out, nil
 		}
@@ -197,7 +256,7 @@ func (r *Router) RouteRequest(ctx context.Context, in RequestRoutingInput) (Requ
 		}
 		sd := rule.sensitive
 		internal := false
-		for _, trigger := range []struct {
+		for index, trigger := range []struct {
 			active bool
 			action v1alpha1.SensitiveDataAction
 		}{
@@ -209,6 +268,12 @@ func (r *Router) RouteRequest(ctx context.Context, in RequestRoutingInput) (Requ
 			switch trigger.action {
 			case v1alpha1.InternalOnly:
 				internal = true
+			case v1alpha1.Mask:
+				if index == 0 {
+					out.MaskRequired = true
+				} else {
+					block = true
+				}
 			default:
 				block = true // Block, or an invalid injected action, fails closed.
 			}
@@ -221,12 +286,45 @@ func (r *Router) RouteRequest(ctx context.Context, in RequestRoutingInput) (Requ
 		out.Decision.Privacy = "block"
 		return denyRouting(out, "sensitive_blocked", nil)
 	}
+	if out.MaskRequired {
+		redactor := r.requestRedactor
+		if in.Redactor != nil {
+			redactor = in.Redactor
+		}
+		if redactor == nil {
+			return denyRouting(out, "mask_failed", nil)
+		}
+		sanitized, maskErr := redactor.Redact(ctx, in.Protocol, bytes.Clone(in.RawBody))
+		if maskErr != nil || ctx.Err() != nil {
+			return denyRouting(out, "mask_failed", nil)
+		}
+		// Keep the original categories and obligations for audit and routing.
+		// Only the final body supplies compatibility and context-size signals.
+		checked, inspectErr := inspector.Inspect(ctx, in.Protocol, sanitized)
+		if inspectErr != nil || !checked.Complete || len(checked.Categories) != 0 || ctx.Err() != nil {
+			return denyRouting(out, "mask_failed", nil)
+		}
+		out.SanitizedBody = bytes.Clone(sanitized)
+		out.Decision.Masked = true
+		boundary.in.RawBody = out.SanitizedBody
+		boundary.inspection = &checked
+		boundary.converseSafe = conversePreservesRequest(out.SanitizedBody)
+		inspected = checked
+	}
 	if boundary.models != nil {
 		out.Decision.Privacy = "internal_only"
 		out.Decision.Reason = "internal_only"
 	}
 	safe := boundary.filter(in.Chain, false)
-	if len(safe) == 0 && boundary.models != nil {
+	if strictBudget {
+		safe = r.requestChain(boundary, budgetModel)
+		if len(safe) == 0 {
+			return denyRouting(out, "budget_target_unavailable", nil)
+		}
+		if boundary.models == nil {
+			out.Decision.Reason = "budget_target"
+		}
+	} else if len(safe) == 0 && boundary.models != nil {
 		names := make([]string, 0, len(boundary.models))
 		for name := range boundary.models {
 			names = append(names, name)
@@ -262,6 +360,9 @@ func (r *Router) legacyChain(in RequestRoutingInput) []ChainTarget {
 		if len(in.AllowedRegions) > 0 && (region == "" || !slices.Contains(in.AllowedRegions, region)) {
 			continue
 		}
+		if in.Compatible != nil && !in.Compatible(ct) {
+			continue
+		}
 		safe = append(safe, ct)
 	}
 	return safe
@@ -270,6 +371,8 @@ func (r *Router) legacyChain(in RequestRoutingInput) []ChainTarget {
 func denyRouting(out RequestRoutingResult, reason string, cause error) (RequestRoutingResult, error) {
 	out.Model = ""
 	out.Chain = nil
+	out.SanitizedBody = nil
+	out.AffinityToken = nil
 	out.Decision.SelectedModel = ""
 	out.Decision.Reason = reason
 	return out, &RequestRoutingError{StatusCode: 403, Reason: reason, cause: cause}
@@ -329,18 +432,25 @@ func (r *Router) applyContext(out RequestRoutingResult, boundary requestBoundary
 	mode := "Enforce"
 	proposed := ""
 	conflict := false
+	stable := true
 	for _, rule := range rules {
 		c := rule.context
 		if c == nil {
 			continue
 		}
+		stable = stable && c.Stability != nil
 		if c.Mode != v1alpha1.Enforce {
 			mode = "Shadow"
 		}
 		model, reason := c.SimpleModel, "simple"
-		if inspected.InputTokens > c.MaxSimpleInputTokens {
+		if c.NormalModel != "" && contextKeywordMatch(c, boundary.in) {
+			model, reason = c.ComplexModel, "complex_keyword"
+		} else if inspected.InputTokens > c.MaxSimpleInputTokens {
 			model, reason = c.ComplexModel, "input_threshold"
-		} else if sensitivity.MatchesKeywords(boundary.in.RawBody, c.ComplexKeywords) {
+			if c.NormalModel != "" && inspected.InputTokens <= c.MaxNormalInputTokens {
+				model, reason = c.NormalModel, "normal_input"
+			}
+		} else if c.NormalModel == "" && contextKeywordMatch(c, boundary.in) {
 			model, reason = c.ComplexModel, "complex_keyword"
 		}
 		model = boundary.in.State.Canonical(model)
@@ -363,13 +473,23 @@ func (r *Router) applyContext(out RequestRoutingResult, boundary requestBoundary
 		out.Decision.Reason = "context_shadow"
 		return out
 	}
-	if !inspected.Complete || inspected.UserTurns != 1 || inspected.HasHistory || inspected.HasTools || inspected.HasVision || inspected.HasReasoning || inspected.HasStructuredOutput {
+	settings := stabilityOf(rules)
+	stable = stable && settings != nil
+	token, pinned := r.prepareAffinity(out, boundary, rules, settings)
+	if len(pinned) > 0 {
+		out.Model, out.Chain = pinned[0].Model, pinned
+		out.Decision.SelectedModel = out.Model
+		out.Decision.Reason = "context_affinity"
+		return finishAffinity(out, token, boundary)
+	}
+	if !inspected.Complete || inspected.UserTurns < 1 ||
+		(!stable && (inspected.UserTurns != 1 || inspected.HasHistory || inspected.HasTools || inspected.HasVision || inspected.HasReasoning || inspected.HasStructuredOutput)) {
 		out.Decision.Reason = "context_ineligible"
 		return out
 	}
 	if proposed == boundary.in.State.Canonical(out.Model) {
 		out.Decision.Reason = "context_unchanged"
-		return out
+		return finishAffinity(out, token, boundary)
 	}
 	// Context optimization is optional. If the recommendation's leading path
 	// cannot preserve this request, retain the already-safe route instead of
@@ -378,28 +498,41 @@ func (r *Router) applyContext(out RequestRoutingResult, boundary requestBoundary
 	mc, ok := boundary.in.State.Route(proposed)
 	if !ok || len(mc.Targets) == 0 {
 		out.Decision.Reason = "context_unavailable"
-		return out
+		return finishAffinity(out, token, boundary)
 	}
 	first := mc.Targets[0]
 	if api, ok := boundary.apis[requestTargetKey{first.Provider, first.Model}]; ok {
 		first.API = api
 	}
 	provider, ok := boundary.in.State.Provider(first.Provider)
-	if !ok || provider == nil || !requestCompatible(boundary.in.Protocol, provider, first, boundary.inspection, boundary.converseSafe) {
+	identity, _ := boundary.in.State.Identity(first.Provider)
+	leading := ChainTarget{Provider: provider, ProviderName: first.Provider, Identity: identity, Model: proposed, Upstream: first.Model,
+		Region: boundary.in.State.Region(first.Provider), DataBoundary: boundary.in.State.DataBoundary(first.Provider)}
+	if !ok || provider == nil || !boundary.compatible(leading, first) {
 		out.Decision.Reason = "context_unavailable"
-		return out
+		return finishAffinity(out, token, boundary)
 	}
 	candidate := r.requestChain(boundary, proposed)
 	// An unavailable recommendation may not silently switch to its fallback.
 	if len(candidate) == 0 || candidate[0].Model != proposed {
 		out.Decision.Reason = "context_unavailable"
-		return out
+		return finishAffinity(out, token, boundary)
 	}
 	out.Model = proposed
 	out.Chain = candidate
 	out.Decision.SelectedModel = proposed
 	out.Decision.Reason = "context_selected"
-	return out
+	return finishAffinity(out, token, boundary)
+}
+
+// Extended context rules classify the latest actual user instruction. Legacy
+// rules retain their original whole-document keyword semantics. InputTokens and
+// fitsRequest still account for the complete request, including tools/history.
+func contextKeywordMatch(c *policy.Context, in RequestRoutingInput) bool {
+	if c.NormalModel != "" || c.Stability != nil {
+		return sensitivity.MatchesContextKeywords(in.RawBody, in.Protocol, c.ComplexKeywords)
+	}
+	return sensitivity.MatchesKeywords(in.RawBody, c.ComplexKeywords)
 }
 
 // allowsInState mirrors Allows without loading a new topology generation.
@@ -421,6 +554,7 @@ type requestBoundary struct {
 	models       map[string]bool
 	apis         map[requestTargetKey]string
 	converseSafe bool
+	budgetModel  string
 }
 
 type requestTargetKey struct{ provider, upstream string }
@@ -467,10 +601,21 @@ func (b *requestBoundary) intersect(names []string) {
 // existing metadata/context behavior; all automatically selected models require
 // declared context, required capabilities and pricing on this exact generation.
 func (b requestBoundary) filter(chain []ChainTarget, automatic bool) []ChainTarget {
+	// An internal model label covers the model destination, not additional
+	// egress performed by client-selected hosted/MCP tools. An InternalOnly
+	// obligation cannot approve those secondary destinations. Opaque images
+	// and other content without remote-tool capability keep their existing
+	// policy behavior.
+	if b.models != nil && b.inspection != nil && b.inspection.HasRemoteTools {
+		return nil
+	}
 	st := b.in.State
 	var out []ChainTarget
 	for _, ct := range chain {
 		ct.Model = st.Canonical(ct.Model)
+		if b.budgetModel != "" && ct.Model != b.budgetModel {
+			continue
+		}
 		if !b.router.allowsInState(b.in.Principal, ct.Model, st) {
 			continue
 		}
@@ -508,10 +653,11 @@ func (b requestBoundary) filter(chain []ChainTarget, automatic bool) []ChainTarg
 		if b.models != nil && (!b.models[ct.Model] || ct.DataBoundary != "internal") {
 			continue
 		}
-		if !requestCompatible(b.in.Protocol, p, target, b.inspection, b.converseSafe) {
+		if !b.compatible(ct, target) {
 			continue
 		}
-		if b.inspection != nil && (automatic || ct.Model != b.in.Model) {
+		if b.inspection != nil && (automatic || ct.Model != b.in.Model || b.budgetModel != "" ||
+			(b.in.Protocol == "responses" && p.Name() != "openai_responses")) {
 			if !fitsRequest(mc, *b.inspection) || st.Pricing() == nil || !st.Pricing().HasRate(ct.ProviderName, ct.Upstream) {
 				continue
 			}
@@ -520,6 +666,17 @@ func (b requestBoundary) filter(chain []ChainTarget, automatic bool) []ChainTarg
 	}
 	return out
 }
+
+func (b requestBoundary) compatible(ct ChainTarget, target config.Target) bool {
+	if !requestCompatible(b.in.Protocol, ct.Provider, target, b.inspection, b.converseSafe) {
+		return false
+	}
+	if b.in.Protocol == "responses" && ct.Provider.Name() != "openai_responses" && b.in.Compatible == nil {
+		return false
+	}
+	return b.in.Compatible == nil || b.in.Compatible(ct)
+}
+
 func fitsRequest(mc config.ModelConfig, s sensitivity.Result) bool {
 	// Subtract after range checking: input+output can overflow int64.
 	if s.InputTokens < 0 || s.OutputTokens < 0 || mc.ContextWindow <= 0 || s.InputTokens > mc.ContextWindow || s.OutputTokens > mc.ContextWindow-s.InputTokens {
@@ -541,14 +698,28 @@ func fitsRequest(mc config.ModelConfig, s sensitivity.Result) bool {
 // drops image/reasoning blocks. Cross-wire canonical conversion cannot preserve
 // vision/reasoning/structured output. Unproven paths stay conservative.
 func requestCompatible(ingress string, provider providers.Provider, target config.Target, s *sensitivity.Result, converseSafe bool) bool {
-	if ingress != "anthropic" && ingress != "openai" && ingress != "bedrock" {
-		return false
-	}
-	feature := s != nil && (!s.Complete || s.HasVision || s.HasReasoning || s.HasStructuredOutput)
 	declared, hasDeclaration := provider.(IngressSupporter)
 	if hasDeclaration && !declared.SupportsIngress(ingress) {
 		return false
 	}
+	if ingress == "responses" {
+		if provider.Name() == "openai_responses" {
+			return true
+		}
+		if provider.Name() == "bedrock" || s == nil || !s.Complete || s.HasVision || s.HasReasoning || s.HasStructuredOutput {
+			return false
+		}
+		// Known canonical text/tool paths and explicit provider contracts can
+		// bridge Responses only with the ingress callback's additional approval.
+		return provider.Name() == "anthropic" || provider.Name() == "openai_compatible" || hasDeclaration
+	}
+	if provider.Name() == "openai_responses" {
+		return false
+	}
+	if ingress != "anthropic" && ingress != "openai" && ingress != "bedrock" {
+		return false
+	}
+	feature := s != nil && (!s.Complete || s.HasVision || s.HasReasoning || s.HasStructuredOutput)
 	switch provider.Name() {
 	case "anthropic":
 		return ingress == "anthropic"
@@ -584,6 +755,35 @@ func requestCompatible(ingress string, provider providers.Provider, target confi
 		// but never infer native Bedrock or feature-preserving translation support.
 		return ingress != "bedrock" && !feature
 	}
+}
+
+func (r *Router) budgetConstraint(in RequestRoutingInput, requested string) (string, bool) {
+	if r.budgetConstraintGate == nil {
+		return "", false
+	}
+	source := in.State.Canonical(requested)
+	target, active := "", false
+	for from, to := range r.budgetConstraintGate(in.Principal) {
+		if in.State.Canonical(from) != source {
+			continue
+		}
+		to = in.State.Canonical(to)
+		if to == "" || (active && to != target) {
+			return "", true
+		}
+		target, active = to, true
+	}
+	return target, active
+}
+
+// BudgetTargetAllowed rechecks only the current mandatory cost ceiling before
+// a later attempt. It cannot broaden the request's already-filtered chain.
+func (r *Router) BudgetTargetAllowed(p keystore.Principal, requested, candidate string, st *live.State) bool {
+	if st == nil {
+		return false
+	}
+	target, strict := r.budgetConstraint(RequestRoutingInput{Principal: p, State: st}, requested)
+	return !strict || target != "" && target == st.Canonical(candidate)
 }
 
 // requestChain applies ResolveChain's priority/breaker semantics AFTER filtering

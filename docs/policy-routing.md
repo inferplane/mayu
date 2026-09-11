@@ -5,6 +5,11 @@ model recommendations. The goal is useful coding tasks at lower total cost withi
 approved data-processing boundaries. Savings and task quality require workload
 evaluation; selecting a cheaper model is not evidence of either.
 
+This guide describes the legacy two-class mode. For the compatible normal-class,
+session stability, strict budget cutover, complete masking and Codex additions,
+see [adaptive routing](adaptive-routing.md). Eligibility limits below apply when
+the new stability option is absent.
+
 ## Configure an isolated example
 
 Use `examples/config.policy-routing.json` with

@@ -13,6 +13,9 @@ client and upstream protocols without losing thinking blocks or `cache_control`.
 | Anthropic provider | `providers/anthropic/` | Messages passthrough, verbatim body, byte-exact SSE |
 | Bedrock provider | `providers/bedrock/` | Claude→InvokeModel, non-Claude→Converse; SDK isolated |
 | OpenAI-compatible | `providers/openaicompat/` | vLLM/Ollama; order-preserving model rewrite |
+| Native Responses | `providers/openairesponses/` | Native Responses passthrough, bounded SSE and usage validation |
+| Responses codecs/ingress | `internal/responses/`, `internal/server/responsesapi/` | Original request inspection and governed stateless tool adapters for Codex |
+| Adaptive routing | `internal/router/`, `internal/sensitivity/` | Three classes, actual-target local affinity, strict cost/privacy intersections and completed redaction |
 | Mock provider | `providers/testing/mockprovider/` | deterministic provider for unit tests |
 | Canonical schema | `pkg/schema/` | Anthropic-superset types, Extra preservation, SSE writer |
 | Filter chain | `internal/filter/` | `RequestFilter` interface + registry (the spec's filter chain ⑥, ADR-009) |
@@ -23,7 +26,7 @@ client and upstream protocols without losing thinking blocks or `cache_control`.
 - One package per provider; adding a provider is one package + a blank import (zero core diff, §8).
 - Canonical schema is an Anthropic-superset so thinking blocks and `cache_control` survive conversion.
 - Bedrock Claude uses InvokeModel with a cache-safe top-level-only model rewrite; the event stream is re-serialized to Anthropic SSE.
-- PII masking is OPT-IN per team: it re-serializes the body (cache loss, ~10× cost — warned, not silent), updates both RawBody and Parsed (so the openai_compatible Parsed-conversion path can't leak), masks text only (never system/tool/cache_control), and fails CLOSED (ADR-009).
+- Legacy PII masking remains opt-in (ADR-009). ADR-044's Mask policy uses complete finite redaction over supported request surfaces and independently reinspects the result; every ingress updates RawBody and Parsed together. Masking changes the cache namespace; stable masked prefixes may still cache, and no fixed cost multiplier is promised.
 - Bedrock Guardrails (D6, ADR-019) are applied on the DATA PLANE — every InvokeModel/InvokeModelWithResponseStream/Converse/ConverseStream call — not just surfaced in the console: a provider-level default (config `guardrail_id`/`guardrail_version`) plus an optional per-team override (`teams.guardrail_id`/`guardrail_version`), with the override winning but no per-team opt-out (a team can pick a different guardrail, never remove the default).
 - The `mantle` egress has NO guardrail parameter, so it cannot honour ADR-019's no-opt-out rule. A request whose effective guardrail is non-empty is REFUSED there (400, `providers/bedrock/bedrock.go`'s `mantleGuardrailCheck`) rather than served unguarded — the Bedrock ingress writes `ProxyRequest.GuardrailID` into the audit chain unconditionally, so serving it would record a false compliance attestation and make `routing.model_api: "mantle"` a per-team opt-out. Route guarded models via `converse`/`invoke_model`.
 - A Mantle 2xx body that cannot be parsed fails the call with a 502 instead of being teed through: an unparsed response leaves `ProxyResponse.Parsed` nil, which makes the ingress skip settle entirely — the request would bill nothing and audit like a genuinely free model (ADR-030's zero-cost class).

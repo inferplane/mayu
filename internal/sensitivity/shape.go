@@ -14,6 +14,9 @@ func (r *Result) inspectShape(protocol string, root any) error {
 		r.Complete = false
 		return nil
 	}
+	if protocol == "responses" {
+		return r.responsesShape(body)
+	}
 	r.options(protocol, body)
 	if system, exists := body["system"]; exists {
 		r.content(protocol, system)

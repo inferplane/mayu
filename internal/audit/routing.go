@@ -24,6 +24,7 @@ type RoutingRef struct {
 	ActualModel     string                  `json:"actual_model,omitempty"`
 	ActualProvider  string                  `json:"actual_provider,omitempty"`
 	ActualBoundary  string                  `json:"actual_boundary,omitempty"`
+	Masked          bool                    `json:"masked,omitempty"`
 }
 
 type RoutingPolicyRef struct {

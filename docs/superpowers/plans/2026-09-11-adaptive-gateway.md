@@ -35,14 +35,14 @@ BudgetTiers/ActiveTier with EnforceTargets; expose tier constraint lookup withou
 changing the existing substitution lookup. RequestRoutingInput.SessionHint is
 untrusted and used only for scoped hashing.
 
-- [ ] Add failing schema/clone/target validation tests for all new fields.
-- [ ] Add weak/normal/strong, tool/history, hold-time/request-count and expiry
+- [x] Add failing schema/clone/target validation tests for all new fields.
+- [x] Add weak/normal/strong, tool/history, hold-time/request-count and expiry
   tests using an injected clock.
-- [ ] Test concurrent requests, bounded storage, identity separation, hot reload,
+- [x] Test concurrent requests, bounded storage, identity separation, hot reload,
   privacy/budget override and cold-start behavior.
-- [ ] Implement strict budget target intersection and independent masking
+- [x] Implement strict budget target intersection and independent masking
   obligation. Legacy optional context/budget rules retain regression behavior.
-- [ ] Run policy/router/tier race tests and review the scoped diff.
+- [x] Run policy/router/tier race tests and review the scoped diff.
 
 ## Task 2: Responses codecs and native provider
 
@@ -55,12 +55,12 @@ preserve usage, call IDs, tool arguments and terminal state.
 Provider registers `openai_responses` and implements the existing Provider
 interface, with SupportsIngress("responses").
 
-- [ ] Write recorded-shape local fixtures for text, functions, custom tools,
+- [x] Write recorded-shape local fixtures for text, functions, custom tools,
   phase, tool results, streamed arguments, usage, cancellation and malformed data.
-- [ ] Verify unsupported stateful/opaque cross-protocol input refuses.
-- [ ] Implement codecs and the native provider with fake HTTP tests, raw
+- [x] Verify unsupported stateful/opaque cross-protocol input refuses.
+- [x] Implement codecs and the native provider with fake HTTP tests, raw
   passthrough/model-rewrite assertions and missing-usage refusal.
-- [ ] Run focused race tests and provide exact public signatures to Task 3.
+- [x] Run focused race tests and provide exact public signatures to Task 3.
 
 ## Task 3: Transformation, ingress and assembled routing
 
@@ -68,16 +68,16 @@ interface, with SupportsIngress("responses").
 `internal/server/{anthropicapi,openaiapi,bedrockapi,requestpolicy}`,
 `internal/server/server.go`, `cmd/mayu`, `internal/audit`, `internal/metrics`.
 
-- [ ] Add original-byte Responses inspection and deterministic complete masking
+- [x] Add original-byte Responses inspection and deterministic complete masking
   with post-transform inspection; test all detector categories, nested numeric
   tool arguments, structural-key refusal and malformed/opaque content.
-- [ ] Apply MaskRequired in every generation/count path before PreCheck/egress;
+- [x] Apply MaskRequired in every generation/count path before PreCheck/egress;
   regenerate parsed request after transformation; emit safe transformation evidence.
-- [ ] Register Responses ingress and native provider; apply the same readiness,
+- [x] Register Responses ingress and native provider; apply the same readiness,
   body, identity, routing, region, cost and retry constraints.
-- [ ] Fix standalone period-aware tier evaluation and integer utilization;
+- [x] Fix standalone period-aware tier evaluation and integer utilization;
   wire strict constraints in both standalone and control-plane modes.
-- [ ] Exercise assembled gateway behavior, including offline policy routing,
+- [x] Exercise assembled gateway behavior, including offline policy routing,
   privacy+budget intersections and hard total-cap refusal.
 
 ## Task 4: Documentation, examples and end-to-end verification
@@ -85,12 +85,12 @@ interface, with SupportsIngress("responses").
 **Files:** ADR-044, Responses/operator guides, examples, README/roadmap/reference
 context and focused acceptance fixtures.
 
-- [ ] Provide one runnable example with auto alias, three classes, stable
+- [x] Provide one runnable example with auto alias, three classes, stable
   sessions, PII internal/mask alternatives, soft switching budget and hard cap.
-- [ ] Add Codex user-level custom-provider configuration and bounded local fake
+- [x] Add Codex user-level custom-provider configuration and bounded local fake
   CLI smoke test; record unsupported surfaces and actual tested CLI version.
-- [ ] Document failure domains and the durable shared-authority gap explicitly.
-- [ ] Run both static builds, full race tests, vet, gofmt, harness, pricing and
+- [x] Document failure domains and the durable shared-authority gap explicitly.
+- [x] Run both static builds, full race tests, vet, gofmt, harness, pricing and
   diff checks. Run independent review, fix substantive issues and repeat checks.
 - [ ] Push PR, inspect latest-HEAD review and CI, fix/re-push, then merge under
   the user's standing authorization when all release conditions are satisfied.

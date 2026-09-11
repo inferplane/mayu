@@ -5,6 +5,11 @@
 - Related: ADR-006 (topology snapshots), ADR-009 (masking), ADR-033/034
   (policy delivery), ADR-041 (budget tiers), ADR-042 (user budgets)
 
+ADR-044 extends the original release below with explicit stability/normal-class
+context, complete Mask policy handling, strict budget targets and Responses
+ingress. The single-turn eligibility below remains the legacy configuration
+contract; see [ADR-044](ADR-044-adaptive-coding-gateway.md) for the extension.
+
 ## Context
 
 Coding tasks should remain useful while total cost falls within an organization's

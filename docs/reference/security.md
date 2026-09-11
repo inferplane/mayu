@@ -62,3 +62,11 @@ Upgrade mayu/inferplaned/CRD before activating new rules. `require_sync` is nece
 for CP privacy before first sync; `max_policy_age` bounds readiness staleness. Both
 count APIs stay local/200 while unready, stale, or refused. See
 [limits and rollout](../policy-routing.md).
+
+ADR-044 adds complete finite Mask transformation before an egress chain is
+returned. Masking remains required even alongside InternalOnly. Unsafe structural
+or numeric changes, remaining detections and incomplete transformations refuse.
+Responses remote-tool egress cannot be authorized merely by an internal model
+label. Strict budget constraints also gate rejected policy updates and filter
+every subsequent context choice, affinity hit and fallback. Session hints are
+scoped HMAC inputs only; they never become principals or audit dimensions.

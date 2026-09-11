@@ -108,3 +108,27 @@ See `docs/policy-routing.md` for exact limits and rollout gates.
 Worth knowing before assuming a caveat is temporary:
 - **Multi-replica HA is designed, not built (ADR-013, still Proposed).** `keystore`/`providerstore` are SQLite-only; `limiter`/`budget` are memory-only; there is no Redis/Valkey dependency anywhere. Every "per-instance state" note above is a standing limitation, not a transitional one.
 - **`cache/` (VolatileStore) is unimplemented** — see above.
+
+## Adaptive gateway extension (ADR-044)
+
+`router.RouteRequest` now also intersects strict budget targets, completes and
+reinspects required Mask transformations, and returns SanitizedBody plus an
+opaque AffinityToken. Ingresses must reparse sanitized bytes and record only an
+actual successful provider through RecordAffinitySuccess. Optional context
+normalModel/stability preserves legacy behavior when absent. Extended keyword
+classification uses latest user intent, not system/tool/history keywords.
+The affinity store is bounded, local and payload-free; it is unrelated to the
+still-unimplemented `cache.VolatileStore`/legacy affinity policy subtype.
+
+`responses` and `server/responsesapi` implement Responses observation, native
+SSE and stateless text/tool conversion; `providers/openairesponses` is native
+transport. Unsupported opaque/stateful conversion is refused. All four
+generation ingresses share the privacy, strict-cost and governance gates.
+Native remote tool egress cannot hide behind an internal provider label.
+
+A soft budget referenced by an enforceTargets tier is an accounting threshold
+(`policy.IsRoutingOnlyBudget`), not an admission lease; TeamLimits carries its
+meter separately from real caps. CP retains reports without issuing that soft
+lease. Tier arithmetic saturates with integers and uses referenced period keys.
+Rejected strict/privacy distribution gates affected routing until valid recovery.
+These changes do not implement durable financial authority or shared-state HA.
