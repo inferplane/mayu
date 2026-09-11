@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -497,5 +498,103 @@ func TestSyncerOutageKeepsLastTierState(t *testing.T) {
 	}
 	if tiers.Get("alpha")["claude-haiku-4-5"] != "glm-4.7-gpu" {
 		t.Fatal("tier state lost on outage")
+	}
+}
+
+// TestBackoffIsJittered pins the anti-thundering-herd property: two planes
+// that fail on the same outage must NOT return the same retry interval, and
+// the jittered value must stay inside the protocol's [Min, Default] band.
+func TestBackoffIsJittered(t *testing.T) {
+	orig := jitterFrac
+	defer func() { jitterFrac = orig }()
+
+	// Ceiling case — the one that matters: every plane parks at Default and,
+	// unjittered, would retry in lockstep when the control plane returns.
+	for _, frac := range []float64{0, 0.5, 0.999999} {
+		jitterFrac = func() float64 { return frac }
+		got := jitter(policy.DefaultPolicySyncInterval)
+		lo := policy.DefaultPolicySyncInterval - time.Duration(backoffJitter*float64(policy.DefaultPolicySyncInterval))
+		if got > policy.DefaultPolicySyncInterval {
+			t.Errorf("jitter(%v) = %v, must never exceed the ceiling", policy.DefaultPolicySyncInterval, got)
+		}
+		if got < lo {
+			t.Errorf("jitter(%v) = %v, want >= %v", policy.DefaultPolicySyncInterval, got, lo)
+		}
+	}
+
+	// Distinct fractions must produce distinct intervals — otherwise the fleet
+	// is still in lockstep.
+	jitterFrac = func() float64 { return 0 }
+	a := jitter(policy.DefaultPolicySyncInterval)
+	jitterFrac = func() float64 { return 0.9 }
+	b := jitter(policy.DefaultPolicySyncInterval)
+	if a == b {
+		t.Errorf("jitter is not spreading: both planes returned %v", a)
+	}
+
+	// Floor case: never undercut the protocol minimum.
+	jitterFrac = func() float64 { return 0.999999 }
+	if got := jitter(policy.MinPolicySyncInterval); got != policy.MinPolicySyncInterval {
+		t.Errorf("jitter at the floor = %v, want exactly %v", got, policy.MinPolicySyncInterval)
+	}
+}
+
+// TestTickBacksOffWithinBandOnFailure covers tick's whole failure path: the
+// doubling, the two clamps, and the jitter, against an unreachable endpoint.
+func TestTickBacksOffWithinBandOnFailure(t *testing.T) {
+	orig := jitterFrac
+	defer func() { jitterFrac = orig }()
+	jitterFrac = func() float64 { return 0.5 }
+
+	// A closed port: syncOnce fails without waiting on a network timeout.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+
+	s := &Syncer{URL: url, Token: "t", Dataplane: "dp", Store: policy.NewEmptyStore(), Leases: NewLeaseTable()}
+	got := s.tick(context.Background(), policy.MinPolicySyncInterval)
+	if got < policy.MinPolicySyncInterval || got > policy.DefaultPolicySyncInterval {
+		t.Errorf("backoff = %v, want within [%v, %v]", got, policy.MinPolicySyncInterval, policy.DefaultPolicySyncInterval)
+	}
+}
+
+// TestGovernanceReady pins the require_sync gate (review/fable5 §08 B2/B3):
+// not ready before the first successful heartbeat; ready after; stale again
+// once the last success is older than maxAge; maxAge<=0 never expires.
+func TestGovernanceReady(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	s := &Syncer{now: func() time.Time { return now }}
+	if ok, reason := s.GovernanceReady(0); ok || !strings.Contains(reason, "no policy generation") {
+		t.Fatalf("never-synced must be not-ready: ok=%v reason=%q", ok, reason)
+	}
+	s.lastSuccess.Store(now.UnixNano())
+	if ok, _ := s.GovernanceReady(0); !ok {
+		t.Fatal("synced with maxAge 0 must be ready")
+	}
+	if ok, _ := s.GovernanceReady(10 * time.Minute); !ok {
+		t.Fatal("fresh sync within maxAge must be ready")
+	}
+	now = now.Add(11 * time.Minute)
+	if ok, reason := s.GovernanceReady(10 * time.Minute); ok || !strings.Contains(reason, "stale") {
+		t.Fatalf("sync older than maxAge must be not-ready: ok=%v reason=%q", ok, reason)
+	}
+	if ok, _ := s.GovernanceReady(0); !ok {
+		t.Fatal("maxAge 0 never expires")
+	}
+}
+
+// A successful heartbeat publishes lastSuccess AFTER applying the set.
+func TestSyncOnceMarksGovernanceReady(t *testing.T) {
+	ts := newControlPlane(t, "tok")
+	s := &Syncer{URL: ts.URL, Token: "tok", Dataplane: "dp1", Store: policy.NewEmptyStore(), Leases: NewLeaseTable(),
+		SpentOf: func(string, v1alpha1.BudgetPeriod) int64 { return 0 }}
+	if ok, _ := s.GovernanceReady(0); ok {
+		t.Fatal("must not be ready before any sync")
+	}
+	if _, err := s.syncOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := s.GovernanceReady(0); !ok {
+		t.Fatal("must be ready after a successful sync")
 	}
 }

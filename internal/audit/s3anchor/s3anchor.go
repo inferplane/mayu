@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"path"
 	"strconv"
 	"time"
@@ -22,10 +23,13 @@ import (
 	"github.com/inferplane/inferplane/internal/audit"
 )
 
-// putObjectAPI is the slice of the S3 client this package uses (so a stub can
-// verify the request shape offline — this environment has no S3).
-type putObjectAPI interface {
+// s3API is the slice of the S3 client this package uses (so a stub can verify
+// the request shape offline — this environment has no S3). ListObjectsV2 and
+// GetObject back Latest; PutObject backs Anchor.
+type s3API interface {
 	PutObject(ctx context.Context, in *s3.PutObjectInput, optFns ...func(*s3.Options)) (*s3.PutObjectOutput, error)
+	ListObjectsV2(ctx context.Context, in *s3.ListObjectsV2Input, optFns ...func(*s3.Options)) (*s3.ListObjectsV2Output, error)
+	GetObject(ctx context.Context, in *s3.GetObjectInput, optFns ...func(*s3.Options)) (*s3.GetObjectOutput, error)
 }
 
 // Config selects the bucket/prefix and optional per-object retention.
@@ -37,9 +41,10 @@ type Config struct {
 	RetainDays int    // >0 → set per-object COMPLIANCE retention on each anchor
 }
 
-// Anchorer puts a JSON AnchorPoint per call.
+// Anchorer puts a JSON AnchorPoint per call, and reads the latest one back
+// (audit.AnchorReader) for /admin/audit/verify's tamper cross-check.
 type Anchorer struct {
-	client     putObjectAPI
+	client     s3API
 	bucket     string
 	prefix     string
 	retainDays int
@@ -65,7 +70,7 @@ func New(ctx context.Context, cfg Config) (*Anchorer, error) {
 	return newWithClient(client, cfg.Bucket, cfg.Prefix, cfg.RetainDays), nil
 }
 
-func newWithClient(client putObjectAPI, bucket, prefix string, retainDays int) *Anchorer {
+func newWithClient(client s3API, bucket, prefix string, retainDays int) *Anchorer {
 	return &Anchorer{client: client, bucket: bucket, prefix: prefix, retainDays: retainDays, now: time.Now}
 }
 
@@ -95,4 +100,62 @@ func (a *Anchorer) Anchor(ctx context.Context, p audit.AnchorPoint) error {
 	return nil
 }
 
+// Latest lists prefix/instance/ and returns the most recently anchored
+// AnchorPoint for that instance — by S3's LastModified, not by parsing the
+// key, so it stays correct regardless of key-string sort order (RFC3339Nano
+// trims trailing fractional-second zeros, which is not lexicographically
+// stable). Paginates the full listing: anchors accumulate for the life of an
+// instance, and the true latest could be on any page. Returns (nil, nil) —
+// never an error — when the instance has no anchors yet; a fresh instance or
+// an anchorer that only just started is not tamper evidence.
+func (a *Anchorer) Latest(ctx context.Context, instance string) (*audit.AnchorPoint, error) {
+	prefix := path.Join(a.prefix, instance) + "/"
+	var latestKey string
+	var latestMod time.Time
+	var found bool
+	var token *string
+	for {
+		out, err := a.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(a.bucket),
+			Prefix:            aws.String(prefix),
+			ContinuationToken: token,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("s3anchor: list %q: %w", prefix, err)
+		}
+		for _, obj := range out.Contents {
+			if obj.LastModified == nil || obj.Key == nil {
+				continue
+			}
+			if !found || obj.LastModified.After(latestMod) {
+				found = true
+				latestMod = *obj.LastModified
+				latestKey = *obj.Key
+			}
+		}
+		if out.IsTruncated == nil || !*out.IsTruncated || out.NextContinuationToken == nil {
+			break
+		}
+		token = out.NextContinuationToken
+	}
+	if !found {
+		return nil, nil
+	}
+	res, err := a.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(a.bucket), Key: aws.String(latestKey)})
+	if err != nil {
+		return nil, fmt.Errorf("s3anchor: get %q: %w", latestKey, err)
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(res.Body, 1<<16)) // an AnchorPoint is a few hundred bytes
+	if err != nil {
+		return nil, fmt.Errorf("s3anchor: read %q: %w", latestKey, err)
+	}
+	var p audit.AnchorPoint
+	if err := json.Unmarshal(body, &p); err != nil {
+		return nil, fmt.Errorf("s3anchor: unmarshal %q: %w", latestKey, err)
+	}
+	return &p, nil
+}
+
 var _ audit.Anchorer = (*Anchorer)(nil)
+var _ audit.AnchorReader = (*Anchorer)(nil)

@@ -96,6 +96,17 @@ type Target struct {
 type ModelConfig struct {
 	Aliases []string `json:"aliases,omitempty"`
 	Targets []Target `json:"targets"`
+	// ContextWindow is the model's total context limit in TOKENS
+	// (input + output), operator-declared. 0 (unset) = unknown: no gateway
+	// pre-flight and no exposure. When set, the gateway (a) advertises it in
+	// GET /v1/models (both wire shapes) so context-aware clients can size
+	// their windows instead of assuming a default, and (b) fast-fails an
+	// obviously oversized generation request with a CLEAR 400 naming the
+	// limit — the upstream's own rejection reaches the client as an opaque
+	// scrubbed ValidationException (providers/bedrock/errors.go never echoes
+	// upstream text). Declared per public model name; alias lookups resolve
+	// to it via router.ContextWindow.
+	ContextWindow int64 `json:"context_window,omitempty"`
 }
 
 // AdminAuth guards the admin plane (§5.5). Tokens are referenced via
@@ -171,6 +182,32 @@ type ServerConfig struct {
 	DrainGrace  string    `json:"drain_grace"`
 	AdminAuth   AdminAuth `json:"admin_auth"`
 	TLS         TLSConfig `json:"tls"`
+	// MaxRequestBytes bounds every data-plane request body (C9 — before it,
+	// every ingress did an unbounded io.ReadAll and one oversized body could
+	// OOM the gateway). 0 (unset) defaults to 64 MiB at load; negative is a
+	// config error. Distinct from audit.log_bodies.max_body_bytes
+	// (BodyLogConfig.MaxBodyBytes), which caps a per-record CAPTURED body,
+	// not the ingress read.
+	MaxRequestBytes int64 `json:"max_request_bytes,omitempty"`
+}
+
+// defaultMaxRequestBytes is server.max_request_bytes' unset default. 64 MiB
+// comfortably covers the largest legitimate agent payloads (1M-token contexts,
+// base64 images/PDFs in messages) while still bounding a hostile body.
+const defaultMaxRequestBytes = 64 << 20
+
+// validateServer normalizes ServerConfig.MaxRequestBytes: negative is a
+// config error, zero (unset) defaults to defaultMaxRequestBytes, mutated in
+// place so every reader of cfg.Server.MaxRequestBytes sees the resolved
+// value (same posture as validateBodyLog's MaxBodyBytes).
+func validateServer(s *ServerConfig) error {
+	if s.MaxRequestBytes < 0 {
+		return fmt.Errorf("config: server.max_request_bytes must be >= 0")
+	}
+	if s.MaxRequestBytes == 0 {
+		s.MaxRequestBytes = defaultMaxRequestBytes
+	}
+	return nil
 }
 
 // KeyStoreConfig selects the virtual-key backend. Only "sqlite" exists — Type
@@ -493,6 +530,25 @@ type ControlPlaneConfig struct {
 	// Dataplane is this proxy's stable instance id; defaults to the
 	// hostname plus a boot-time suffix when empty.
 	Dataplane string `json:"dataplane,omitempty"`
+	// RequireSync flips this data plane from fail-open to fail-closed on
+	// control-plane reachability (review/fable5 §08 B2/B3). Default false
+	// keeps today's posture: boot serves ungoverned until the first
+	// heartbeat succeeds, and a lost control plane keeps the last-applied
+	// policy set forever. With true, governed data-plane requests are refused
+	// with 503 (and /readyz reports not-ready) until the first successful
+	// sync — and, when MaxPolicyAge is also set, again whenever the last
+	// successful sync is older than that. count_tokens is never gated (the
+	// never-non-200 invariant). A node operator can still firewall the
+	// control plane, but then gets NO service instead of ungoverned service.
+	RequireSync bool `json:"require_sync,omitempty"`
+	// MaxPolicyAge is a Go duration ("10m"); the last-applied policy set is
+	// treated as expired once the last successful sync is older than this.
+	// Only meaningful with RequireSync (rejected without it — a silently
+	// ignored knob is the failure mode this repo refuses). Empty = policies
+	// never expire (leases still do, as before).
+	MaxPolicyAge string `json:"max_policy_age,omitempty"`
+	// MaxPolicyAgeDuration is the parsed MaxPolicyAge; never serialized.
+	MaxPolicyAgeDuration time.Duration `json:"-"`
 }
 
 // FallbackFamilyEnabled reports whether the family fallback heuristic is on
@@ -655,6 +711,9 @@ func LoadRaw(path string) (*Config, error) {
 	if err := validateOIDC(&cfg.Server.AdminAuth); err != nil {
 		return nil, err
 	}
+	if err := validateServer(&cfg.Server); err != nil {
+		return nil, err
+	}
 	if err := validatePricing(cfg.Pricing); err != nil {
 		return nil, err
 	}
@@ -715,6 +774,16 @@ func validateControlPlane(cfg *Config) error {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return fmt.Errorf("config: control_plane.url must be an absolute http(s) URL")
 	}
+	if cp.MaxPolicyAge != "" {
+		if !cp.RequireSync {
+			return fmt.Errorf("config: control_plane.max_policy_age requires control_plane.require_sync: true — without the sync requirement a policy expiry has no fail-closed action to take")
+		}
+		d, err := time.ParseDuration(cp.MaxPolicyAge)
+		if err != nil || d <= 0 {
+			return fmt.Errorf("config: control_plane.max_policy_age %q must be a positive Go duration (e.g. \"10m\")", cp.MaxPolicyAge)
+		}
+		cp.MaxPolicyAgeDuration = d
+	}
 	if cp.TokenRef != nil {
 		tok, err := ResolveSecretRef(cp.TokenRef)
 		if err != nil {
@@ -742,10 +811,11 @@ func validateControlPlane(cfg *Config) error {
 }
 
 // ValidateModelAliases checks that no model's alias collides with another
-// model's name or with another model's alias (one hop only). It is the shared
-// guard for both the file-config path (LoadRaw) and the providerstore UI-write
-// path (configapi.ParseModelWrite), mirroring ValidateSecretRef's role for
-// provider refs.
+// model's name or with another model's alias (one hop only), and validates
+// the other per-model scalar fields (context_window >= 0) in the same walk.
+// It is the shared guard for both the file-config path (LoadRaw) and the
+// providerstore UI-write path (configapi.ParseModelWrite), mirroring
+// ValidateSecretRef's role for provider refs.
 func ValidateModelAliases(models map[string]ModelConfig) error {
 	return validateModelAliases(models)
 }
@@ -753,6 +823,9 @@ func ValidateModelAliases(models map[string]ModelConfig) error {
 func validateModelAliases(models map[string]ModelConfig) error {
 	seen := make(map[string]string)
 	for model, mc := range models {
+		if mc.ContextWindow < 0 {
+			return fmt.Errorf("config: model %q context_window must be >= 0 (tokens; 0 = unknown)", model)
+		}
 		for _, alias := range mc.Aliases {
 			if _, ok := models[alias]; ok {
 				return fmt.Errorf("config: model %q alias %q collides with existing model name", model, alias)

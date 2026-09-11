@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -128,6 +129,21 @@ func ParseProviderWrite(name string, body []byte) (providerstore.ProviderRow, er
 	}
 	if w.GuardrailID != "" && w.Type != "bedrock" {
 		return zero, fmt.Errorf("guardrail_id is only meaningful for type %q, got type %q", "bedrock", w.Type)
+	}
+	if strings.TrimSpace(w.BaseURL) != "" {
+		// S2 defense-in-depth: base_url is where live traffic sends the
+		// provider's resolved API key, so a write must at least name a real
+		// http(s) endpoint — garbage, a bare word, or another scheme is
+		// refused. Plain http stays allowed (self-hosted vLLM/Ollama on a
+		// cluster-internal host is a first-class target, core purpose #1);
+		// WHO may write it is the real control, and that is the requireAdmin
+		// gate on the mount (internal/server/server.go). Empty stays allowed:
+		// type "bedrock" derives its endpoint from region and never reads
+		// base_url.
+		u, uerr := url.Parse(w.BaseURL)
+		if uerr != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return zero, fmt.Errorf("base_url must be an absolute http(s) URL")
+		}
 	}
 
 	row := providerstore.ProviderRow{

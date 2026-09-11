@@ -45,6 +45,12 @@ func (w *Writer) HeadHash() (string, int64) {
 	return h.hash, h.count
 }
 
+// Instance returns this writer's chain-segment identity — the value every
+// record it writes carries in the `instance` field (see Verify/HeadAtCount),
+// and what an Anchorer's AnchorPoint.Instance is stamped with (anchorOnce).
+// Immutable for the writer's lifetime; safe to read from any goroutine.
+func (w *Writer) Instance() string { return w.instance }
+
 // SetMetrics attaches the Prometheus metrics sink. On a required-sink write
 // failure the writer bumps audit_write_failures_total; the WAL buffer
 // utilization gauge tracks records persisted-but-not-yet-delivered. Must be

@@ -76,3 +76,37 @@ func TestPolicyFromLimitsBurstFloor(t *testing.T) {
 		}
 	}
 }
+
+// TestUSDToMicrosRoundsRatherThanTruncates pins the µUSD conversion against
+// binary-float representation error: a truncating cast turns $0.29 into
+// 289_999 µUSD, silently narrowing every budget the operator configured.
+func TestUSDToMicrosRoundsRatherThanTruncates(t *testing.T) {
+	cases := []struct {
+		usd  float64
+		want int64
+	}{
+		{0.29, 290_000},    // 0.29*1e6 == 289999.99999999994 in float64
+		{8.11, 8_110_000},  // another non-representable cent value
+		{1.005, 1_005_000}, //
+		{0, 0},
+		{250, 250_000_000},
+	}
+	for _, c := range cases {
+		if got := usdToMicros(c.usd); got != c.want {
+			t.Errorf("usdToMicros(%v) = %d, want %d", c.usd, got, c.want)
+		}
+	}
+}
+
+func TestPoliciesFromConfigRoundsBudgets(t *testing.T) {
+	out := PoliciesFromConfig(map[string]ConfigTeam{
+		"demo": {BudgetUSDPerMonth: 0.29, BudgetUSDPerDay: 8.11, BudgetExceeded: "block"},
+	})
+	p := out["demo"]
+	if p.BudgetMicrosPerMonth != 290_000 {
+		t.Errorf("monthly = %d µUSD, want 290000", p.BudgetMicrosPerMonth)
+	}
+	if p.BudgetMicrosPerDay != 8_110_000 {
+		t.Errorf("daily = %d µUSD, want 8110000", p.BudgetMicrosPerDay)
+	}
+}

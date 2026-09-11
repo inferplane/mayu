@@ -86,11 +86,16 @@ served unbilled. Remaining gap: fail-closed conversion is a per-path
 discipline, not a structural guarantee — a future egress that builds `Parsed`
 from re-parsed JSON must repeat it (no test fences the invariant generically).
 
-**Per-user governance is absent.** `internal/policy/store.go:168-169` rejects
-`budget`/`rate` rules unless the subject is team-only. Per-key limits are keyed
-by `key_id`, and CLI-minted keys omit them so re-minting cannot reset windows.
-Usage attribution uses the free-form key owner. A stable per-person budget
-cannot survive key rotation or a second device.
+**Per-user budget shipped; per-user rate and durable identity are still absent.**
+`internal/policy/store.go` `checkEnforceable` now rejects a user-subject
+*rate* rule only (needs the rate-share model — `docs/roadmap.md` item ①);
+user-subject *budget* is enforced (ADR-042 Phase 3 —
+`internal/governance/governance.go` third PreCheck/Settle scope). Per-user
+budget still has no control-plane lease (`docs/roadmap.md` §Accepted
+limitation), so N data planes admit up to N× a user's configured cap. Usage
+attribution remains the free-form key owner / bare OIDC `sub` — no
+`(issuer, subject)` pairing exists yet — so a stable per-person budget still
+does not survive a second IdP or a colliding `sub` across issuers.
 
 **Substitution is team pressure, not a user fallback contract.** ADR-041
 activates a per-team substitution map from a referenced team budget;

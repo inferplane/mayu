@@ -31,7 +31,9 @@ import (
 // synthesized here (Chunk-only, Raw nil — an OpenAI-wire ingress tees Raw and
 // must see no invented lines): message_start lazily before the FIRST parsed
 // chunk, so a stream with zero parseable frames still emits nothing and the
-// callers' fail-closed no-frames check stays intact; message_stop at [DONE].
+// callers' fail-closed no-frames check stays intact; message_stop at [DONE],
+// preceded by a synthesized stop-bearing message_delta when the upstream sent
+// no message-level frame of its own (no finish_reason, no usage-only chunk).
 func ReadChatSSE(r io.Reader, model string) iter.Seq2[*providers.StreamEvent, error] {
 	return func(yield func(*providers.StreamEvent, error) bool) {
 		br := bufio.NewReader(r)
@@ -48,7 +50,8 @@ func ReadChatSSE(r io.Reader, model string) iter.Seq2[*providers.StreamEvent, er
 		// text openers and every close are synthesized here, where the
 		// whole stream passes through.
 		openBlocks := map[int]bool{}
-		started := false // message_start emitted (implies ≥1 parsed chunk)
+		started := false         // message_start emitted (implies ≥1 parsed chunk)
+		sawMessageDelta := false // any message_delta reached the consumer
 		startMessage := func() bool {
 			if started {
 				return true
@@ -79,6 +82,20 @@ func ReadChatSSE(r io.Reader, model string) iter.Seq2[*providers.StreamEvent, er
 					// not leave blocks open, and a started message must close.
 					if !closeOpenBlocks() {
 						return
+					}
+					// An upstream that never sent a finish_reason (nor a
+					// usage-only frame) leaves the canonical stream with no
+					// message_delta at all — the ONE frame carrying
+					// stop_reason on the Anthropic wire, which a client reads
+					// to tell a completed turn from a truncated one. Synthesize
+					// the terminal delta rather than jumping straight to
+					// message_stop; Raw stays nil like the other synthesized
+					// frames, so an OpenAI-wire ingress never sees it.
+					if started && !sawMessageDelta {
+						delta := json.RawMessage(`{"stop_reason":"end_turn"}`)
+						if !yield(&providers.StreamEvent{Chunk: &schema.ChatChunk{Type: "message_delta", Delta: delta}}, nil) {
+							return
+						}
 					}
 					if started && !yield(&providers.StreamEvent{Chunk: &schema.ChatChunk{Type: "message_stop"}}, nil) {
 						return
@@ -128,8 +145,11 @@ func ReadChatSSE(r io.Reader, model string) iter.Seq2[*providers.StreamEvent, er
 							// OpenAI wire only emits usage-only chunks at the
 							// end of a stream, so there is nothing left to
 							// close early.
-							if c.Type == "message_delta" && !closeOpenBlocks() {
-								return
+							if c.Type == "message_delta" {
+								sawMessageDelta = true
+								if !closeOpenBlocks() {
+									return
+								}
 							}
 							ev := &providers.StreamEvent{Chunk: c}
 							if i == 0 {

@@ -2,6 +2,7 @@ package auditapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -40,7 +41,7 @@ func writeChain(t *testing.T, n int) string {
 func get(t *testing.T, paths []string) (*httptest.ResponseRecorder, response) {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	Handler(paths).ServeHTTP(rec, httptest.NewRequest("GET", "/admin/audit/verify", nil))
+	Handler(paths, nil, "").ServeHTTP(rec, httptest.NewRequest("GET", "/admin/audit/verify", nil))
 	var out response
 	if rec.Code == 200 {
 		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
@@ -118,8 +119,154 @@ func TestVerifyNoFileSink(t *testing.T) {
 
 func TestVerifyMethodNotAllowed(t *testing.T) {
 	rec := httptest.NewRecorder()
-	Handler(nil).ServeHTTP(rec, httptest.NewRequest("POST", "/admin/audit/verify", nil))
+	Handler(nil, nil, "").ServeHTTP(rec, httptest.NewRequest("POST", "/admin/audit/verify", nil))
 	if rec.Code != http.StatusMethodNotAllowed || rec.Header().Get("Allow") != "GET" {
 		t.Fatalf("POST = %d Allow=%q, want 405 + Allow: GET", rec.Code, rec.Header().Get("Allow"))
+	}
+}
+
+// fakeReader is an in-memory audit.AnchorReader.
+type fakeReader struct {
+	p   *audit.AnchorPoint
+	err error
+}
+
+func (f *fakeReader) Latest(_ context.Context, _ string) (*audit.AnchorPoint, error) {
+	return f.p, f.err
+}
+
+func getWithReader(t *testing.T, paths []string, r audit.AnchorReader) (*httptest.ResponseRecorder, response) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	Handler(paths, r, "test-instance").ServeHTTP(rec, httptest.NewRequest("GET", "/admin/audit/verify", nil))
+	var out response
+	if rec.Code == 200 {
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v (%s)", err, rec.Body.String())
+		}
+	}
+	return rec, out
+}
+
+// headAndCount reads a chain file's per-instance state via audit.Verify — the
+// same source of truth the handler uses — so anchors in these tests are
+// derived, not hand-computed.
+func headAndCount(t *testing.T, path string) (string, int64) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vr, err := audit.Verify(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := vr.Instances["test-instance"]
+	return st.HeadHash, st.Count
+}
+
+func TestVerifyAnchorMatchAtHead(t *testing.T) {
+	path := writeChain(t, 3)
+	head, count := headAndCount(t, path)
+	_, out := getWithReader(t, []string{path}, &fakeReader{p: &audit.AnchorPoint{Instance: "test-instance", HeadHash: head, Count: count}})
+	s := out.Sinks[0]
+	if !s.OK || !s.AnchorChecked {
+		t.Fatalf("anchored head must verify OK with anchor_checked: %+v", s)
+	}
+}
+
+func TestVerifyAnchorDetectsTailTruncation(t *testing.T) {
+	path := writeChain(t, 3)
+	head, count := headAndCount(t, path)
+	// Truncate the last record — internal consistency still holds, so before
+	// the cross-check this verified OK (the S3 finding).
+	data, _ := os.ReadFile(path)
+	lines := bytes.Split(bytes.TrimRight(data, "\n"), []byte("\n"))
+	if err := os.WriteFile(path, append(bytes.Join(lines[:len(lines)-1], []byte("\n")), '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, out := getWithReader(t, []string{path}, &fakeReader{p: &audit.AnchorPoint{Instance: "test-instance", HeadHash: head, Count: count}})
+	s := out.Sinks[0]
+	if s.OK {
+		t.Fatalf("a tail-truncated chain must FAIL the anchor cross-check: %+v", s)
+	}
+	if !s.AnchorChecked || !strings.Contains(s.Reason, "truncation") {
+		t.Fatalf("reason must name truncation with anchor_checked: %+v", s)
+	}
+}
+
+func TestVerifyAnchorDetectsWholeFileReplacement(t *testing.T) {
+	path := writeChain(t, 3)
+	head, count := headAndCount(t, path)
+	// Replace the whole file with a DIFFERENT freshly generated valid chain
+	// (same instance, same record count, different content).
+	dir := filepath.Dir(path)
+	fs, err := audit.NewFileSink(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	w, err := audit.NewWriter("test-instance", filepath.Join(dir, "wal2"), []audit.Sink{fs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		w.Append(audit.Record{SchemaVersion: 1, Event: "request_completed", ID: "forged", TS: "2026-06-15T00:00:00Z",
+			Principal: audit.PrincipalRef{KeyID: "ik_y", Team: "demo"}})
+	}
+	w.Close()
+	_, out := getWithReader(t, []string{path}, &fakeReader{p: &audit.AnchorPoint{Instance: "test-instance", HeadHash: head, Count: count}})
+	s := out.Sinks[0]
+	if s.OK {
+		t.Fatalf("a replaced chain must FAIL the anchor cross-check: %+v", s)
+	}
+	if !s.AnchorChecked || !strings.Contains(s.Reason, "tampering") {
+		t.Fatalf("reason must name tampering with anchor_checked: %+v", s)
+	}
+}
+
+func TestVerifyAnchorOlderThanTailChecksMidChain(t *testing.T) {
+	// Anchor at count=2, chain has 3 records (grew since the anchor): the
+	// cross-check recomputes the chain state at record 2 and matches.
+	path2 := writeChain(t, 2)
+	head2, count2 := headAndCount(t, path2)
+	path3 := writeChain(t, 3)
+	// Splice: use the 3-record chain but an anchor derived from ITS OWN first
+	// two records (the two chains differ — separate writers). So recompute
+	// from path3's prefix instead.
+	data3, _ := os.ReadFile(path3)
+	lines := bytes.Split(bytes.TrimRight(data3, "\n"), []byte("\n"))
+	prefix := append(bytes.Join(lines[:2], []byte("\n")), '\n')
+	vr, err := audit.Verify(bytes.NewReader(prefix))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := vr.Instances["test-instance"]
+	_, out := getWithReader(t, []string{path3}, &fakeReader{p: &audit.AnchorPoint{Instance: "test-instance", HeadHash: st.HeadHash, Count: st.Count}})
+	s := out.Sinks[0]
+	if !s.OK || !s.AnchorChecked {
+		t.Fatalf("a chain that GREW past a valid anchor must still verify OK: %+v", s)
+	}
+	_ = head2
+	_ = count2
+}
+
+func TestVerifyAnchorReaderErrorIsNotTamperEvidence(t *testing.T) {
+	path := writeChain(t, 3)
+	_, out := getWithReader(t, []string{path}, &fakeReader{err: context.DeadlineExceeded})
+	s := out.Sinks[0]
+	if !s.OK || s.AnchorChecked {
+		t.Fatalf("an unreachable anchor store must not fail a clean chain (and must not claim anchor_checked): %+v", s)
+	}
+}
+
+func TestVerifyNoAnchorYetIsNotTamperEvidence(t *testing.T) {
+	path := writeChain(t, 3)
+	_, out := getWithReader(t, []string{path}, &fakeReader{p: nil})
+	s := out.Sinks[0]
+	if !s.OK || s.AnchorChecked {
+		t.Fatalf("no anchor witnessed yet must not fail a clean chain: %+v", s)
 	}
 }

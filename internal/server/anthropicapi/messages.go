@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -252,6 +253,26 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// Pricing table from the SAME generation we resolved on (ADR-006): a reload
 	// between now and Settle must not bill at a different generation's rates.
 	table := st.Pricing()
+	// Context-window fast-fail: when the operator declared the model's window
+	// (config models.<name>.context_window) and even the COARSE byte estimate
+	// already exceeds it, refuse here with a message that names both numbers —
+	// the upstream's own rejection reaches the client as an opaque scrubbed
+	// ValidationException (providers/bedrock/errors.go never echoes upstream
+	// text). Estimate-only, no max_tokens added: the estimate is an upper-ish
+	// bound and adding output budget would false-reject borderline VALID
+	// requests; anything borderline falls through to the upstream's exact
+	// check. Runs before PreCheck so a doomed request never charges the TPM
+	// estimate.
+	if win := h.r.ContextWindow(model); win > 0 {
+		if est := estimateTokens(raw); est > win {
+			msg := fmt.Sprintf("request is ~%d tokens but model %s has a %d-token context window — reduce the input (or raise models.%s.context_window if the declaration is wrong)", est, model, win, model)
+			h.audit(req.Context(), p, model, chain[0].Upstream, &audit.OutcomeRef{Status: http.StatusBadRequest}, false, traceID)
+			h.metrics.ObserveRequest(ingressName, model, chain[0].ProviderName, p.Team, http.StatusBadRequest, time.Since(start).Seconds(), 0)
+			tracing.SetStatus(span, false, "context window exceeded")
+			writeErr(w, http.StatusBadRequest, "invalid_request_error", msg)
+			return
+		}
+	}
 	// Governance pre-check (rate/quota/budget) BEFORE the upstream call. A block
 	// is recorded as a started record carrying the deny status.
 	// Pricing guard (ADR-030): with pricing.on_missing "block", refuse a

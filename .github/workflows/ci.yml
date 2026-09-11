@@ -1,0 +1,89 @@
+name: CI
+
+# The test gate. Before this workflow the repo had only the two Claude
+# responders, so nothing mechanically enforced `go test`/`go vet`/`gofmt` on a
+# PR — a red build could merge. Every job here is a required-status candidate.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: build · vet · gofmt · test -race
+    runs-on: ubuntu-latest
+    services:
+      # The Postgres-backed stores (policystore, telemetry, analytics/pgstore,
+      # bodystore) skip their whole suite unless INFERPLANE_TEST_PG_DSN is set,
+      # which left the Mode-B/HA path at ~0% covered in a green build.
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: inferplane
+          POSTGRES_USER: inferplane
+          POSTGRES_DB: inferplane_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U inferplane"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CGO_ENABLED: "0"
+      INFERPLANE_TEST_PG_DSN: postgres://inferplane:inferplane@localhost:5432/inferplane_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@41dfa10bad2bb2ae585af6ee5bb4d7d973ad74ed # v5.1.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needs to run on:" && echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Build both binaries (static, CGO off)
+        run: |
+          go build -trimpath -o /tmp/mayu ./cmd/mayu
+          go build -trimpath -o /tmp/inferplaned ./cmd/inferplaned
+
+      # -race needs cgo; the static-binary guarantee is proven by the build step
+      # above, which runs with CGO_ENABLED=0.
+      - name: go test -race
+        run: CGO_ENABLED=1 go test ./... -race -timeout 15m 2>&1 | tee /tmp/test.log
+      # Redirect-then-grep rather than piping to tail: a truncated pipe can hide
+      # an OOM abort behind a passing-looking summary.
+
+      - name: Pricing coverage (ADR-030 guard)
+        env:
+          INFERPLANE_ADMIN_TOKEN: lint
+        run: go run ./cmd/mayu pricing check --config examples/config.json
+
+      - name: Harness tests (hooks/structure)
+        run: bash tests/run-all.sh
+
+  vulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@41dfa10bad2bb2ae585af6ee5bb4d7d973ad74ed # v5.1.0
+        with:
+          go-version-file: go.mod
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...

@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -124,6 +125,66 @@ func TestReadChatSSEClosesToolBlocksAtDoneWithoutFinish(t *testing.T) {
 	want := []string{"message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"}
 	if strings.Join(types, ",") != strings.Join(want, ",") {
 		t.Fatalf("frame order = %v, want %v", types, want)
+	}
+}
+
+// An upstream that ends a stream with neither a finish_reason nor a usage-only
+// chunk still has to yield a stop_reason: message_delta is the only Anthropic
+// frame that carries one, and without it a client cannot tell a completed turn
+// from a truncated one.
+func TestReadChatSSESynthesizesTerminalMessageDelta(t *testing.T) {
+	body := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n" +
+		"data: [DONE]\n\n"
+	var types []string
+	var stop string
+	for ev, err := range ReadChatSSE(strings.NewReader(body), "public-m") {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.Chunk == nil {
+			continue
+		}
+		types = append(types, ev.Chunk.Type)
+		if ev.Chunk.Type == "message_delta" {
+			if ev.Raw != nil {
+				t.Errorf("synthesized message_delta must carry no Raw: %s", ev.Raw)
+			}
+			var d struct {
+				StopReason string `json:"stop_reason"`
+			}
+			if err := json.Unmarshal(ev.Chunk.Delta, &d); err != nil {
+				t.Fatal(err)
+			}
+			stop = d.StopReason
+		}
+	}
+	want := []string{"message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"}
+	if strings.Join(types, ",") != strings.Join(want, ",") {
+		t.Fatalf("frame order = %v, want %v", types, want)
+	}
+	if stop != "end_turn" {
+		t.Errorf("synthesized stop_reason = %q, want end_turn", stop)
+	}
+}
+
+// The synthesis above must not add a SECOND message_delta when the upstream
+// already sent one — a consumer may treat the first as end-of-message.
+func TestReadChatSSEDoesNotDuplicateMessageDelta(t *testing.T) {
+	body := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n" +
+		"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n" +
+		"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5}}\n\n" +
+		"data: [DONE]\n\n"
+	var deltas int
+	for ev, err := range ReadChatSSE(strings.NewReader(body), "public-m") {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.Chunk != nil && ev.Chunk.Type == "message_delta" {
+			deltas++
+		}
+	}
+	if deltas != 2 {
+		t.Fatalf("message_delta count = %d, want 2 (the upstream's stop frame and its usage frame, nothing synthesized)", deltas)
 	}
 }
 

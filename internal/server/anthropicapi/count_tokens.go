@@ -72,6 +72,20 @@ func (h *CountTokensHandler) count(req *http.Request, raw []byte) int64 {
 	if err != nil || len(chain) == 0 {
 		return estimateTokens(raw)
 	}
+	// RBAC re-check (C3): ResolveChain may have appended a cross-model
+	// fallback's targets AFTER the pre-routing Allows check above already ran
+	// against `model` alone — re-check here, BEFORE the region filter below,
+	// or a key allowed only `model` could silently reach the fallback model's
+	// upstream once the region filter promotes it to chain[0]. Mirrors
+	// messages.go's identical call, same ordering requirement
+	// (FilterModelAllowed derives "primary" from chain[0].Model, which must
+	// still be the original model at this point).
+	if p, ok := principal.From(req.Context()); ok {
+		chain = router.FilterModelAllowed(chain, func(m string) bool { return h.r.Allows(p, m) })
+	}
+	if len(chain) == 0 {
+		return estimateTokens(raw)
+	}
 	// Region lock (D7, ADR-020): drop out-of-region targets before the real
 	// CountTokens call — count_tokens must never send content to a provider
 	// the team isn't allowed to reach. If that empties the chain, fall back to

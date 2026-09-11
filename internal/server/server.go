@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/inferplane/inferplane/internal/adminauth"
@@ -45,13 +46,39 @@ type AuthConfigView struct {
 type DataMuxOption func(*dataMuxOptions)
 
 type dataMuxOptions struct {
-	usage *telemetry.Collector
+	usage           *telemetry.Collector
+	maxRequestBytes int64
+	governanceGate  func() (bool, string)
+}
+
+// WithGovernanceGate installs the control_plane.require_sync gate (review/
+// fable5 §08 B2/B3): every KeyAuth-authenticated, GOVERNED data-plane request
+// is refused with 503 + Retry-After while gate() reports not-ready (no policy
+// generation received yet, or the last one is older than max_policy_age).
+// The two count_tokens routes are exempt — they must never return non-200 —
+// and so are /v1/models reads. nil = no gate (the default fail-open posture).
+func WithGovernanceGate(gate func() (bool, string)) DataMuxOption {
+	return func(o *dataMuxOptions) { o.governanceGate = gate }
 }
 
 // WithUsageCollector threads the control-plane usage collector into every
 // generation handler's settle path (nil-safe; absent = standalone default).
 func WithUsageCollector(c *telemetry.Collector) DataMuxOption {
 	return func(o *dataMuxOptions) { o.usage = c }
+}
+
+// defaultMaxRequestBytes mirrors internal/config's constant of the same name —
+// a small same-valued local copy per package, the repo's established pattern
+// (see isLoopbackHost's three copies), because this package deliberately does
+// not import internal/config.
+const defaultMaxRequestBytes = 64 << 20
+
+// WithMaxRequestBytes bounds every KeyAuth-guarded data-plane request body
+// via http.MaxBytesReader (C9). n<=0 selects the default (64 MiB) — the same
+// defaulting DataMux applies when this option is omitted entirely, so a
+// caller that does not go through config.Load still gets a bound.
+func WithMaxRequestBytes(n int64) DataMuxOption {
+	return func(o *dataMuxOptions) { o.maxRequestBytes = n }
 }
 
 // DataMux builds the data-plane (:8080) handler: Anthropic, Bedrock, and OpenAI
@@ -82,6 +109,10 @@ func DataMux(r *router.Router, holder *live.Holder, store keystore.Store, aud *a
 	var o dataMuxOptions
 	for _, opt := range opts {
 		opt(&o)
+	}
+	limit := o.maxRequestBytes
+	if limit <= 0 {
+		limit = defaultMaxRequestBytes
 	}
 	mux := http.NewServeMux()
 	msgs := anthropicapi.NewMessagesHandlerMetrics(r, aud, gov, m)
@@ -152,8 +183,71 @@ func DataMux(r *router.Router, holder *live.Holder, store keystore.Store, aud *a
 		mintLimiter := limiter.NewMemory() // per-subject mint throttle (ADR-028 follow-up r1); instance-local, like every other in-memory governance store
 		dataMux.Handle("POST /v1/auth/key", AdminAuth(nil, cliVerifier, cliMapping, cliDenialEmitter(emit), authapi.MintHandler(store, cliKeyTTL, mintLimiter, emit)))
 	}
-	dataMux.Handle("/", KeyAuth(store, mux))
+	var governed http.Handler = mux
+	if o.governanceGate != nil {
+		governed = governanceGateMiddleware(o.governanceGate, mux)
+	}
+	dataMux.Handle("/", maxBytesMiddleware(limit, KeyAuth(store, governed)))
 	return dataMux
+}
+
+// governanceRetryAfterSeconds is the Retry-After the gate advertises: the
+// syncer's minimum heartbeat cadence (internal/policy.MinPolicySyncInterval,
+// 15s) — the soonest the gate can flip to ready. A same-valued local copy,
+// like defaultMaxRequestBytes above, because this package does not import
+// internal/policy.
+const governanceRetryAfterSeconds = "15"
+
+// governanceGateMiddleware refuses governed traffic while the control-plane
+// sync gate is not ready. Sits INSIDE KeyAuth (an unauthenticated caller
+// learns nothing about gateway state) and exempts count_tokens (never
+// non-200) and the /v1/models listing plus any /v1/models/ sub-path
+// (read-only, RBAC-filtered, no spend).
+// 503 with Retry-After: the condition is transient by construction — the
+// syncer keeps retrying with backoff.
+func governanceGateMiddleware(gate func() (bool, string), next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		if strings.HasSuffix(p, "/count_tokens") || strings.HasSuffix(p, "/count-tokens") || p == "/v1/models" || strings.HasPrefix(p, "/v1/models/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if ok, reason := gate(); !ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", governanceRetryAfterSeconds)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			body, _ := json.Marshal(map[string]any{
+				"type":  "error",
+				"error": map[string]string{"type": "api_error", "message": "governance not ready: " + reason},
+			})
+			_, _ = w.Write(body)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// maxBytesMiddleware bounds every data-plane request body to limit bytes
+// BEFORE KeyAuth and before any ingress handler's io.ReadAll (C9 — one
+// oversized body must not OOM the gateway). A declared Content-Length over
+// the limit is rejected immediately with 413 — cheap, nothing is read. An
+// undeclared or understated length is still capped by http.MaxBytesReader,
+// whose read error surfaces through the SAME io.ReadAll each generation
+// ingress already treats as a malformed body — so this wrap changes no
+// handler's error path, only whether/when it fires. The two count_tokens
+// handlers ignore the read error entirely and fall back to the local
+// estimator, so they stay 200 either way (the never-non-200 invariant).
+func maxBytesMiddleware(limit int64, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength > limit {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			_, _ = w.Write([]byte(`{"error":"request body too large"}`))
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
+		next.ServeHTTP(w, r)
+	})
 }
 
 // negotiateModels routes GET /v1/models to the Anthropic-shaped handler when the
@@ -177,10 +271,24 @@ func negotiateModels(anthropicH, openaiH http.Handler) http.Handler {
 // receives admin-action audit records (key create/revoke + denials, §5.5
 // "admin API calls are audit events"); nil skips. When m is nil the /metrics
 // endpoint is omitted.
-func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier, mapping adminauth.MappingConfig, configView func() configapi.View, auditFileSinks []string, aud *audit.Writer, m *metrics.Metrics, writer configapi.Writer, configExport func() configapi.ExportDoc, capabilities func() configapi.Capabilities, analyticsQ analyticsapi.Querier, teamStore keystore.TeamStore, configTeams func() []keystore.TeamRecord, alertFires func() []alert.Fire, healthSnapshot func() map[string]configapi.HealthRecord, bodiesRec *bodystore.Recorder, authConfig func() *AuthConfigView, connectSrc []string, probeAllowedHosts ...string) http.Handler {
+func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier, mapping adminauth.MappingConfig, configView func() configapi.View, auditFileSinks []string, aud *audit.Writer, anchorReader audit.AnchorReader, readyGate func() (bool, string), m *metrics.Metrics, writer configapi.Writer, configExport func() configapi.ExportDoc, capabilities func() configapi.Capabilities, analyticsQ analyticsapi.Querier, teamStore keystore.TeamStore, configTeams func() []keystore.TeamRecord, alertFires func() []alert.Fire, healthSnapshot func() map[string]configapi.HealthRecord, bodiesRec *bodystore.Recorder, authConfig func() *AuthConfigView, connectSrc []string, probeAllowedHosts ...string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
+	// /readyz reflects the require_sync gate when one is wired (review/fable5
+	// §08 B2): a scale-out during a control-plane outage must NOT pass health
+	// checks while the new replica is ungoverned. nil gate = always ready.
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if readyGate != nil {
+			if ok, reason := readyGate(); !ok {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				body, _ := json.Marshal(map[string]any{"ready": false, "reason": reason})
+				_, _ = w.Write(body)
+				return
+			}
+		}
+		w.WriteHeader(200)
+	})
 	if m != nil {
 		mux.Handle("GET /metrics", metricsHandler(m)) // unauthenticated (§5.5)
 	}
@@ -262,13 +370,19 @@ func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier,
 		mux.Handle("GET /admin/providers/health", AdminAuth(adminTokens, verifier, mapping, denied,
 			requireAdmin(configapi.HealthHandler(healthSnapshot), emit)))
 	}
-	// UI-write provider/model registration (ADR-008), behind the same AdminAuth.
-	// writer is nil when no provider store is configured → every write returns
-	// 405 (ADR-005 stage-1 posture preserved). Mutations are secret-free (refs
-	// only) and run build-once-swap-once in the assembly.
-	providersW := AdminAuth(adminTokens, verifier, mapping, denied, configapi.WriteHandler("providers", writer, emit))
+	// UI-write provider/model registration (ADR-008), behind the same AdminAuth
+	// AND requireAdmin (S2): a provider write persists a base_url plus an
+	// api_key_ref that live traffic will resolve and send — strictly more
+	// dangerous than the probe below, which is already full-admin for exactly
+	// that reason. Before this gate a team-mapped identity could register an
+	// attacker-controlled base_url and exfiltrate a resolved secret ref via
+	// ordinary request traffic. writer is nil when no provider store is
+	// configured → every write returns 405 (ADR-005 stage-1 posture preserved).
+	// Mutations are secret-free (refs only) and run build-once-swap-once in the
+	// assembly.
+	providersW := AdminAuth(adminTokens, verifier, mapping, denied, requireAdmin(configapi.WriteHandler("providers", writer, emit), emit))
 	mux.Handle("/admin/providers/", providersW)
-	modelsW := AdminAuth(adminTokens, verifier, mapping, denied, configapi.WriteHandler("models", writer, emit))
+	modelsW := AdminAuth(adminTokens, verifier, mapping, denied, requireAdmin(configapi.WriteHandler("models", writer, emit), emit))
 	mux.Handle("/admin/models/", modelsW)
 	// Connection probe (ADR-014 D2): tests a DRAFT provider's upstream before a
 	// route is trusted. FULL-ADMIN ONLY — it resolves a secret ref to an
@@ -289,8 +403,15 @@ func AdminMux(store keystore.Store, adminTokens []string, verifier OIDCVerifier,
 		mux.Handle("/admin/config/export", AdminAuth(adminTokens, verifier, mapping, denied, configapi.ExportHandler(configExport)))
 	}
 	// Audit-chain verification (ADR-003 #2), behind the same AdminAuth: read-only
-	// per-sink hash-chain check, returns no record contents.
-	mux.Handle("/admin/audit/verify", AdminAuth(adminTokens, verifier, mapping, denied, auditapi.Handler(auditFileSinks)))
+	// per-sink hash-chain check, returns no record contents. anchorReader, when
+	// non-nil (an anchorer that also implements audit.AnchorReader — s3anchor
+	// does), adds the external-anchor cross-check: without it a truncated tail
+	// or a whole-file replacement verifies OK (review/fable5 S3).
+	auditInstance := ""
+	if aud != nil {
+		auditInstance = aud.Instance()
+	}
+	mux.Handle("/admin/audit/verify", AdminAuth(adminTokens, verifier, mapping, denied, auditapi.Handler(auditFileSinks, anchorReader, auditInstance)))
 	// Minimal embedded key console (ADR-001): data-free static assets, served
 	// unauthenticated like /metrics — every data call it makes goes through the
 	// token-gated /admin/keys handlers above.

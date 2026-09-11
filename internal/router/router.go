@@ -44,6 +44,15 @@ func (r *Router) Canonical(model string) string {
 	return st.Canonical(model)
 }
 
+// ContextWindow returns the operator-declared total context limit (tokens,
+// input + output) for model, resolving aliases first. 0 = not declared: the
+// caller must not pre-flight, and the models endpoints omit the field — an
+// unknown window is unknown, never a guessed default.
+func (r *Router) ContextWindow(model string) int64 {
+	st := r.live.Load()
+	return st.Models()[st.Canonical(model)].ContextWindow
+}
+
 // ResolveModel canonicalizes an alias, then — only when the result has no
 // route at all — substitutes the configured model_fallbacks/family-heuristic
 // target (live.State.FallbackFor). served == requested (substituted == false)

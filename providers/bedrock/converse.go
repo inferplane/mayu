@@ -7,6 +7,7 @@ import (
 	"iter"
 	"log"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -248,6 +249,7 @@ func (p *provider) completeConverse(ctx context.Context, req *providers.ProxyReq
 		return nil, fmt.Errorf("bedrock: converse req: %w", err)
 	}
 	stripUnsupportedInference(req.Upstream, cr.Inference)
+	floorMaxTokens(req.Upstream, cr.Inference)
 	cr.Guardrail = p.guardrailFor(req)
 	cresp, err := p.conv.Converse(ctx, req.Upstream, cr)
 	if err != nil {
@@ -285,6 +287,7 @@ func (p *provider) streamConverse(ctx context.Context, req *providers.ProxyReque
 		return nil, fmt.Errorf("bedrock: converse req: %w", err)
 	}
 	stripUnsupportedInference(req.Upstream, cr.Inference)
+	floorMaxTokens(req.Upstream, cr.Inference)
 	cr.Guardrail = p.guardrailFor(req)
 	evs, err := p.conv.ConverseStream(ctx, req.Upstream, cr)
 	if err != nil {
@@ -520,6 +523,42 @@ var converseUnsupportedInference = []struct {
 	{"moonshot", []string{"stopSequences"}}, // moonshot. and moonshotai.
 	{"qwen.", []string{"stopSequences"}},
 	{"zai.", []string{"stopSequences"}},
+}
+
+// converseMinMaxTokens is the upstream-model-ID substring list of models
+// that reject a small maxTokens with a 400 ValidationException ("Invalid
+// 'max_output_tokens': integer below minimum value. Expected a value >= 16,
+// but got 1 instead." — probed live against Bedrock 2026-09-04, ap-northeast-2
+// global.openai.gpt-5.6-sol and global.xai.grok-4.6; Mantle-served
+// openai.gpt-5.4/-5.5 and zai.glm-5 ACCEPT max_tokens 1). Claude Code sends a
+// max_tokens:1 probe request when the user switches models with /model, so
+// without this floor every such switch to an affected model fails at the
+// switch itself. Same evidence-based allow-list posture as
+// converseUnsupportedInference: unlisted models are never touched.
+var converseMinMaxTokens = []struct {
+	match string
+	min   int64
+}{
+	{"openai.gpt-5.6", 16},
+	{"xai.", 16},
+}
+
+// floorMaxTokens raises an under-minimum maxTokens to the model's documented
+// floor. Raising a client's output cap is a smaller mutation than the
+// alternative (a hard 400): the client asked for at most N tokens and may
+// receive up to the floor instead — only ever more output, never less, and
+// only on the rare requests that asked for less than the floor. Logged once
+// per (upstream) like a param strip.
+func floorMaxTokens(upstream string, inf map[string]any) {
+	for _, e := range converseMinMaxTokens {
+		if !strings.Contains(upstream, e.match) {
+			continue
+		}
+		if v, ok := inf["maxTokens"].(int64); ok && v < e.min {
+			inf["maxTokens"] = e.min
+			logStrippedParam("converse", upstream, "maxTokens<"+strconv.FormatInt(e.min, 10)+" (raised to floor)")
+		}
+	}
 }
 
 // stripUnsupportedInference removes InferenceConfig keys the upstream model

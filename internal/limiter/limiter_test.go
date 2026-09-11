@@ -145,3 +145,132 @@ func TestAdjustRateNoopOnUntouchedBucket(t *testing.T) {
 		t.Fatalf("RateUsed on an uncreated bucket = %d, want 0", u)
 	}
 }
+
+// --- bounded-memory tests (the limiter's counterpart to budget.Memory's cap) ---
+
+func TestSweepReclaimsRefilledBucketsButNotDebt(t *testing.T) {
+	l := NewMemory()
+	now := time.Unix(1_700_000_000, 0)
+	l.now = func() time.Time { return now }
+
+	// "full" spends its burst, then sits idle long enough to refill.
+	if !l.AllowRate("full", 2, 60, 2) {
+		t.Fatal("initial spend should be allowed")
+	}
+	// "debt" is driven negative by a true-up correction (AdjustRate never
+	// floors at zero) — sweeping it would launder the debt into a free reset.
+	l.AllowRate("debt", 1, 60, 2)
+	l.AdjustRate("debt", -10, 2)
+
+	now = now.Add(time.Hour) // both buckets project past burst, but debt is -10+60 > 2
+	l.sweepReclaimable(now)
+
+	if _, ok := l.buckets["full"]; ok {
+		t.Error("a bucket refilled to burst should be reclaimed (absent == full)")
+	}
+	// After an hour a -8 bucket has also refilled past burst, so it is
+	// reclaimable too; what must never happen is reclaiming it while still in
+	// debt. Re-run the same check on a short elapse.
+	l2 := NewMemory()
+	n2 := time.Unix(1_700_000_000, 0)
+	l2.now = func() time.Time { return n2 }
+	l2.AllowRate("debt", 1, 60, 2)
+	l2.AdjustRate("debt", -10, 2)
+	n2 = n2.Add(time.Second) // -9 + 1 token = still deep in debt
+	l2.sweepReclaimable(n2)
+	if _, ok := l2.buckets["debt"]; !ok {
+		t.Error("a bucket still in debt must NOT be reclaimed")
+	}
+}
+
+func TestSweepReclaimsElapsedQuotaWindows(t *testing.T) {
+	l := NewMemory()
+	now := time.Unix(1_700_000_000, 0)
+	l.now = func() time.Time { return now }
+	l.DebitQuota("k", 5, time.Hour)
+	if len(l.quotas) != 1 {
+		t.Fatalf("want 1 quota window, got %d", len(l.quotas))
+	}
+	now = now.Add(2 * time.Hour)
+	l.sweepReclaimable(now)
+	if len(l.quotas) != 0 {
+		t.Errorf("elapsed window should be reclaimed, %d left", len(l.quotas))
+	}
+}
+
+func TestAtCapacityFailsClosedOnNewKeyAndCountsRejection(t *testing.T) {
+	l := NewMemory()
+	now := time.Unix(1_700_000_000, 0)
+	l.now = func() time.Time { return now }
+	l.maxEntries = 2
+
+	// Two live buckets, each mid-burst so neither is reclaimable.
+	if !l.AllowRate("a", 2, 60, 2) || !l.AllowRate("b", 2, 60, 2) {
+		t.Fatal("first two keys should be admitted")
+	}
+	if l.AllowRate("c", 1, 60, 2) {
+		t.Error("a NEW key at capacity must fail closed (rate-limited), not be admitted")
+	}
+	if got := l.Rejections(); got != 1 {
+		t.Errorf("Rejections() = %d, want 1", got)
+	}
+	if _, ok := l.buckets["c"]; ok {
+		t.Error("a refused key must not be stored")
+	}
+	// An ALREADY-TRACKED key keeps working: nothing about capacity may change
+	// the enforcement answer for a bucket that carries live state.
+	now = now.Add(time.Second)
+	if !l.AllowRate("a", 1, 60, 2) {
+		t.Error("existing key must still be served at capacity")
+	}
+}
+
+func TestAtCapacityBlocksNewQuotaKey(t *testing.T) {
+	l := NewMemory()
+	now := time.Unix(1_700_000_000, 0)
+	l.now = func() time.Time { return now }
+	l.maxEntries = 1
+	l.DebitQuota("live", 1, time.Hour)
+
+	if got := l.CheckQuota("other", 1, 100, time.Hour); got != Block {
+		t.Errorf("CheckQuota at capacity = %v, want Block (fail closed)", got)
+	}
+	if got := l.Rejections(); got == 0 {
+		t.Error("a refused quota admission should count a rejection")
+	}
+	// The live key is unaffected, including its own rollover.
+	if got := l.CheckQuota("live", 1, 100, time.Hour); got != Allow {
+		t.Errorf("live key CheckQuota = %v, want Allow", got)
+	}
+	now = now.Add(2 * time.Hour)
+	if got := l.CheckQuota("live", 1, 100, time.Hour); got != Allow {
+		t.Errorf("live key rollover at capacity = %v, want Allow", got)
+	}
+}
+
+func TestQuotaUsedDoesNotCreateAWindow(t *testing.T) {
+	l := NewMemory()
+	l.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+	if got := l.QuotaUsed("never-seen", time.Hour); got != 0 {
+		t.Errorf("QuotaUsed on an unknown key = %d, want 0", got)
+	}
+	if len(l.quotas) != 0 {
+		t.Errorf("a read-only projection must not grow the store, %d entries created", len(l.quotas))
+	}
+}
+
+func TestAmortizedSweepRunsWithoutUnboundedGrowth(t *testing.T) {
+	l := NewMemory()
+	now := time.Unix(1_700_000_000, 0)
+	l.now = func() time.Time { return now }
+	// Every key spends its whole burst and is then never touched again — the
+	// unbounded-growth shape (one bucket per distinct key_id, forever).
+	for i := 0; i < sweepEvery*3; i++ {
+		key := "k" + time.Duration(i).String()
+		l.AllowRate(key, 2, 60, 2)
+		now = now.Add(time.Minute) // each prior bucket refills to burst
+	}
+	if len(l.buckets) > sweepEvery {
+		t.Errorf("buckets = %d; the amortized sweep should keep refilled buckets from accumulating", len(l.buckets))
+	}
+}

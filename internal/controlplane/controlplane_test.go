@@ -79,6 +79,27 @@ func newTestServer(t *testing.T, token string) (*Server, *httptest.Server) {
 	return s, ts
 }
 
+// newTestServerWrite is newTestServer plus a dedicated policy-write token
+// (authnWrite) — required for any test that exercises PUT/DELETE, since the
+// heartbeat token no longer carries write authority.
+func newTestServerWrite(t *testing.T, token, writeToken string) (*Server, *httptest.Server) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "p.yaml"), []byte(cpPolicyYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewServer(token, dir)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	s.SetPolicyWriteToken(writeToken)
+	mux := http.NewServeMux()
+	s.Mount(mux)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return s, ts
+}
+
 func doSync(t *testing.T, url, token string, req policy.SyncRequest) policy.SyncResponse {
 	t.Helper()
 	body, _ := json.Marshal(&req)

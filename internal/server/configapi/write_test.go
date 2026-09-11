@@ -394,3 +394,46 @@ func doReqCtx(h http.Handler, method, path, body string) {
 	req = req.WithContext(principal.WithAdmin(req.Context(), principal.AdminIdentity{Subject: "x", AuthMethod: "oidc"}))
 	h.ServeHTTP(httptest.NewRecorder(), req)
 }
+
+// TestParseProviderWriteBaseURLValidation (S2 defense-in-depth): base_url must
+// be an absolute http(s) URL when present. Plain http stays allowed — a
+// cluster-internal vLLM/Ollama endpoint is a first-class target (core purpose
+// #1); the privilege control is the requireAdmin gate on the mount.
+func TestParseProviderWriteBaseURLValidation(t *testing.T) {
+	cases := []struct {
+		name, baseURL string
+		wantErr       bool
+	}{
+		{"https ok", "https://x.example", false},
+		{"http loopback ok", "http://127.0.0.1:9", false},
+		{"http localhost ok", "http://localhost:9", false},
+		{"http internal host ok (vLLM)", "http://vllm.cluster.local:8000", false},
+		{"empty ok (bedrock derives from region)", "", false},
+		{"ftp rejected", "ftp://x.example", true},
+		{"relative rejected", "x.example/v1", true},
+		{"garbage rejected", "not a url", true},
+		{"scheme only rejected", "https://", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"type":"openai_compatible"`
+			if tc.baseURL != "" {
+				body += `,"base_url":"` + tc.baseURL + `"`
+			}
+			body += `,"api_key_ref":{"env":"PATH"}}`
+			row, err := ParseProviderWrite("p1", []byte(body))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("want an error for base_url %q, got row %+v", tc.baseURL, row)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for base_url %q: %v", tc.baseURL, err)
+			}
+			if row.BaseURL != tc.baseURL {
+				t.Fatalf("row.BaseURL = %q, want %q", row.BaseURL, tc.baseURL)
+			}
+		})
+	}
+}

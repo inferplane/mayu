@@ -821,3 +821,36 @@ func TestToConverseRequestSystemRoleMergesAfterToolResults(t *testing.T) {
 		t.Fatalf("hook text must follow the tool_result blocks: %+v", last.Content[1])
 	}
 }
+
+// Claude Code's /model switch sends a max_tokens:1 probe; gpt-5.6 and xai
+// reject any maxTokens < 16 (live 2026-09-04). floorMaxTokens raises only the
+// listed families, only when under the floor, and never touches others.
+func TestFloorMaxTokens(t *testing.T) {
+	cases := []struct {
+		upstream string
+		in       int64
+		want     int64
+	}{
+		{"global.openai.gpt-5.6-sol", 1, 16},
+		{"global.openai.gpt-5.6-luna", 15, 16},
+		{"global.openai.gpt-5.6-sol", 16, 16},
+		{"global.openai.gpt-5.6-sol", 4096, 4096},
+		{"global.xai.grok-4.6", 1, 16},
+		{"openai.gpt-5.4", 1, 1}, // Mantle-served, accepts 1 — unlisted
+		{"zai.glm-5", 1, 1},      // accepts 1 — unlisted
+		{"anthropic.claude-opus-5", 1, 1},
+	}
+	for _, tc := range cases {
+		inf := map[string]any{"maxTokens": tc.in}
+		floorMaxTokens(tc.upstream, inf)
+		if got := inf["maxTokens"].(int64); got != tc.want {
+			t.Errorf("%s maxTokens %d -> %d, want %d", tc.upstream, tc.in, got, tc.want)
+		}
+	}
+	// No maxTokens key at all: nothing is invented.
+	inf := map[string]any{}
+	floorMaxTokens("global.openai.gpt-5.6-sol", inf)
+	if _, has := inf["maxTokens"]; has {
+		t.Error("floorMaxTokens must not invent a maxTokens key")
+	}
+}

@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -234,6 +235,19 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// Governance pre-check (rate/quota/budget) BEFORE the upstream call.
 	// Pricing table from the SAME generation we resolved on (ADR-006).
 	table := st.Pricing()
+	// Context-window fast-fail (same rule and rationale as anthropicapi's —
+	// estimate-only, before PreCheck, clear message; deliberate per-package
+	// duplication like subjectOf).
+	if win := h.r.ContextWindow(model); win > 0 {
+		if est := estimateTokens(raw); est > win {
+			msg := fmt.Sprintf("request is ~%d tokens but model %s has a %d-token context window — reduce the input (or raise models.%s.context_window if the declaration is wrong)", est, model, win, model)
+			h.audit(req.Context(), p, model, chain[0].Upstream, &audit.OutcomeRef{Status: http.StatusBadRequest}, traceID)
+			h.metrics.ObserveRequest(ingressName, model, chain[0].ProviderName, p.Team, http.StatusBadRequest, time.Since(start).Seconds(), 0)
+			tracing.SetStatus(span, false, "context window exceeded")
+			writeErr(w, http.StatusBadRequest, "invalid_request_error", msg)
+			return
+		}
+	}
 	// Pricing guard (ADR-030): with pricing.on_missing "block", refuse a
 	// request whose resolved targets have no rate rather than serving it and
 	// billing 0. Covers the routes boot validation cannot see (UI-write

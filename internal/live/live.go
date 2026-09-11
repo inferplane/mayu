@@ -75,8 +75,9 @@ func (s *State) Models() map[string]config.ModelConfig {
 	out := make(map[string]config.ModelConfig, len(s.models))
 	for k, v := range s.models {
 		mc := config.ModelConfig{
-			Aliases: append([]string(nil), v.Aliases...),
-			Targets: append([]config.Target(nil), v.Targets...),
+			Aliases:       append([]string(nil), v.Aliases...),
+			Targets:       append([]config.Target(nil), v.Targets...),
+			ContextWindow: v.ContextWindow,
 		}
 		out[k] = mc
 	}
@@ -96,8 +97,9 @@ func (s *State) Route(model string) (config.ModelConfig, bool) {
 		return config.ModelConfig{}, false
 	}
 	return config.ModelConfig{
-		Aliases: append([]string(nil), mc.Aliases...),
-		Targets: append([]config.Target(nil), mc.Targets...),
+		Aliases:       append([]string(nil), mc.Aliases...),
+		Targets:       append([]config.Target(nil), mc.Targets...),
+		ContextWindow: mc.ContextWindow,
 	}, true
 }
 
@@ -248,8 +250,9 @@ func NewState(provs map[string]providers.Provider, models map[string]config.Mode
 	a := make(map[string]string)
 	for k, v := range models {
 		m[k] = config.ModelConfig{
-			Aliases: append([]string(nil), v.Aliases...),
-			Targets: append([]config.Target(nil), v.Targets...),
+			Aliases:       append([]string(nil), v.Aliases...),
+			Targets:       append([]config.Target(nil), v.Targets...),
+			ContextWindow: v.ContextWindow,
 		}
 		for _, alias := range v.Aliases {
 			a[alias] = k

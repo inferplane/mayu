@@ -248,6 +248,15 @@ func (p *provider) buildUpstream(ctx context.Context, req *providers.ProxyReques
 	return u, nil
 }
 
+// noUsageError is the fixed 502 for a parseable 2xx that omits usage (C2) —
+// the message never echoes upstream content.
+func noUsageError() *providers.UpstreamError {
+	body, _ := json.Marshal(map[string]any{
+		"error": map[string]string{"message": "openaicompat: upstream 2xx carried no usage — refusing to serve an unsettleable response"},
+	})
+	return &providers.UpstreamError{StatusCode: 502, Body: body}
+}
+
 func (p *provider) Complete(ctx context.Context, req *providers.ProxyRequest) (*providers.ProxyResponse, error) {
 	u, err := p.buildUpstream(ctx, req, false)
 	if err != nil {
@@ -271,6 +280,13 @@ func (p *provider) Complete(ctx context.Context, req *providers.ProxyRequest) (*
 	out := &providers.ProxyResponse{StatusCode: resp.StatusCode, Headers: resp.Header, RawBody: body}
 	if resp.StatusCode/100 == 2 {
 		if parsed, perr := openai.ResponseToCanonical(body); perr == nil {
+			if parsed.Usage == nil {
+				// A parseable 2xx that omits usage would settle as a free
+				// request on EVERY ingress (Settle no-ops when usage is nil)
+				// — refuse rather than serve an unsettleable response. The
+				// error body is fixed and never echoes upstream content (C2).
+				return nil, noUsageError()
+			}
 			out.Parsed = parsed
 			if req.IngressProtocol != "openai" {
 				parsed.Model = req.Model
@@ -324,6 +340,7 @@ func (p *provider) Stream(ctx context.Context, req *providers.ProxyRequest) (ite
 		// OpenAI-shaped line at all — the Bedrock ingress ignores Raw, but
 		// the Anthropic ingress tees it verbatim.
 		injectedUsage := crossProtocol || !openai.StreamWantsUsage(req.RawBody)
+		isAnthropicIngress := req.IngressProtocol == "anthropic"
 		var sawChunk, sawErr bool
 		for ev, err := range inner {
 			if err != nil {
@@ -331,9 +348,32 @@ func (p *provider) Stream(ctx context.Context, req *providers.ProxyRequest) (ite
 			}
 			if ev != nil && ev.Chunk != nil {
 				sawChunk = true
-				if injectedUsage && openai.IsUsageOnlyFrame(ev.Chunk) {
+				if !isAnthropicIngress && injectedUsage && openai.IsUsageOnlyFrame(ev.Chunk) {
 					ev.Raw = nil
 				}
+				if isAnthropicIngress {
+					// An Anthropic-wire client must see the Anthropic SSE
+					// frame vocabulary, never raw OpenAI JSON — the anthropic
+					// ingress tees Raw verbatim (unlike the bedrock ingress,
+					// which re-frames from Chunk), so re-render EVERY chunk
+					// (including the usage-only frame, which rides
+					// message_delta on this wire, matching what the Converse
+					// egress already sends) rather than the strip-Raw special
+					// case above, which stays exactly as-is for the other
+					// ingresses (C1).
+					var buf bytes.Buffer
+					if schema.WriteAnthropicSSE(&buf, ev.Chunk) == nil {
+						ev.Raw = buf.Bytes()
+					} else {
+						ev.Raw = nil
+					}
+				}
+			} else if ev != nil && isAnthropicIngress {
+				// The [DONE] terminator (Raw="data: [DONE]\n\n", Chunk=nil)
+				// and any unparseable-frame passthrough — an Anthropic client
+				// must never see either; message_stop (synthesized with its
+				// own Chunk, re-rendered above) is the real terminator (C1).
+				ev.Raw = nil
 			}
 			if !yield(ev, err) {
 				return

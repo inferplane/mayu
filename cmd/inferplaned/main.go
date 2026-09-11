@@ -129,6 +129,29 @@ func validateBrokerEnv(token, brokerToken, roleARN string) error {
 	return nil
 }
 
+// validatePolicyWriteEnv checks the dedicated policy-write bearer
+// (INFERPLANED_POLICY_WRITE_TOKEN, review/fable5 §08 B1). Unset is allowed —
+// writes then fail closed for every static bearer (authnWrite) and only a
+// console OIDC identity can edit policies. When set it must be a distinct,
+// non-JWT-shaped secret: the heartbeat token is on every data plane, and a
+// write token equal to it would hand every node operator fleet-wide policy
+// authority — the exact hole this token exists to close.
+func validatePolicyWriteEnv(token, brokerToken, writeToken string) error {
+	if writeToken == "" {
+		return nil
+	}
+	if adminauth.IsOIDCBearerShape(writeToken) {
+		return fmt.Errorf("INFERPLANED_POLICY_WRITE_TOKEN must not be JWT-shaped — a JWT-shaped bearer is routed to the OIDC verifier and could never match")
+	}
+	if writeToken == token {
+		return fmt.Errorf("INFERPLANED_POLICY_WRITE_TOKEN must differ from INFERPLANED_TOKEN — the heartbeat token is deployed to every data plane and must not carry policy-write authority")
+	}
+	if brokerToken != "" && writeToken == brokerToken {
+		return fmt.Errorf("INFERPLANED_POLICY_WRITE_TOKEN must differ from INFERPLANED_BROKER_TOKEN — one secret must not grant both credential brokering and policy writes")
+	}
+	return nil
+}
+
 // buildMux assembles every HTTP route inferplaned serves. Split out from
 // run() so Task 8's end-to-end test can drive the real mux (real
 // adminauth.Verifier, real controlplane wiring) through httptest without
@@ -229,6 +252,15 @@ func buildMux(policies, token string, oidc *oidcEnv) (mux *http.ServeMux, cp *co
 		cp, err = controlplane.NewServer(token, policies, opts...)
 		if err != nil {
 			return nil, nil, closePG, fmt.Errorf("policies: %w", err)
+		}
+		// Policy writes need their own authority (review/fable5 §08 B1).
+		writeToken := os.Getenv("INFERPLANED_POLICY_WRITE_TOKEN")
+		if err := validatePolicyWriteEnv(token, brokerToken, writeToken); err != nil {
+			return nil, nil, closePG, err
+		}
+		cp.SetPolicyWriteToken(writeToken)
+		if policyDSN != "" && writeToken == "" && oidc == nil {
+			log.Print("inferplaned: INFERPLANED_POLICY_DSN is set but neither INFERPLANED_POLICY_WRITE_TOKEN nor console SSO is configured — PUT/DELETE /v1alpha1/policies will refuse every bearer (the heartbeat token never carries write authority); set a write token to edit policies over the API")
 		}
 		if policyDSN != "" {
 			ps, err := policystore.NewPostgres(policyDSN)

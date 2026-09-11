@@ -12,8 +12,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	v1alpha1 "github.com/inferplane/inferplane/api/v1alpha1"
@@ -155,6 +157,35 @@ type Syncer struct {
 	client     *http.Client
 	generation string
 	pending    []policy.Rejection
+	// lastSuccess is the wall-clock time of the last successful heartbeat
+	// (zero = never), published atomically for the request-path governance
+	// gate (GovernanceReady) — read on every request, written once per tick.
+	lastSuccess atomic.Int64 // UnixNano; 0 = never synced
+	now         func() time.Time
+}
+
+// GovernanceReady reports whether this data plane may serve GOVERNED requests
+// under a require_sync posture (review/fable5 §08 B2/B3): false before the
+// first successful heartbeat (no policy generation has ever arrived — the
+// store is empty and default-allow), and false again when maxAge > 0 and the
+// last successful sync is older than maxAge (the last-applied set is treated
+// as expired, the way hard-cap leases already expire). maxAge <= 0 means
+// policies never expire. The reason is operator-facing and secret-free.
+func (s *Syncer) GovernanceReady(maxAge time.Duration) (bool, string) {
+	last := s.lastSuccess.Load()
+	if last == 0 {
+		return false, "no policy generation received from the control plane yet (control_plane.require_sync)"
+	}
+	if maxAge > 0 {
+		clock := time.Now
+		if s.now != nil {
+			clock = s.now
+		}
+		if age := clock().Sub(time.Unix(0, last)); age > maxAge {
+			return false, "control-plane policy generation is stale: last successful sync " + age.Truncate(time.Second).String() + " ago exceeds control_plane.max_policy_age " + maxAge.String()
+		}
+	}
+	return true, ""
 }
 
 // Run heartbeats until ctx is done. The first sync fires immediately so a
@@ -177,11 +208,27 @@ func (s *Syncer) Run(ctx context.Context) {
 	}
 }
 
+// jitterFrac returns a uniform [0,1). A package var so a test can pin the
+// spread instead of seeding a RNG.
+var jitterFrac = rand.Float64
+
+// backoffJitter is the fraction of a backoff interval that is randomized away.
+// Applied downward only, so a jittered interval never exceeds the
+// DefaultPolicySyncInterval ceiling nor drops below the Min floor.
+const backoffJitter = 0.2
+
 // tick runs one heartbeat and returns the next cadence. Failures back off
 // exponentially (doubling up to DefaultPolicySyncInterval) so a fleet of
 // data planes doesn't hammer an already-degraded control plane in lockstep
 // (PR #50 review finding); the first success snaps back to the control
 // plane's requested cadence.
+//
+// Exponential backoff alone does NOT break lockstep: planes that failed on the
+// same control-plane outage double through identical values and retry at the
+// same instants, and once they all park at the ceiling they retry together
+// forever — the thundering herd lands precisely when the control plane comes
+// back up. The interval is therefore jittered downward by up to
+// backoffJitter before it is returned.
 func (s *Syncer) tick(ctx context.Context, prev time.Duration) time.Duration {
 	next, err := s.syncOnce(ctx)
 	if err == nil {
@@ -197,7 +244,20 @@ func (s *Syncer) tick(ctx context.Context, prev time.Duration) time.Duration {
 	if backoff > policy.DefaultPolicySyncInterval {
 		backoff = policy.DefaultPolicySyncInterval
 	}
-	return backoff
+	return jitter(backoff)
+}
+
+// jitter spreads d over [(1-backoffJitter)*d, d], floored at
+// MinPolicySyncInterval so the jittered value can never undercut the protocol
+// minimum. At the floor there is nothing to spread (d == Min), which is the
+// benign case: Min is the fastest cadence, and planes desynchronize on their
+// own response latency there.
+func jitter(d time.Duration) time.Duration {
+	out := d - time.Duration(jitterFrac()*backoffJitter*float64(d))
+	if out < policy.MinPolicySyncInterval {
+		return policy.MinPolicySyncInterval
+	}
+	return out
 }
 
 // syncOnce does one heartbeat and returns the next cadence.
@@ -283,6 +343,13 @@ func (s *Syncer) syncOnce(ctx context.Context) (time.Duration, error) {
 	if s.Tiers != nil {
 		s.Tiers.Set(resp.ActiveTiers)
 	}
+	// Published AFTER the set is applied, so a GovernanceReady()==true
+	// observer never sees a store the heartbeat has not yet populated.
+	clock := time.Now
+	if s.now != nil {
+		clock = s.now
+	}
+	s.lastSuccess.Store(clock().UnixNano())
 
 	next := time.Duration(resp.SyncIntervalSeconds) * time.Second
 	if next < time.Second {

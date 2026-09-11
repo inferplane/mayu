@@ -92,6 +92,14 @@ func (h *CountTokensHandler) count(req *http.Request, raw []byte) int64 {
 	if err != nil {
 		return estimateTokens(innerBody)
 	}
+	// RBAC re-check (C3): same ordering requirement as anthropicapi's
+	// identical fix — must run BEFORE the servesBedrockIngress/FilterRegions
+	// filters below, or a cross-model fallback promoted to chain[0] by either
+	// filter would be mis-classified as "primary" by FilterModelAllowed and
+	// receive the caller's body despite the key not being allowed it.
+	if p, ok := principal.From(req.Context()); ok {
+		chain = router.FilterModelAllowed(chain, func(m string) bool { return h.r.Allows(p, m) })
+	}
 	filtered := make([]router.ChainTarget, 0, len(chain))
 	for _, ct := range chain {
 		if servesBedrockIngress(ct.Provider.Name()) {

@@ -27,8 +27,14 @@ func TestMantlePathFor(t *testing.T) {
 		"openai.gpt-5.6-sol":         "/openai/v1/chat/completions",
 		"xai.grok-4.3":               "/openai/v1/chat/completions",
 		"deepseek.v3.2":              "/v1/chat/completions",
-		"zai.glm-5":                  "/v1/chat/completions",
-		"moonshotai.kimi-k2.5":       "/v1/chat/completions",
+		// Route splits WITHIN a vendor: gemma-3 lives on the bare route,
+		// gemma-4 only answers on /openai/v1 (probed live 2026-09-02 —
+		// the bare route 400s "isn't supported on this route", and the
+		// model card documents the /openai/v1 endpoint).
+		"google.gemma-3-27b-it": "/v1/chat/completions",
+		"google.gemma-4-31b":    "/openai/v1/chat/completions",
+		"zai.glm-5":             "/v1/chat/completions",
+		"moonshotai.kimi-k2.5":  "/v1/chat/completions",
 		// A geo prefix is a leading segment, still vendor-routed.
 		"us.anthropic.claude-opus-5": "/anthropic/v1/messages",
 		// Vendor match is per-SEGMENT: an id that merely contains a vendor
@@ -564,5 +570,115 @@ func TestMantleAnthropicBodyFromOpenAIIngress(t *testing.T) {
 	req.Parsed = nil
 	if _, err := m.buildBody(req, "/anthropic/v1/messages", true); err == nil {
 		t.Error("nil Parsed on openai ingress must fail, not forward OpenAI JSON")
+	}
+}
+
+// TestMantleStreamRendersAnthropicSSEForAnthropicIngress is C1's contract on
+// the Mantle chat routes: the anthropic ingress tees ev.Raw verbatim, so on
+// this OpenAI-wire route every frame's Raw must be REAL Anthropic SSE — the
+// full frame vocabulary, no bare OpenAI JSON lines, no "data: [DONE]".
+func TestMantleStreamRendersAnthropicSSEForAnthropicIngress(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"he\"}}]}\n\n" +
+			"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+			"data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2}}\n\n" +
+			"data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+	mc := staticMantle(t, srv)
+	raw := `{"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+	evs, err := mc.Stream(context.Background(), &providers.ProxyRequest{
+		Model: "mantle.gpt-5.4", Upstream: "openai.gpt-5.4",
+		RawBody: []byte(raw), Parsed: parseChat(t, raw), IngressProtocol: "anthropic",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tee strings.Builder
+	for ev, serr := range evs {
+		if serr != nil {
+			t.Fatal(serr)
+		}
+		if ev != nil && ev.Raw != nil {
+			tee.Write(ev.Raw)
+		}
+	}
+	out := tee.String()
+	if !strings.HasPrefix(out, "event: message_start") {
+		t.Errorf("tee must start with event: message_start, got: %.80s", out)
+	}
+	for _, want := range []string{
+		"event: content_block_start",
+		"event: content_block_delta",
+		"event: content_block_stop",
+		"event: message_delta",
+		"event: message_stop",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("tee missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "data: [DONE]") {
+		t.Errorf("tee must not contain the OpenAI [DONE] terminator:\n%s", out)
+	}
+	if strings.Contains(out, `"choices"`) {
+		t.Errorf("tee must not contain OpenAI-wire JSON:\n%s", out)
+	}
+	// The public-model echo must survive the re-render: message_start carries
+	// the model the CLIENT asked for, never the internal upstream id.
+	if !strings.Contains(out, `"model":"mantle.gpt-5.4"`) || strings.Contains(out, `openai.gpt-5.4`) {
+		t.Errorf("message_start must carry the public model name, not the upstream id:\n%s", out)
+	}
+}
+
+// A parseable 2xx that omits usage must fail, same posture as the unparseable
+// case above (C2): Settle no-ops on nil usage, so the request would bill zero.
+func TestMantleCompleteMissingUsageFails(t *testing.T) {
+	const anthropicOK = `{"type":"message","role":"assistant","model":"anthropic.claude-opus-5","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":3,"output_tokens":2}}`
+	const anthropicNoUsage = `{"type":"message","role":"assistant","model":"anthropic.claude-opus-5","content":[{"type":"text","text":"hi"}]}`
+	const chatOK = `{"id":"c1","object":"chat.completion","model":"openai.gpt-5.4","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`
+	const chatNoUsage = `{"id":"c1","object":"chat.completion","model":"openai.gpt-5.4","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}]}`
+	for _, tc := range []struct {
+		name, upstream, body string
+		wantErr              bool
+	}{
+		{"anthropic route with usage", "anthropic.claude-opus-5", anthropicOK, false},
+		{"anthropic route no usage", "anthropic.claude-opus-5", anthropicNoUsage, true},
+		{"chat route with usage", "openai.gpt-5.4", chatOK, false},
+		{"chat route no usage", "openai.gpt-5.4", chatNoUsage, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			mc := staticMantle(t, srv)
+			raw := `{"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`
+			resp, err := mc.Complete(context.Background(), &providers.ProxyRequest{
+				Model: "mantle.m", Upstream: tc.upstream,
+				RawBody: []byte(raw), Parsed: parseChat(t, raw),
+			})
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if resp.Parsed == nil || resp.Parsed.Usage == nil {
+					t.Fatalf("usage must be populated: %+v", resp.Parsed)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("2xx with no usage returned success: %+v", resp)
+			}
+			var ue *providers.UpstreamError
+			if !errors.As(err, &ue) || ue.StatusCode != 502 {
+				t.Fatalf("want a 502 UpstreamError, got %v", err)
+			}
+			if resp != nil {
+				t.Fatalf("no response may be returned alongside the refusal: %+v", resp)
+			}
+		})
 	}
 }

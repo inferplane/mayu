@@ -31,11 +31,20 @@ func (h *ModelsHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	sort.Strings(names) // deterministic order
 	data := make([]map[string]any, 0, len(names))
 	for _, n := range names {
-		data = append(data, map[string]any{
+		entry := map[string]any{
 			"id":       n,
 			"object":   "model",
 			"owned_by": "inferplane",
-		})
+		}
+		// Gateway extension, omitted when undeclared: context_window is the
+		// key context-aware OpenAI-wire clients look for; max_model_len is
+		// the vLLM spelling of the same fact, included for clients that read
+		// that instead.
+		if win := h.r.ContextWindow(n); win > 0 {
+			entry["context_window"] = win
+			entry["max_model_len"] = win
+		}
+		data = append(data, entry)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{

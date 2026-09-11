@@ -33,7 +33,11 @@ func (h *ModelsHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	sort.Strings(names) // deterministic order
 	data := make([]schema.ModelInfo, 0, len(names))
 	for _, n := range names {
-		data = append(data, schema.ModelInfo{Type: "model", ID: n, DisplayName: n})
+		// ContextWindow is a gateway extension (omitempty — absent when the
+		// operator declared none): clients that discover models here can size
+		// their context handling to the REAL window instead of assuming a
+		// default for an id they don't recognize.
+		data = append(data, schema.ModelInfo{Type: "model", ID: n, DisplayName: n, ContextWindow: h.r.ContextWindow(n)})
 	}
 	resp := map[string]any{"data": data, "has_more": false}
 	if len(data) > 0 {

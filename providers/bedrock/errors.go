@@ -3,6 +3,7 @@ package bedrock
 import (
 	"encoding/json"
 	"errors"
+	"log"
 
 	smithy "github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
@@ -107,6 +108,13 @@ func upstreamError(err error) *providers.UpstreamError {
 	if code != "" {
 		msg = "bedrock upstream error (" + code + ")"
 	}
+	// The full SDK error text goes to the SERVER log only — same principle as
+	// anthropicapi's stream-interrupt log: it can carry an account id/ARN, so
+	// it never reaches the client, but without it an operator has no way to
+	// learn WHY the upstream refused (a ValidationException is "context
+	// exceeded", "unsupported field", or "bad tool schema" indistinguishably
+	// from the client's side). Logs are operator-only.
+	log.Printf("bedrock: upstream error status=%d code=%s: %v", status, code, err)
 	return synthError(status, msg)
 }
 

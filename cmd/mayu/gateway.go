@@ -822,7 +822,18 @@ func newGateway(cfgPath string) (*gateway, error) {
 	if pstore != nil {
 		writer = g
 	}
-	g.dataSrv = &http.Server{Handler: server.DataMux(r, holder, store, aud, gov, m, masking, teamPolicy, bodyRec, cliVerifier(cfg), oidcMapping(cfg), cliAuthConfigView(cfg), cliKeyTTL(cfg), server.WithUsageCollector(usageCol))}
+	// control_plane.require_sync (review/fable5 §08 B2/B3): fail CLOSED on
+	// control-plane reachability. nil keeps the default fail-open posture
+	// (boot serves ungoverned until the first heartbeat; a lost control plane
+	// keeps the last-applied set). Shared by the data-plane gate (503 on
+	// governed routes) and /readyz, so a scale-out during an outage cannot
+	// pass health checks while ungoverned.
+	var governanceGate func() (bool, string)
+	if raw.ControlPlane != nil && raw.ControlPlane.RequireSync && syncer != nil {
+		maxAge := raw.ControlPlane.MaxPolicyAgeDuration
+		governanceGate = func() (bool, string) { return syncer.GovernanceReady(maxAge) }
+	}
+	g.dataSrv = &http.Server{Handler: server.DataMux(r, holder, store, aud, gov, m, masking, teamPolicy, bodyRec, cliVerifier(cfg), oidcMapping(cfg), cliAuthConfigView(cfg), cliKeyTTL(cfg), server.WithUsageCollector(usageCol), server.WithMaxRequestBytes(cfg.Server.MaxRequestBytes), server.WithGovernanceGate(governanceGate))}
 	// Capability map the console reads on bootstrap (spec §4.4). Phase 0a:
 	// analytics index not built yet; provider_store + guardrails reflect what
 	// this assembly already knows. Later phases flip the rest on as they land.
@@ -869,7 +880,15 @@ func newGateway(cfgPath string) (*gateway, error) {
 		}
 		return recs
 	}
-	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, m, writer, liveExport(holder), capabilities, analyticsQ, store, configTeams, alertFires, healthSnapshot, bodyRec, authConfigView(cfg), ssoConnectSrc(cfg), cfg.Probe.AllowedHosts...)}
+	// The anchor cross-check on /admin/audit/verify (review/fable5 S3): wired
+	// only when the configured anchorer can also READ anchors back
+	// (audit.AnchorReader — s3anchor implements it). nil keeps the pre-existing
+	// internal-consistency-only verify.
+	var anchorReader audit.AnchorReader
+	if ar, ok := anchorer.(audit.AnchorReader); ok {
+		anchorReader = ar
+	}
+	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, anchorReader, governanceGate, m, writer, liveExport(holder), capabilities, analyticsQ, store, configTeams, alertFires, healthSnapshot, bodyRec, authConfigView(cfg), ssoConnectSrc(cfg), cfg.Probe.AllowedHosts...)}
 	return g, nil
 }
 

@@ -67,10 +67,29 @@ outstanding grants, not exact) — but per-key budgets and standalone `mayu`
 get no lease at all. Making rate/quota equally accurate, and closing budget's
 remaining gaps, is the tracked next step — see `docs/roadmap.md`.
 
-**Goals 3 and 4 are partially unenforced today.** Per-user *model choice*
-(goal 2) is enforced. Per-user *budget/rate* and policy-driven cost
-substitution (goal 3, routing rules) are not yet — see the purpose-alignment
-table in `docs/roadmap.md` for exact status and code references.
+**Goal 4 is partially unenforced today.** Per-user *model choice* (goal 2) is
+enforced, and so are per-user *budget* (ADR-042 Phase 3) and policy-driven
+cost substitution (goal 3, `routing.budgetTiers` — ADR-041). Per-user *rate*
+is still rejected at policy load rather than silently ignored: it needs the
+rate-share model (`docs/roadmap.md` item ①). See the purpose-alignment table
+in `docs/roadmap.md` for exact status and code references.
+
+**Budget counters are not durable.** In standalone mode they live only in
+memory: restarting `mayu` mid-window resets every team, key, and user counter
+to zero, even though the spend stays in the audit chain (`mayu report` still
+shows it). With a control plane attached, a hard-cap lease fails *closed* only
+once a lease has been received — if the control plane is unreachable at
+`mayu` boot, each replica enforces its own local limit with no clamp until the
+first heartbeat succeeds. Set `control_plane.require_sync: true` (optionally with
+`max_policy_age`) to fail closed instead: governed requests 503 and `/readyz`
+reports not-ready until a policy generation has arrived.
+
+**Policy enforcement assumes the node operator is not the adversary.** `mayu`
+proxies credentials that live on the node (`env:`/`file:` refs), so whoever
+controls the node can call providers directly — Bedrock via the ADR-040 broker
+is the one exception, and its sessions are not yet per-team scoped. Bedrock
+Guardrails and region locks are node-local team records, not distributed
+policy. See `review/fable5/08-control-plane-bypass.md` for the full analysis.
 
 ## Why not a central gateway?
 
