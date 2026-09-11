@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -22,6 +23,7 @@ import (
 	"github.com/inferplane/inferplane/internal/analytics/pgstore"
 	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/audit/s3anchor"
+	localauthority "github.com/inferplane/inferplane/internal/authority/local"
 	"github.com/inferplane/inferplane/internal/bodystore"
 	"github.com/inferplane/inferplane/internal/budget"
 	"github.com/inferplane/inferplane/internal/config"
@@ -76,6 +78,8 @@ type gateway struct {
 	healthProbeEvery time.Duration               // probe interval
 	polStore         *policy.Store               // nil unless policies/control_plane is configured (ADR-033/034); file mode watched in serve
 	syncer           *proxy.Syncer               // nil unless control_plane is configured (ADR-034); heartbeats in serve
+	authority        *localauthority.Store       // boot-owned escrow journal, shared by admission and the syncer
+	authorityUse     sync.RWMutex                // joins durable handlers before their journal and other resources close
 	usagePusher      *proxy.UsagePusher          // nil unless control_plane is configured; drains the collector every minute
 	credSrc          providers.CredentialSource  // nil unless a bedrock provider opted into auth.mode "broker" (ADR-040); reused across rebuilds
 	reloadMu         sync.Mutex                  // serializes reloads AND UI writes (concurrent SIGHUPs/triggers)
@@ -121,7 +125,9 @@ func newGateway(cfgPath string) (*gateway, error) {
 		// leases is not a gateway field: it stays alive through the
 		// governor's team-lookup closure, the lease gate, and the syncer
 		// built below — the three places that share it.
-		leases = proxy.NewLeaseTable()
+		if raw.ControlPlane.Authority == nil {
+			leases = proxy.NewLeaseTable()
+		}
 		tiers = tier.NewTable()
 	}
 
@@ -326,6 +332,26 @@ func newGateway(cfgPath string) (*gateway, error) {
 		closeAll(pstore, pgstoreQ, store, aud)
 		return nil, err
 	}
+	if err := validateDurableModels(cfg, st); err != nil {
+		closeAll(pstore, pgstoreQ, store, aud)
+		return nil, err
+	}
+	var authority *localauthority.Store
+	authorityTransferred := false
+	if durableJournalPath(raw) != "" {
+		authority, err = localauthority.Open(durableJournalPath(raw))
+		if err != nil {
+			closeAll(pstore, pgstoreQ, store, aud)
+			return nil, fmt.Errorf("budget authority journal: %w", err)
+		}
+		// Covers every later boot error, including listener/TLS/body-store
+		// failures. Only a successful assembly transfers ownership to serve.
+		defer func() {
+			if !authorityTransferred {
+				_ = authority.Close()
+			}
+		}()
+	}
 	holder := &live.Holder{}
 	holder.Swap(st)
 	if polStore != nil {
@@ -363,6 +389,9 @@ func newGateway(cfgPath string) (*gateway, error) {
 	// is passed into Settle per request from the resolved snapshot, so the
 	// governor holds no pricing — only its persistent rate/budget counters.
 	gov := governance.NewGovernor(policies, limiter.NewMemory(), budget.NewMemory(), m) // budget_spend / pricing_miss
+	if authority != nil {
+		gov.SetBudgetAuthority(authority)
+	}
 	// Operator timezone for BOTH calendar budget windows (config
 	// budget_timezone, default UTC): the day window anchors its midnight and
 	// the month window its first-of-month boundary to the same zone, so audit
@@ -585,8 +614,8 @@ func newGateway(cfgPath string) (*gateway, error) {
 	// budget spend — the same per-instance-approximation caveat standalone
 	// budget/rate already carries (internal/CLAUDE.md Design Debt).
 	if raw.ControlPlane != nil {
-		r.SetTierGate(func(p keystore.Principal) map[string]string { return tiers.Get(p.Team) })
-		r.SetBudgetConstraintGate(func(p keystore.Principal) map[string]string { return tiers.Constraints(p.Team) })
+		r.SetTierGate(func(p keystore.Principal) map[string]string { return tiers.GetForSubject(p.Team, p.Owner) })
+		r.SetBudgetConstraintGate(func(p keystore.Principal) map[string]string { return tiers.ConstraintsForSubject(p.Team, p.Owner) })
 	} else if polStore != nil {
 		standaloneTierLatch := tier.NewLatch()
 		r.SetTierGate(func(p keystore.Principal) map[string]string {
@@ -604,7 +633,9 @@ func newGateway(cfgPath string) (*gateway, error) {
 	var usageCol *telemetry.Collector
 	var usagePusher *proxy.UsagePusher
 	if raw.ControlPlane != nil {
-		gov.SetLeaseGate(leases.Blocked)
+		if leases != nil {
+			gov.SetLeaseGate(leases.Blocked)
+		}
 		// Mirror inferplaned's startup guard from the client side (PR #50
 		// review): a remote control plane without a token means every
 		// heartbeat goes out unauthenticated. A properly configured
@@ -656,6 +687,9 @@ func newGateway(cfgPath string) (*gateway, error) {
 			OnError: func(err error) {
 				fmt.Fprintln(os.Stderr, "inferplane:", err)
 			},
+		}
+		if authority != nil {
+			syncer.Authority = authority
 		}
 	}
 	// Per-team record lookup for NON-governance overrides (D6/ADR-019's
@@ -837,6 +871,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 		healthProbeEvery: healthProbeEvery,
 		polStore:         polStore,
 		syncer:           syncer,
+		authority:        authority,
 		usagePusher:      usagePusher,
 		credSrc:          credSrc,
 		dataLn:           dataLn,
@@ -860,6 +895,14 @@ func newGateway(cfgPath string) (*gateway, error) {
 		governanceGate = func() (bool, string) { return syncer.GovernanceReady(maxAge) }
 	}
 	g.dataSrv = &http.Server{Handler: server.DataMux(r, holder, store, aud, gov, m, masking, teamPolicy, bodyRec, cliVerifier(cfg), oidcMapping(cfg), cliAuthConfigView(cfg), cliKeyTTL(cfg), server.WithUsageCollector(usageCol), server.WithMaxRequestBytes(cfg.Server.MaxRequestBytes), server.WithGovernanceGate(governanceGate))}
+	if authority != nil {
+		next := g.dataSrv.Handler
+		g.dataSrv.Handler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			g.authorityUse.RLock()
+			defer g.authorityUse.RUnlock()
+			next.ServeHTTP(w, req)
+		})
+	}
 	// Capability map the console reads on bootstrap (spec §4.4). Phase 0a:
 	// analytics index not built yet; provider_store + guardrails reflect what
 	// this assembly already knows. Later phases flip the rest on as they land.
@@ -915,7 +958,53 @@ func newGateway(cfgPath string) (*gateway, error) {
 		anchorReader = ar
 	}
 	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, anchorReader, governanceGate, m, writer, liveExport(holder), capabilities, analyticsQ, store, configTeams, alertFires, healthSnapshot, bodyRec, authConfigView(cfg), ssoConnectSrc(cfg), cfg.Probe.AllowedHosts...)}
+	authorityTransferred = true
 	return g, nil
+}
+
+func durableJournalPath(cfg *config.Config) string {
+	if cfg.ControlPlane == nil || cfg.ControlPlane.Authority == nil {
+		return ""
+	}
+	return filepath.Clean(cfg.ControlPlane.Authority.JournalPath)
+}
+
+// The durable bound uses model metadata from the same immutable generation as
+// pricing. Explicit zero-price rates still need a verified context bound.
+func validateDurableModels(cfg *config.Config, st *live.State) error {
+	if durableJournalPath(cfg) == "" {
+		return nil
+	}
+	for _, name := range st.ModelNames() {
+		model, _ := st.Route(name)
+		for _, target := range model.Targets {
+			if st.Pricing().HasRate(target.Provider, target.Model) && model.ContextWindow <= 0 {
+				return fmt.Errorf("durable budget authority: model %q requires context_window > 0", name)
+			}
+		}
+	}
+	return nil
+}
+
+// These values bind the running journal to its control-plane report owner.
+// Reloading topology must never silently change them underneath live permits.
+func (g *gateway) validateAuthorityReload(next *config.Config) error {
+	oldPath, newPath := durableJournalPath(g.cfg), durableJournalPath(next)
+	if oldPath == "" && newPath == "" {
+		return nil
+	}
+	if oldPath == "" || newPath == "" || oldPath != newPath {
+		return fmt.Errorf("durable budget authority mode and journal_path require restart")
+	}
+	before, after := g.cfg.ControlPlane, next.ControlPlane
+	if before.Dataplane != after.Dataplane || before.URL != after.URL ||
+		before.Token != after.Token || before.TokenRef == nil || after.TokenRef == nil ||
+		*before.TokenRef != *after.TokenRef || before.RequireSync != after.RequireSync ||
+		before.MaxPolicyAgeDuration != after.MaxPolicyAgeDuration ||
+		g.cfg.BudgetLocation().String() != next.BudgetLocation().String() {
+		return fmt.Errorf("durable budget authority identity and readiness settings require restart")
+	}
+	return nil
 }
 
 // buildEffective resolves the effective config from the raw file config: with a
@@ -1041,12 +1130,18 @@ func (g *gateway) reloadLocked() error {
 	if err != nil {
 		return fmt.Errorf("reload: %w", err)
 	}
+	if err := g.validateAuthorityReload(raw); err != nil {
+		return fmt.Errorf("reload: %w", err)
+	}
 	cfg, err := buildEffective(raw, g.pstore)
 	if err != nil {
 		return fmt.Errorf("reload: %w", err)
 	}
 	st, identities, err := live.BuildStateWith(cfg, live.Deps{Credentials: g.credSrc})
 	if err != nil {
+		return fmt.Errorf("reload: %w", err)
+	}
+	if err := validateDurableModels(cfg, st); err != nil {
 		return fmt.Errorf("reload: %w", err)
 	}
 	g.holder.Swap(st)                   // one atomic publish — every reader flips together
@@ -1068,6 +1163,9 @@ func (g *gateway) writeMutation(ctx context.Context, persist func(context.Contex
 	raw, err := config.LoadRaw(g.cfgPath)
 	if err != nil {
 		return fmt.Errorf("%w: %v", configapi.ErrInvalidTopology, err)
+	}
+	if err := g.validateAuthorityReload(raw); err != nil {
+		return fmt.Errorf("%w: %w", configapi.ErrInvalidTopology, err)
 	}
 	provList, err := g.pstore.ListProviders(ctx)
 	if err != nil {
@@ -1116,6 +1214,10 @@ func (g *gateway) writeMutation(ctx context.Context, persist func(context.Contex
 	st, identities, err := live.BuildStateWith(eff, live.Deps{Credentials: g.credSrc})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "inferplane: rejected UI write (build):", err)
+		return configapi.ErrInvalidTopology
+	}
+	if err := validateDurableModels(eff, st); err != nil {
+		fmt.Fprintln(os.Stderr, "inferplane: rejected UI write (durable budget):", err)
 		return configapi.ErrInvalidTopology
 	}
 
@@ -1350,6 +1452,19 @@ func (g *gateway) serve(ctx context.Context) error {
 			defer cancel()
 			if err := g.otelDown(ctx); err != nil {
 				fmt.Fprintln(os.Stderr, "inferplane: otel shutdown:", err)
+			}
+		}()
+	}
+	if g.authority != nil {
+		// Shutdown can time out while handlers still own permits. Cancel their
+		// transports, then join finalization before closing the journal or any
+		// of the shared resources whose defers were registered above.
+		defer func() {
+			_ = g.dataSrv.Close()
+			g.authorityUse.Lock()
+			defer g.authorityUse.Unlock()
+			if err := g.authority.Close(); err != nil {
+				fmt.Fprintln(os.Stderr, "inferplane: budget authority close:", err)
 			}
 		}()
 	}

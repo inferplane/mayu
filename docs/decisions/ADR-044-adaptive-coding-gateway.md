@@ -4,6 +4,10 @@ Status: Accepted implementation design, 2026-09-11.
 Extends ADR-043's context/privacy contract and ADR-041's optional budget tiers.
 The legacy modes in those ADRs retain their behavior.
 
+Implementation update (2026-09-11): [ADR-045](ADR-045-durable-budget-authority.md)
+implements the Postgres monetary authority described below. Shared key/rate/quota
+state remains separate.
+
 ## Decision
 
 Keep the classifier, inspection and affinity decisions inside each mayu.

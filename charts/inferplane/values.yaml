@@ -6,8 +6,9 @@ replicaCount: 1   # MUST stay 1 — SQLite key store + in-memory limiter/budget 
                   # replicas means N x the configured rate/quota limits, and any key issued via
                   # the admin console/CLI (not this file's config.virtual_keys, which every
                   # replica reproduces identically at boot) 401s on the replica that didn't
-                  # issue it. Multi-replica HA is design-only (ADR-013), not implemented — this
-                  # is not a knob to raise yet.
+                  # issue it. ADR-045 global monetary authority is for independently identified
+                  # node-local gateways; it does not remove these shared-gateway constraints.
+                  # This is not a knob to raise yet.
 service:
   dataPort: 8080
   adminPort: 9090

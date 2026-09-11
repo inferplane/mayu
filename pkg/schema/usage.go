@@ -28,6 +28,7 @@ func MergeUsage(acc, next *Usage) *Usage {
 		return &cp
 	}
 	out := *acc
+	out.AccountingUncertain = acc.AccountingUncertain || next.AccountingUncertain
 	if next.InputTokens != nil {
 		out.InputTokens = next.InputTokens
 	}

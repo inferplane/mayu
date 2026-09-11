@@ -132,3 +132,14 @@ meter separately from real caps. CP retains reports without issuing that soft
 lease. Tier arithmetic saturates with integers and uses referenced period keys.
 Rejected strict/privacy distribution gates affected routing until valid recovery.
 These changes do not implement durable financial authority or shared-state HA.
+
+## Durable monetary authority (ADR-045)
+
+The legacy lease/store descriptions above remain applicable only outside durable
+mode. `authority/pgstore` reserves globally in the same Postgres schema as policy;
+`authority/local` commits per-attempt reservations to a private SQLite journal.
+The syncer installs a verified financial snapshot before publishing policy; stale
+or incompatible snapshots never mark readiness successful. User scopes survive
+budget and tier distribution. Unknown or incomplete usage retains the bound;
+checked arithmetic and declared usage bounds guard refunds. Process restart burns
+old OPEN grants, never restores credit. No inference-time DB call is added.

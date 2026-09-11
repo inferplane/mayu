@@ -131,7 +131,9 @@ func aggregatorSuite(t *testing.T, newAgg func(t *testing.T) Aggregator) {
 		if len(rows) != 2 {
 			t.Fatalf("want 2 raw rows, got %d", len(rows))
 		}
-		if rows[0].Dataplane != "dp-1" || rows[0].WindowStart != w0 {
+		// A SQL driver may decode the same UTC instant with a different
+		// Location pointer. Compare the timestamp, not time.Time internals.
+		if rows[0].Dataplane != "dp-1" || !rows[0].WindowStart.Equal(w0) {
 			t.Fatalf("row lost window identity: %+v", rows[0])
 		}
 	})

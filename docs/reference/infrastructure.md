@@ -84,5 +84,9 @@ ADR-044 keeps adaptive decisions and bounded affinity state node-local, with no
 central classifier/cache dependency. Backend failover remains inside approved
 privacy/cost constraints. Already installed rules remain usable during a control
 plane outage while required authority is valid; expired hard leases still deny.
-The Postgres-authoritative durable ledger/window migration remains unimplemented,
-so this is not shared-state HA. See [failure domains](../decisions/ADR-044-adaptive-coding-gateway.md).
+ADR-045 adds opt-in Postgres global monetary authority with interchangeable
+control-plane replicas and private durable node journals. Its readiness endpoint
+checks the database; data planes retain only finite previously committed credit
+during outages. Deploy a replicated database and a stable control-plane endpoint.
+This does not remove the shared-gateway key/rate/quota limits above.
+See [deployment and failure behavior](../durable-budgets.md).

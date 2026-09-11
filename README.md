@@ -83,19 +83,23 @@ combined three-class, PII, budget and Codex setup, use the
 [example configuration](examples/config.adaptive-routing.json). Local pins and
 protocol tests do not establish measured savings or shared-state HA.
 
+For global monetary budgets across node-local gateways, enable the
+[durable budget profile](docs/durable-budgets.md) (ADR-045). Control-plane replicas
+share a Postgres authority ledger; each gateway durably reserves a conservative
+per-attempt bound locally before invoking a provider. Committed local grants
+remain usable during a control-plane/database outage until their deadlines.
+
 ## Current limits
 
-**Single-replica `mayu` only, today.** `internal/keystore` is SQLite-only and
+**A shared gateway deployment still requires a single `mayu` replica.** `internal/keystore` is SQLite-only and
 `internal/limiter`/`internal/budget` are in-memory — running more than one
 `mayu` replica lets each enforce its own copy of every counter, so rate,
 token quota, and (in standalone mode) budget ceilings can each reach up to
 N× the configured value, and key resolution splits across replicas
-(ADR-013, design-only, not yet implemented). Budget is only *partially*
-better: when a control plane is attached, ADR-034's lease pattern bounds
-team-level overspend across data planes (worst case is the sum of
-outstanding grants, not exact) — but per-key budgets and standalone `mayu`
-get no lease at all. Making rate/quota equally accurate, and closing budget's
-remaining gaps, is the tracked next step — see `docs/roadmap.md`.
+(ADR-013). ADR-045 supports global **GovernancePolicy money budgets** across
+independently identified node-local gateways, including user subjects. It does
+not supply shared virtual-key storage or global rate/token-quota enforcement.
+The legacy ADR-034 lease mode remains available with its earlier limitations.
 
 **Goal 4 is partially unenforced today.** Per-user *model choice* (goal 2) is
 enforced, and so are per-user *budget* (ADR-042 Phase 3) and policy-driven
@@ -104,7 +108,7 @@ is still rejected at policy load rather than silently ignored: it needs the
 rate-share model (`docs/roadmap.md` item ①). See the purpose-alignment table
 in `docs/roadmap.md` for exact status and code references.
 
-**Budget counters are not durable.** In standalone mode they live only in
+**Standalone and legacy budget counters are not durable.** In standalone mode they live only in
 memory: restarting `mayu` mid-window resets every team, key, and user counter
 to zero, even though the spend stays in the audit chain (`mayu report` still
 shows it). With a control plane attached, a hard-cap lease fails *closed* only
@@ -113,6 +117,8 @@ once a lease has been received — if the control plane is unreachable at
 first heartbeat succeeds. Set `control_plane.require_sync: true` (optionally with
 `max_policy_age`) to fail closed instead: governed requests 503 and `/readyz`
 reports not-ready until a policy generation has arrived.
+The opt-in ADR-045 profile requires initial sync, a private durable node journal,
+and Postgres. It never falls back to these in-memory counters for global authority.
 
 **Policy enforcement assumes the node operator is not the adversary.** `mayu`
 proxies credentials that live on the node (`env:`/`file:` refs), so whoever
@@ -268,7 +274,8 @@ The project targets CNCF Sandbox.
 - [docs/decisions/](docs/decisions/) — design records (ADRs); start with
   [ADR-031](docs/decisions/ADR-031-monorepo-control-plane-data-plane-split.md),
   the control-plane/data-plane split
-- [docs/roadmap.md](docs/roadmap.md) — open gaps vs. central-proxy gateways (global rate limits, durable ledger, self-update, embeddings)
+- [docs/durable-budgets.md](docs/durable-budgets.md) — global monetary budgets and control-plane failover
+- [docs/roadmap.md](docs/roadmap.md) — remaining gaps (global rate limits, shared key storage, self-update, embeddings)
 - [CHANGELOG.md](CHANGELOG.md) · [GOVERNANCE.md](GOVERNANCE.md) · [MAINTAINERS.md](MAINTAINERS.md)
 
 ## Contributing

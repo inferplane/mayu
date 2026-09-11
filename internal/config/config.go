@@ -513,6 +513,7 @@ type Config struct {
 
 // ControlPlaneConfig is the data plane's inferplaned connection (ADR-034).
 type ControlPlaneConfig struct {
+	Authority *AuthorityConfig `json:"authority,omitempty"`
 	// URL is inferplaned's base URL (e.g. "https://inferplaned.infra:7601").
 	URL string `json:"url"`
 	// TokenRef resolves the shared bearer token — referenced, never inline
@@ -553,6 +554,10 @@ type ControlPlaneConfig struct {
 	MaxPolicyAge string `json:"max_policy_age,omitempty"`
 	// MaxPolicyAgeDuration is the parsed MaxPolicyAge; never serialized.
 	MaxPolicyAgeDuration time.Duration `json:"-"`
+}
+
+type AuthorityConfig struct {
+	JournalPath string `json:"journal_path"`
 }
 
 // FallbackFamilyEnabled reports whether the family fallback heuristic is on
@@ -776,12 +781,30 @@ func validateControlPlane(cfg *Config) error {
 	if cp == nil {
 		return nil
 	}
+	if cp.Authority != nil {
+		if !cp.RequireSync {
+			return fmt.Errorf("config: control_plane.authority requires require_sync: true")
+		}
+		path := cp.Authority.JournalPath
+		if path == "" || !filepath.IsAbs(path) || strings.Contains(path, "?") {
+			return fmt.Errorf("config: authority.journal_path must name an absolute persistent file")
+		}
+		if cfg.BudgetTimezone != "" && cfg.BudgetTimezone != "UTC" {
+			return fmt.Errorf("config: durable budget authority requires budget_timezone UTC")
+		}
+		if strings.TrimSpace(cp.Dataplane) == "" || cp.TokenRef == nil {
+			return fmt.Errorf("config: durable budget authority requires a stable dataplane id and token_ref")
+		}
+	}
 	if len(cfg.Policies) > 0 {
 		return fmt.Errorf("config: control_plane and policies are mutually exclusive — the control plane is the policy source once connected")
 	}
 	u, err := url.Parse(cp.URL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return fmt.Errorf("config: control_plane.url must be an absolute http(s) URL")
+	}
+	if cp.Authority != nil && (u.User != nil || (u.Scheme != "https" && !isLoopbackHost(u.Hostname()))) {
+		return fmt.Errorf("config: durable authority requires HTTPS or loopback without URL credentials")
 	}
 	if cp.MaxPolicyAge != "" {
 		if !cp.RequireSync {
@@ -799,6 +822,9 @@ func validateControlPlane(cfg *Config) error {
 			return fmt.Errorf("config: control_plane.token_ref: %w", err)
 		}
 		cp.Token = tok
+	}
+	if cp.Authority != nil && (strings.TrimSpace(cp.Token) == "" || adminauth.IsOIDCBearerShape(cp.Token)) {
+		return fmt.Errorf("config: durable budget authority requires a nonempty non-JWT machine token")
 	}
 	if cp.BrokerTokenRef != nil {
 		tok, err := ResolveSecretRef(cp.BrokerTokenRef)

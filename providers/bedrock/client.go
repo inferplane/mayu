@@ -90,10 +90,11 @@ type ConverseToolChoice struct {
 }
 
 type ConverseResponse struct {
-	Content      []schema.ContentBlock
-	StopReason   string
-	InputTokens  int64
-	OutputTokens int64
+	UsageUncertain bool
+	Content        []schema.ContentBlock
+	StopReason     string
+	InputTokens    int64
+	OutputTokens   int64
 	// Prompt-cache counts. For Claude models Bedrock reports these SEPARATELY
 	// from InputTokens (ADR-030), so dropping them billed every cache read and
 	// write at zero on the Converse path while the InvokeModel passthrough
@@ -125,14 +126,15 @@ const (
 // ConverseStreamEvent is a discriminated union over the Bedrock stream events
 // the provider cares about; Kind selects which of the other fields are set.
 type ConverseStreamEvent struct {
-	Kind         string
-	TextDelta    string
-	ToolUseID    string
-	ToolName     string
-	ToolDelta    string
-	StopReason   string
-	InputTokens  int64
-	OutputTokens int64
+	UsageUncertain bool
+	Kind           string
+	TextDelta      string
+	ToolUseID      string
+	ToolName       string
+	ToolDelta      string
+	StopReason     string
+	InputTokens    int64
+	OutputTokens   int64
 	// Prompt-cache counts on an eventUsage event; see ConverseResponse.
 	CacheReadTokens int64
 	CacheWrite5m    int64
@@ -230,6 +232,13 @@ func brokerCredentials(ctx context.Context, credSrc providers.CredentialSource) 
 // (diagnostics only — it is never logged by this package).
 const brokerCredentialSource = "inferplane-broker"
 
+// Gateway fallback owns retries and reserves authority for each attempt. An
+// SDK retry can happen after upstream accepted bytes, so hiding it underneath
+// one permit would lose that attempt's uncertain cost.
+func singleAttempt(o *bedrockruntime.Options) {
+	o.Retryer = aws.NopRetryer{}
+}
+
 func (c *awsClient) Invoke(ctx context.Context, modelID string, body []byte, g Guardrail) ([]byte, error) {
 	in := &bedrockruntime.InvokeModelInput{
 		ModelId:     aws.String(modelID),
@@ -241,7 +250,7 @@ func (c *awsClient) Invoke(ctx context.Context, modelID string, body []byte, g G
 		in.GuardrailIdentifier = aws.String(g.ID)
 		in.GuardrailVersion = aws.String(g.versionOrDraft())
 	}
-	out, err := c.rt.InvokeModel(ctx, in)
+	out, err := c.rt.InvokeModel(ctx, in, singleAttempt)
 	if err != nil {
 		return nil, fmt.Errorf("bedrock: invoke model %q: %w", modelID, err)
 	}
@@ -259,7 +268,7 @@ func (c *awsClient) InvokeStream(ctx context.Context, modelID string, body []byt
 		in.GuardrailIdentifier = aws.String(g.ID)
 		in.GuardrailVersion = aws.String(g.versionOrDraft())
 	}
-	out, err := c.rt.InvokeModelWithResponseStream(ctx, in)
+	out, err := c.rt.InvokeModelWithResponseStream(ctx, in, singleAttempt)
 	if err != nil {
 		return nil, fmt.Errorf("bedrock: invoke model stream %q: %w", modelID, err)
 	}
@@ -288,11 +297,11 @@ func (c *awsClient) Converse(ctx context.Context, modelID string, req ConverseRe
 		InferenceConfig:              buildInference(req.Inference),
 		AdditionalModelRequestFields: buildModelFields(req.ModelFields),
 		GuardrailConfig:              buildGuardrailConfig(req.Guardrail),
-	})
+	}, singleAttempt)
 	if err != nil {
 		return ConverseResponse{}, fmt.Errorf("bedrock: converse %q: %w", modelID, err)
 	}
-	resp := ConverseResponse{StopReason: string(out.StopReason)}
+	resp := ConverseResponse{StopReason: string(out.StopReason), UsageUncertain: uncertainSDKUsage(out.Usage)}
 	if msg, ok := out.Output.(*brtypes.ConverseOutputMemberMessage); ok {
 		resp.Content = contentBlocksFromSDK(msg.Value.Content)
 	}
@@ -315,7 +324,7 @@ func (c *awsClient) ConverseStream(ctx context.Context, modelID string, req Conv
 		InferenceConfig:              buildInference(req.Inference),
 		AdditionalModelRequestFields: buildModelFields(req.ModelFields),
 		GuardrailConfig:              buildGuardrailStreamConfig(req.Guardrail),
-	})
+	}, singleAttempt)
 	if err != nil {
 		return nil, fmt.Errorf("bedrock: converse stream %q: %w", modelID, err)
 	}
@@ -354,6 +363,7 @@ func (c *awsClient) ConverseStream(ctx context.Context, modelID string, req Conv
 				if u := e.Value.Usage; u != nil {
 					w5, w1h := cacheWriteTiers(u.CacheDetails)
 					ev := ConverseStreamEvent{
+						UsageUncertain:  uncertainSDKUsage(u),
 						Kind:            eventUsage,
 						InputTokens:     int64(aws.ToInt32(u.InputTokens)),
 						OutputTokens:    int64(aws.ToInt32(u.OutputTokens)),
@@ -663,4 +673,25 @@ func cacheWriteTiers(details []brtypes.CacheDetail) (write5m, write1h int64) {
 		write5m += n
 	}
 	return write5m, write1h
+}
+
+func uncertainSDKUsage(u *brtypes.TokenUsage) bool {
+	if u == nil || u.InputTokens == nil || u.OutputTokens == nil {
+		return true
+	}
+	var total int64
+	for _, detail := range u.CacheDetails {
+		if detail.InputTokens == nil || (detail.Ttl != brtypes.CacheTTLFiveMinutes && detail.Ttl != brtypes.CacheTTLOneHour) {
+			return true
+		}
+		count := int64(*detail.InputTokens)
+		if count < 0 || count > int64(1<<31-1)-total {
+			return true
+		}
+		total += count
+	}
+	if len(u.CacheDetails) != 0 && u.CacheWriteInputTokens != nil && int64(*u.CacheWriteInputTokens) != total {
+		return true
+	}
+	return false
 }

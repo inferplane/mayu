@@ -32,6 +32,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 
 	"github.com/inferplane/inferplane/internal/adminauth"
+	budgetpg "github.com/inferplane/inferplane/internal/authority/pgstore"
 	"github.com/inferplane/inferplane/internal/controlplane"
 	"github.com/inferplane/inferplane/internal/controlplane/ui"
 	"github.com/inferplane/inferplane/internal/policy"
@@ -159,6 +160,10 @@ func validatePolicyWriteEnv(token, brokerToken, writeToken string) error {
 // Postgres pool when INFERPLANED_USAGE_DSN was set; it is a no-op otherwise
 // and safe to defer unconditionally.
 func buildMux(policies, token string, oidc *oidcEnv) (mux *http.ServeMux, cp *controlplane.Server, closePG func(), err error) {
+	durableBudgets, err := durableBudgetMode(os.Getenv("INFERPLANED_DURABLE_BUDGETS"), os.Getenv("INFERPLANED_POLICY_DSN"), token)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	var opts []controlplane.Option
 	var connectSrc []string
 	if oidc != nil {
@@ -176,6 +181,16 @@ func buildMux(policies, token string, oidc *oidcEnv) (mux *http.ServeMux, cp *co
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if cp != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			err := cp.BudgetAuthorityReady(ctx)
+			cancel()
+			if err != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_ = json.NewEncoder(w).Encode(map[string]any{"ready": false, "reason": "budget authority database unavailable"})
+				return
+			}
+		}
 		// The supported config API versions are the first thing a data
 		// plane (or operator) needs to know before propagating rules.
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -280,6 +295,23 @@ func buildMux(policies, token string, oidc *oidcEnv) (mux *http.ServeMux, cp *co
 				return nil, nil, closePG, fmt.Errorf("policy store: %w", err)
 			}
 			log.Print("inferplaned: GovernancePolicy documents are postgres-authoritative (INFERPLANED_POLICY_DSN set); --policies is seed-only and no longer watched")
+		}
+		if durableBudgets {
+			ledger, err := budgetpg.New(policyDSN)
+			if err != nil {
+				return nil, nil, closePG, fmt.Errorf("budget authority: %w", err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), policyStoreBootTimeout)
+			initErr := ledger.Initialize(ctx)
+			cancel()
+			if initErr != nil {
+				ledger.Close()
+				return nil, nil, closePG, fmt.Errorf("budget authority: %w", initErr)
+			}
+			closePrevious := closePG
+			closePG = func() { ledger.Close(); closePrevious() }
+			cp.SetBudgetAuthority(ledger)
+			log.Print("inferplaned: durable PostgreSQL budget authority enabled")
 		}
 		cp.Mount(mux)
 	}

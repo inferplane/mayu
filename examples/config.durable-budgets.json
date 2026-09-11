@@ -1,0 +1,205 @@
+{
+  "_comment": "Illustrative durable global money-budget profile. Replace endpoints, node ID, context bounds and prices with verified values. Requires the durable control plane and a private persistent journal; key/rate/quota state remains node-local.",
+  "server": {
+    "listen": "127.0.0.1:8080",
+    "admin_listen": "127.0.0.1:9090",
+    "admin_auth": {
+      "token_refs": [
+        {
+          "env": "INFERPLANE_ADMIN_TOKEN"
+        }
+      ]
+    }
+  },
+  "key_store": {
+    "type": "sqlite",
+    "path": "/private/node-state/keys.db"
+  },
+  "audit": {
+    "failure_mode": "buffer_then_block",
+    "buffer": {
+      "path": "/private/node-state/audit.wal"
+    },
+    "sinks": [
+      {
+        "type": "file",
+        "path": "/private/node-state/audit.jsonl"
+      }
+    ]
+  },
+  "providers": {
+    "public-chat": {
+      "type": "openai_compatible",
+      "base_url": "https://chat.example.invalid/v1",
+      "data_boundary": "external",
+      "api_key_ref": {
+        "env": "ADAPTIVE_PUBLIC_API_KEY"
+      }
+    },
+    "private-qwen": {
+      "type": "openai_compatible",
+      "base_url": "https://qwen.internal.example.invalid/v1",
+      "data_boundary": "internal",
+      "api_key_ref": {
+        "env": "ADAPTIVE_PRIVATE_API_KEY"
+      }
+    },
+    "private-gemma": {
+      "type": "openai_compatible",
+      "base_url": "https://gemma.internal.example.invalid/v1",
+      "data_boundary": "internal",
+      "api_key_ref": {
+        "env": "ADAPTIVE_PRIVATE_API_KEY"
+      }
+    },
+    "native-responses": {
+      "type": "openai_responses",
+      "base_url": "https://responses.example.invalid/v1",
+      "data_boundary": "external",
+      "api_key_ref": {
+        "env": "ADAPTIVE_RESPONSES_API_KEY"
+      }
+    }
+  },
+  "models": {
+    "auto": {
+      "context_window": 131072,
+      "capabilities": [
+        "tools"
+      ],
+      "targets": [
+        {
+          "provider": "public-chat",
+          "model": "your-normal-model"
+        }
+      ]
+    },
+    "weak": {
+      "context_window": 131072,
+      "capabilities": [
+        "tools"
+      ],
+      "targets": [
+        {
+          "provider": "private-qwen",
+          "model": "your-qwen-model"
+        },
+        {
+          "provider": "private-gemma",
+          "model": "your-gemma-model"
+        }
+      ]
+    },
+    "normal": {
+      "context_window": 131072,
+      "capabilities": [
+        "tools"
+      ],
+      "targets": [
+        {
+          "provider": "public-chat",
+          "model": "your-normal-model"
+        }
+      ]
+    },
+    "strong": {
+      "context_window": 131072,
+      "capabilities": [
+        "tools"
+      ],
+      "targets": [
+        {
+          "provider": "public-chat",
+          "model": "your-strong-model"
+        }
+      ]
+    },
+    "economy": {
+      "context_window": 131072,
+      "capabilities": [
+        "tools"
+      ],
+      "targets": [
+        {
+          "provider": "private-qwen",
+          "model": "your-qwen-model"
+        },
+        {
+          "provider": "private-gemma",
+          "model": "your-gemma-model"
+        }
+      ]
+    },
+    "codex-native": {
+      "context_window": 131072,
+      "capabilities": [
+        "tools"
+      ],
+      "targets": [
+        {
+          "provider": "native-responses",
+          "model": "your-responses-model"
+        }
+      ]
+    }
+  },
+  "model_fallback_family": false,
+  "teams": {
+    "engineering": {
+      "allowed_models": [
+        "auto",
+        "weak",
+        "normal",
+        "strong",
+        "economy",
+        "codex-native"
+      ]
+    }
+  },
+  "pricing": {
+    "on_missing": "block",
+    "version": "illustrative-adaptive-v1",
+    "overrides": {
+      "public-chat": {
+        "your-normal-model": {
+          "input_per_mtok": 1,
+          "output_per_mtok": 3
+        },
+        "your-strong-model": {
+          "input_per_mtok": 5,
+          "output_per_mtok": 15
+        }
+      },
+      "private-qwen": {
+        "your-qwen-model": {
+          "input_per_mtok": 0.2,
+          "output_per_mtok": 0.4
+        }
+      },
+      "private-gemma": {
+        "your-gemma-model": {
+          "input_per_mtok": 0.2,
+          "output_per_mtok": 0.4
+        }
+      },
+      "native-responses": {
+        "your-responses-model": {
+          "input_per_mtok": 5,
+          "output_per_mtok": 15
+        }
+      }
+    }
+  },
+  "budget_timezone": "UTC",
+  "control_plane": {
+    "url": "https://inferplaned.example.invalid",
+    "dataplane": "unique-stable-node-id",
+    "token_ref": {
+      "env": "INFERPLANE_CONTROL_TOKEN"
+    },
+    "require_sync": true,
+    "authority": {
+      "journal_path": "/private/node-state/budget-authority.sqlite"
+    }
+  }
+}

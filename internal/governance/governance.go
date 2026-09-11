@@ -146,6 +146,7 @@ type UsageStatus struct {
 // (no live/config import) and billing a request on the same generation it
 // resolved on (ADR-006).
 type Governor struct {
+	authority       BudgetAuthority
 	teams           map[string]TeamPolicy
 	lookup          func(team string) (TeamPolicy, bool)                     // D3/ADR-016: optional dynamic override, checked before teams
 	userLookup      func(team, user string) (UserPolicy, bool)               // ADR-042 Phase 3: optional per-user budget source, consulted when Subject.User is set
