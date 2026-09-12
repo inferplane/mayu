@@ -104,8 +104,8 @@ func (h *CountTokensHandler) count(w http.ResponseWriter, req *http.Request, raw
 		return estimateTokens(raw)
 	}
 	var regions []string
-	if h.teamPolicy != nil {
-		if rec, ok := h.teamPolicy(p.Team); ok {
+	if h.teamPolicy != nil || p.TeamSnapshotLoaded {
+		if rec, ok := requestpolicy.TeamSnapshot(p, h.teamPolicy); ok {
 			regions = rec.AllowedRegions
 		}
 	}

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/inferplane/inferplane/internal/config"
 	"github.com/inferplane/inferplane/internal/keystore"
 )
 
@@ -15,7 +16,7 @@ import (
 // `mayu keys create|list|revoke`, writing directly to the SQLite store.
 func keysCmd(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: mayu keys create|list|revoke ...")
+		return fmt.Errorf("usage: mayu keys create|list|revoke|import ...")
 	}
 	switch args[0] {
 	case "create":
@@ -24,6 +25,8 @@ func keysCmd(args []string) error {
 		return keysList(args[1:])
 	case "revoke":
 		return keysRevoke(args[1:])
+	case "import":
+		return keysImport(args[1:])
 	default:
 		return fmt.Errorf("unknown keys subcommand %q", args[0])
 	}
@@ -34,13 +37,14 @@ func keysCreate(args []string) error {
 	team := fs.String("team", "", "team name (required)")
 	models := fs.String("models", "*", "comma-separated allowed models, or * for all")
 	store := fs.String("store", "", "path to the SQLite key store (required)")
+	cfg := fs.String("config", "", "config file selecting a key backend (alternative to --store)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *team == "" || *store == "" {
-		return fmt.Errorf("keys create: --team and --store are required")
+	if *team == "" {
+		return fmt.Errorf("keys create: --team is required")
 	}
-	s, err := keystore.OpenSQLite(*store)
+	s, err := openKeysCLI(*store, *cfg)
 	if err != nil {
 		return err
 	}
@@ -60,13 +64,11 @@ func keysCreate(args []string) error {
 func keysList(args []string) error {
 	fs := flag.NewFlagSet("keys list", flag.ContinueOnError)
 	store := fs.String("store", "", "path to the SQLite key store (required)")
+	cfg := fs.String("config", "", "config file selecting a key backend (alternative to --store)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *store == "" {
-		return fmt.Errorf("keys list: --store is required")
-	}
-	s, err := keystore.OpenSQLite(*store)
+	s, err := openKeysCLI(*store, *cfg)
 	if err != nil {
 		return err
 	}
@@ -87,13 +89,14 @@ func keysRevoke(args []string) error {
 	fs := flag.NewFlagSet("keys revoke", flag.ContinueOnError)
 	id := fs.String("id", "", "key_id to revoke (required)")
 	store := fs.String("store", "", "path to the SQLite key store (required)")
+	cfg := fs.String("config", "", "config file selecting a key backend (alternative to --store)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *id == "" || *store == "" {
-		return fmt.Errorf("keys revoke: --id and --store are required")
+	if *id == "" {
+		return fmt.Errorf("keys revoke: --id is required")
 	}
-	s, err := keystore.OpenSQLite(*store)
+	s, err := openKeysCLI(*store, *cfg)
 	if err != nil {
 		return err
 	}
@@ -102,6 +105,50 @@ func keysRevoke(args []string) error {
 		return err
 	}
 	fmt.Printf("revoked %s\n", *id)
+	return nil
+}
+
+func openKeysCLI(path, cfgPath string) (keystore.Store, error) {
+	if (path == "") == (cfgPath == "") {
+		return nil, fmt.Errorf("keys: select exactly one of --store or --config")
+	}
+	if cfgPath == "" {
+		return keystore.OpenSQLite(path)
+	}
+	cfg, err := config.LoadKeyStore(cfgPath)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Type != "postgres" && cfg.Path == "" {
+		return nil, fmt.Errorf("keys: SQLite key_store.path is required")
+	}
+	return openGatewayKeys(context.Background(), cfg)
+}
+
+func keysImport(args []string) error {
+	fs := flag.NewFlagSet("keys import", flag.ContinueOnError)
+	cfg := fs.String("config", "", "destination Postgres key-store configuration")
+	source := fs.String("sqlite", "", "source SQLite file from the drained legacy deployment")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *source == "" || *cfg == "" {
+		return fmt.Errorf("keys import: --config and --sqlite are required; drain old writers before cutover")
+	}
+	store, err := openKeysCLI("", *cfg)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	pg, ok := store.(*keystore.PostgresStore)
+	if !ok {
+		return fmt.Errorf("keys import: destination must be Postgres")
+	}
+	result, err := pg.ImportSQLite(context.Background(), *source)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("imported %d keys and %d teams; plaintext was not read or regenerated\n", result.Keys, result.Teams)
 	return nil
 }
 

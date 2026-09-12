@@ -21,6 +21,10 @@ import (
 const schemaLockKey int64 = 847005
 
 const schema = `
+CREATE TABLE IF NOT EXISTS authority_identity (
+  singleton BOOLEAN PRIMARY KEY CHECK(singleton),
+  namespace TEXT NOT NULL CHECK(length(namespace) = 64)
+);
 CREATE TABLE IF NOT EXISTS authority_dataplanes (
   owner TEXT PRIMARY KEY
 );
@@ -30,10 +34,13 @@ CREATE TABLE IF NOT EXISTS authority_accounts (
   hard_encumbered BIGINT NOT NULL DEFAULT 0 CHECK (hard_encumbered >= 0),
   hard_consumed BIGINT NOT NULL DEFAULT 0 CHECK (hard_consumed >= 0),
   soft_consumed BIGINT NOT NULL DEFAULT 0 CHECK (soft_consumed >= 0),
+  soft_pending BIGINT NOT NULL DEFAULT 0 CHECK (soft_pending >= 0 AND soft_pending <= soft_consumed),
   accepts_meters BOOLEAN NOT NULL DEFAULT false,
   frozen BOOLEAN NOT NULL DEFAULT false,
   PRIMARY KEY (budget_key, window_id)
 );
+ALTER TABLE authority_accounts ADD COLUMN IF NOT EXISTS soft_pending BIGINT NOT NULL DEFAULT 0
+  CHECK (soft_pending >= 0 AND soft_pending <= soft_consumed);
 CREATE TABLE IF NOT EXISTS authority_requests (
   owner TEXT NOT NULL,
   instance TEXT NOT NULL,
@@ -117,6 +124,9 @@ func (s *Store) Initialize(ctx context.Context) error {
 	if _, err := tx.Exec(ctx, schema); err != nil {
 		return databaseError("initialize schema", err)
 	}
+	if err := initializeIdentity(ctx, tx); err != nil {
+		return err
+	}
 	return databaseError("commit initialization", tx.Commit(ctx))
 }
 
@@ -187,11 +197,16 @@ func (s *Store) Sync(ctx context.Context, dataplane string, req policy.Authority
 		}
 	}
 	generation := policy.GenerationOf(docs)
+	authorityID, err := readIdentity(ctx, tx)
+	if err != nil {
+		return empty, err
+	}
 	resp := policy.SyncResponse{
 		Policies: docs, Generation: generation,
 		SyncIntervalSeconds: 10,
 		Authority: &policy.AuthorityResponse{
-			Protocol: policy.AuthorityProtocol, ServerTime: now, Budgets: budgets,
+			AuthorityID: authorityID,
+			Protocol:    policy.AuthorityProtocol, ServerTime: now, Budgets: budgets,
 			Generation: generation, Policies: docs,
 		},
 	}

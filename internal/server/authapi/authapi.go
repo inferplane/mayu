@@ -9,7 +9,9 @@
 package authapi
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -174,7 +176,19 @@ func RevokeHandler(store keystore.Store, emit func(audit.Record)) http.Handler {
 			http.Error(w, `{"error":"no identity"}`, http.StatusUnauthorized)
 			return
 		}
-		if err := store.Revoke(r.Context(), p.KeyID); err != nil {
+		var err error
+		if conditional, ok := store.(interface {
+			RevokeSnapshot(context.Context, keystore.Principal) error
+		}); ok {
+			err = conditional.RevokeSnapshot(r.Context(), p)
+		} else {
+			err = store.Revoke(r.Context(), p.KeyID)
+		}
+		if errors.Is(err, keystore.ErrSnapshotChanged) {
+			http.Error(w, `{"error":"key changed; retry authorization"}`, http.StatusConflict)
+			return
+		}
+		if err != nil {
 			http.Error(w, `{"error":"revoke failed"}`, http.StatusInternalServerError)
 			return
 		}

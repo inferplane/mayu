@@ -1,15 +1,14 @@
 # Roadmap: closing the five operational gaps vs central-proxy gateways
 
-Status updated 2026-09-11: item ② ships as the opt-in Postgres monetary
-authority in ADR-045. Global rates/quotas, shared key storage and the remaining
-fleet features below are still open. The original comparison against LiteLLM
-motivated these gaps; implementation status is recorded separately below.
+Status updated 2026-09-12: item ② ships as ADR-045 node-local monetary escrow;
+ADR-046 now implements shared keys and global rate/token quotas (item ①) in an
+explicit Postgres shared gateway profile. Remaining fleet features are listed below.
 
 [Enterprise product strategy](enterprise-strategy.md) is the canonical source for
 target market, product contracts, priorities, and production-release gates. This
 roadmap tracks execution status and retains the original five-gap work breakdown.
 
-## Purpose alignment (2026-09-11)
+## Purpose alignment (2026-09-12)
 
 `CLAUDE.md` → Core Purpose lists five goals. This table is the internal
 priority lens the LiteLLM-gap framing above doesn't give you — it's ordered
@@ -21,13 +20,13 @@ already met by earlier work (ADR-031) outside this roadmap.
 | Purpose | Status | Evidence |
 |---|---|---|
 | #1 A single entry point for Claude Code/OpenCode/Codex | 🔶 protocol support implemented; model evaluation remains | Messages, Chat Completions, Bedrock Invoke and Responses ingresses; native Responses plus stateless adapters, original-byte policy enforcement, and opt-in installed Codex CLI tool round trips (ADR-044). Opaque/stateful cross-model transfer and arbitrary model quality are not implied. |
-| #2 Per-user model choice | ✅ done | User-subject `modelAccess` rules are enforced: `Store.ModelAllowed` (`internal/policy/store.go`), wired into the router via `SetPolicyGate` in `cmd/mayu/gateway.go`. (Per-user *rate* is a separate, still-blocked item — see #4b; per-user *budget* is enforced as of ADR-042 Phase 3.) |
+| #2 Per-user model choice | ✅ done | User-subject `modelAccess` rules are enforced: `Store.ModelAllowed` (`internal/policy/store.go`), wired into the router via `SetPolicyGate` in `cmd/mayu/gateway.go`. ADR-046 also supports global per-user rate/token quota in the shared profile. |
 | #3 Cost-driven model substitution via policy (routing) | ✅ implemented, rollout gates remain (ADR-041/043/044) | Legacy optional tiers retain their behavior. Opt-in `enforceTargets` constrains all choices/retries and allows threshold 100. Soft strict-tier references are switching meters, independent of total hard admission caps. Three-class context and bounded local successful-target affinity compose with privacy constraints. Evaluation uses integer utilization and referenced day/month windows; durable mode uses database-owned UTC window IDs (ADR-045). |
 | #4a Team budget + block | ✅ durable profile implemented | ADR-045 reserves finite global monetary authority in Postgres and per-attempt bounds in private node journals. Legacy ADR-034 and standalone/key-local budgets retain their limits. |
-| #4b Per-user budget/rate | 🔶 budget implemented; rate open | ADR-045 includes user-subject monetary budgets across nodes/teams using stable opaque identity. Legacy ADR-042 local enforcement remains. User-subject rate still needs item ①. |
-| #4c Rate/quota global accuracy under horizontal scale | ❌ blocked | item ① below — in-memory per-replica buckets; N replicas admit up to N× the configured rate/TPM/quota in aggregate |
+| #4b Per-user budget/rate | ✅ shared profile implemented | ADR-045 global monetary budgets; ADR-046 global user-only/team-user RPM/TPM and tokenQuota. Non-shared profiles still reject unsupported user-rate/token-quota rules. |
+| #4c Rate/quota global accuracy under horizontal scale | ✅ shared profile implemented | ADR-046 Postgres transactions reserve all matching scopes atomically; shared keys and counters survive gateway restart. Requires an available HA DB endpoint. |
 | #4d Spend visibility | ✅ done | `internal/analytics` + console + `GET /admin/logs` (`analyticsapi.LogsHandler`, backed by the same analytics index — its `events` rows carry `cost_micros` per request, `internal/analytics/index.go:40`) |
-| #5 No central inference SPOF | ✅ separation and finite outage authority | ADR-045 supports interchangeable control planes sharing Postgres; valid node grants continue until deadline. Database availability must be deployed, and shared-gateway key/rate/quota state is still separate. |
+| #5 No central inference SPOF | ✅ explicit deployment profiles | Node-local ADR-045 continues on valid local credit. Shared ADR-046 uses multiple gateways plus HA Postgres, with no per-request control-plane HTTP call; DB partitions fail closed. |
 
 **The known tension:** #4c and #5 pull against each other — see `CLAUDE.md` →
 Core Purpose. HA work here means closing that gap, not merely adding
@@ -38,7 +37,7 @@ Sprint plan (each phase = separate PR(s), reviewed before the next):
 
 | Sprint | Items | Why together |
 |---|---|---|
-| S1 | ② implemented (ADR-045); ① remains open | Durable monetary authority has an explicit negotiated protocol; rate shares remain separate work |
+| S1 | ①/② implemented as ADR-045/046 profiles | Local monetary escrow and synchronous shared resource admission have explicit, separate failure contracts |
 | S2 (~1 wk) | ④ `mayu doctor` + ③ phase 1 (version visibility) | Pure observability, no protocol risk, unblocks real-world debugging |
 | S3 (1–2 wk) | ③ phase 2 (signed self-update) + ⑤ embeddings lane | Release pipeline work + first non-chat modality |
 
@@ -64,51 +63,23 @@ remain separate work. ADR-044 adds bounded local pins, Responses and complete Ma
 policy handling; see [adaptive routing](adaptive-routing.md). Upgrade binaries/CRD before activating rules; require_sync is
 needed for CP privacy before first request. See [guide](policy-routing.md).
 
-## ① Global rate limits via rate shares (ADR candidate — unassigned; ADR-036 has since shipped as control-plane usage telemetry)
+## ① Shared keys and global rate/token quotas — implemented (ADR-046)
 
-**Gap.** `rpm`/`tpm` enforce against per-proxy in-memory buckets
-(`limiter.NewMemory`): a team capped at 300 rpm with 20 connected data planes
-can actually reach ~6,000 rpm. Budgets were globalized by leases (ADR-034);
-rate was not. LiteLLM gets this "free" via Redis.
+The implementation uses transactional Postgres admission for the explicit shared
+gateway profile. It replaces the earlier proposed rate-share/Redis design for
+that deployment mode. Keys and team permissions share one authority; each provider
+attempt atomically reserves all matching team/key/user resources. Complete known
+usage releases unused amounts, while uncertain outcomes remain reserved.
 
-**Why budgets' lease design doesn't transfer as-is.** A budget is a stock
-(cumulative, settles later); rate is a flow (per-minute, must be right *now*).
-Cumulative allowances don't mean anything for a flow — what can be divided is
-the *rate itself*.
+Policy money competes in the same ADR-045 accounts as outstanding node-local
+grants. A persistent namespace and policy-generation checks prevent mixed authority
+sources. Rate refill is exact and database-clock based; token quotas use UTC
+calendar day/month windows. Shared usage identifies reservations separately.
 
-**Design — rate shares.** The control plane divides each rate rule's global
-rpm/tpm among currently-active data planes and hands each a share in the
-existing heartbeat:
-
-- `SyncResponse` gains `rateShares: [{policy, rule, team, rpm, tpm, expiresAt}]`.
-- Split policy: proportional to each plane's reported recent consumption
-  (EWMA over the last few heartbeats, reported in `ConsumptionReport` as
-  `recentRPM`/`recentTPM`), with an equal-split floor so an idle plane can
-  always start working without waiting a rebalance. Σ shares ≤ global limit,
-  always.
-- mayu clamps the governor's team `RatePerMin`/`TokensPerMinute` to its share
-  (same seam as the budget allowance clamp — the team-lookup closure).
-- Failure semantics: rate rules are FailOpen in practice — on lease expiry
-  keep the last share (never widen to the global limit, never zero). No
-  hard-cap analogue: a rate limit protects throughput, not money.
-- Rebalance cadence = the heartbeat (10s default): a plane going quiet
-  releases its share within one lease horizon (3× renew), same mechanism as
-  budget grant release.
-
-**Work items.**
-1. Protocol: `RateShare` grant type + EWMA fields in reports (additive,
-   `omitempty` — old planes simply don't receive/report them).
-2. Control plane: per-rule share ledger keyed on the active-dataplane set
-   (reuses `dpInfo.LastSeen` liveness from ADR-034 review fixes).
-3. mayu: share table next to `LeaseTable`; clamp wiring; tests: 2-plane
-   proportional split, idle floor, dead-plane share release, Σ ≤ limit
-   invariant under churn.
-4. e2e: two gateways against one control plane, 429 appears at the *global*
-   limit, not N× it.
-
-**Risks.** Share rebalancing lag (≤1 heartbeat) lets a suddenly-hot plane 429
-briefly while holding a small share — acceptable; document. Bursty split
-(burst = share) mirrors existing team-bucket burst semantics.
+See [operator and migration guide](shared-governance.md). Default node-local rate
+buckets remain local; disconnected global rate/key authority is not claimed.
+Mutable shared provider topology, retention/reconciliation APIs and production
+throughput benchmarking remain outside this implementation.
 
 ---
 
@@ -230,16 +201,13 @@ details are swappable.
   Accepted 2026-08-18 after a 3-round 3-AI design gate (10 findings fixed).
   Requires a dedicated `INFERPLANED_BROKER_TOKEN` (never the heartbeat
   token) and auth-mode validation in mayu's config loader.
-- **Data-plane shared key/rate/quota state** remains deferred. ADR-045 implements
-  global money budgets and interchangeable control-plane issuers; it does not
-  replace SQLite virtual-key storage or node-local rate/token buckets. ADR-013's
-  broader shared-gateway design is not declared complete by that narrower change.
+- **Mutable shared provider topology** remains deferred. ADR-046 shared gateways
+  use a common file/ConfigMap rollout and reject the SQLite provider-store option.
+  Shared key/rate/quota and key-local money enforcement are implemented.
 - SSE push stream for policy distribution (poll-at-lease-cadence already
   beats the 60s/15s requirement).
 - CRD-watch controller in inferplaned (ADR-035 follow-up).
-- User-subject *rate* rules (need a rate-share model — item ① — before the
-  ADR-033 gate can accept them; user-subject *budget* shipped in ADR-042
-  Phase 3, which narrowed that gate to rate-only).
+- Disconnected global rate/key leases; shared-profile user rates/token quotas ship in ADR-046.
 - Cache-affinity routing engine (the `routing` rule's *affinity* half stays
   rejected until then; the *budgetTiers* half shipped as ADR-041 — it never
   depended on the affinity engine).

@@ -88,8 +88,13 @@ type Store struct {
 	// skip the check — the control plane holds no topology of its own and
 	// deliberately does not apply it (LoadWirePaths), the same posture it
 	// already takes toward checkEnforceable.
-	routedAndPriced func(model string) error
+	routedAndPriced   func(model string) error
+	sharedEnforcement bool
 }
+
+// SetSharedEnforcement is a startup-only capability declaration. It must only
+// be enabled when the assembled gateway has a real shared admission authority.
+func (s *Store) SetSharedEnforcement(enabled bool) { s.sharedEnforcement = enabled }
 
 // SetRoutedAndPriced installs the apply-time target check for budgetTiers,
 // sensitiveData.internalModels, and routing.context targets. A data plane must call this before Reload/ApplyWire so
@@ -100,7 +105,8 @@ func (s *Store) SetRoutedAndPriced(f func(model string) error) {
 }
 
 type snapshot struct {
-	policies []*Policy
+	generation string
+	policies   []*Policy
 	// rejectedRouting retains affected subjects after rejected mandatory privacy
 	// OR strict budget-routing documents, until a valid correction arrives.
 	rejectedRouting map[string][]Subject
@@ -164,7 +170,7 @@ func (s *Store) ApplyWire(docs []v1alpha1.GovernancePolicy) []Rejection {
 			subjects = append(subjects, sub)
 		}
 		for _, r := range doc.Spec.Rules {
-			if r.SensitiveData != nil || (r.Routing != nil && r.Routing.BudgetTiers != nil && r.Routing.BudgetTiers.EnforceTargets) {
+			if r.TokenQuota != nil || r.SensitiveData != nil || (r.Routing != nil && r.Routing.BudgetTiers != nil && r.Routing.BudgetTiers.EnforceTargets) {
 				add(Subject{Team: doc.Spec.Subject.Team, User: doc.Spec.Subject.User})
 				break
 			}
@@ -197,7 +203,7 @@ func (s *Store) ApplyWire(docs []v1alpha1.GovernancePolicy) []Rejection {
 		seen[name] = true
 		p, err := FromV1Alpha1(&docs[i])
 		if err == nil {
-			err = checkEnforceable(p, s.routedAndPriced)
+			err = checkEnforceable(p, s.routedAndPriced, s.sharedEnforcement)
 		}
 		if err != nil {
 			rememberRejection(&docs[i])
@@ -221,6 +227,7 @@ func (s *Store) ApplyWire(docs []v1alpha1.GovernancePolicy) []Rejection {
 		delete(pending, "")
 	}
 	s.snap.Store(&snapshot{
+		generation:      GenerationOf(docs),
 		rejectedRouting: pending,
 		policies:        accepted,
 		teams:           mergeTeamLimits(accepted),
@@ -244,7 +251,7 @@ func (s *Store) Reload() error {
 		return err
 	}
 	for _, p := range policies {
-		if err := checkEnforceable(p, s.routedAndPriced); err != nil {
+		if err := checkEnforceable(p, s.routedAndPriced, s.sharedEnforcement); err != nil {
 			return err
 		}
 	}
@@ -267,11 +274,14 @@ func (s *Store) Reload() error {
 // checkEnforceable rejects rules this data plane build cannot enforce yet.
 // routedAndPriced is the ADR-041 apply-time target check for budgetTiers
 // substitution rules (nil skips it — see Store.routedAndPriced doc).
-func checkEnforceable(p *Policy, routedAndPriced func(model string) error) error {
+func checkEnforceable(p *Policy, routedAndPriced func(model string) error, shared bool) error {
 	reject := func(rule, reason string) error {
 		return &UnsupportedError{APIVersion: SupportedAPIVersions[0], Kind: "GovernancePolicy", Rule: rule, Reason: reason}
 	}
 	for _, r := range p.Rules {
+		if r.TokenQuota != nil && !shared {
+			return reject(r.Name, "tokenQuota requires shared Postgres governance")
+		}
 		if routedAndPriced != nil {
 			var targets []string
 			if r.SensitiveData != nil {
@@ -293,7 +303,7 @@ func checkEnforceable(p *Policy, routedAndPriced func(model string) error) error
 			return reject(r.Name, "cache-affinity routing rules are not yet enforceable by this data plane build")
 		}
 		if r.Routing != nil && r.Routing.BudgetTiers != nil && r.Routing.BudgetTiers.EnforceTargets &&
-			(p.Subject.Team == "" || p.Subject.User != "") {
+			(p.Subject.Team == "" || p.Subject.User != "") && !shared {
 			return reject(r.Name, "strict budget tiers require a team-only subject in this build")
 		}
 		if r.Routing != nil && r.Routing.BudgetTiers != nil && routedAndPriced != nil {
@@ -313,7 +323,7 @@ func checkEnforceable(p *Policy, routedAndPriced func(model string) error) error
 		// this gate — mergeUserLimits + Store.UserLimits + the Governor's
 		// user lookup enforce a user-subject budget rule as of ADR-042
 		// Phase 3.
-		if r.Rate != nil && (p.Subject.Team == "" || p.Subject.User != "") {
+		if r.Rate != nil && (p.Subject.Team == "" || p.Subject.User != "") && !shared {
 			return reject(r.Name, "rate rules require a team-only subject in this build (user-scoped rate is not yet enforceable; user subjects support budget and modelAccess)")
 		}
 	}
@@ -682,11 +692,19 @@ var ErrSensitivePolicyRejected = ErrRoutingPolicyRejected
 // This gate applies even when no context/privacy rules remain to return. A
 // missing subject on a rejected mandatory document matches everyone.
 func (s *Store) MatchingRoutingPolicies(team, user string) ([]*Policy, error) {
+	docs, _, err := s.RoutingSnapshot(team, user)
+	return docs, err
+}
+
+// RoutingSnapshot binds a decision to the exact distributed bundle, including
+// when no routing rules match. Shared admission compares this generation with
+// the authoritative database before dispatch.
+func (s *Store) RoutingSnapshot(team, user string) ([]*Policy, string, error) {
 	snap := s.snap.Load()
 	for _, subjects := range snap.rejectedRouting {
 		for _, sub := range subjects {
 			if sub.matches(team, user) {
-				return nil, ErrRoutingPolicyRejected
+				return nil, snap.generation, ErrRoutingPolicyRejected
 			}
 		}
 	}
@@ -706,12 +724,12 @@ func (s *Store) MatchingRoutingPolicies(team, user string) ([]*Policy, error) {
 			out = append(out, &cp)
 		}
 	}
-	return out, nil
+	return out, snap.generation, nil
 }
 
 func hasMandatoryRouting(p *Policy) bool {
 	for _, r := range p.Rules {
-		if r.SensitiveData != nil || (r.Routing != nil && r.Routing.BudgetTiers != nil && r.Routing.BudgetTiers.EnforceTargets) {
+		if r.TokenQuota != nil || r.SensitiveData != nil || (r.Routing != nil && r.Routing.BudgetTiers != nil && r.Routing.BudgetTiers.EnforceTargets) {
 			return true
 		}
 	}
@@ -728,6 +746,10 @@ func clonePolicy(p *Policy) *Policy {
 }
 
 func cloneRule(r Rule) Rule {
+	if r.TokenQuota != nil {
+		q := *r.TokenQuota
+		r.TokenQuota = &q
+	}
 	if r.Budget != nil {
 		b := *r.Budget
 		r.Budget = &b

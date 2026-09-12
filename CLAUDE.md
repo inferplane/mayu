@@ -59,9 +59,15 @@ Control-plane replicas share the ledger; inference needs no database call.
 Restart burns old open node grants; expiry never refunds central authority;
 only complete known usage releases unused local reservations. UTC windows
 belong to database time. Missing/invalid authority fails closed. This does not
-globalize rate/quota, key-local budgets or SQLite key storage — see
-`docs/roadmap.md`. Any HA or multi-replica work must close this gap for #4,
-not just add replicas.
+globalize rate/quota, key-local budgets or SQLite key storage by itself.
+ADR-046 adds an explicit shared gateway profile: synchronous Postgres key/team
+snapshots and atomic RPM/TPM/token quota/money admission, backed by the SAME
+policy monetary accounts. It requires HA Postgres and fails closed on DB failure;
+it does not claim offline enforcement. Authority namespace and captured policy
+generation must match before dispatch. Shared bootstrap fingerprints preserve
+admin changes; conditional revocation checks the authenticated revision. Shared
+mode rejects local journal/provider topology stores, and counts stay local/200.
+Default and node-local profiles retain their separate limits (`docs/roadmap.md`).
 
 ## Tech Stack
 

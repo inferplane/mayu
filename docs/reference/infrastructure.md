@@ -12,15 +12,15 @@ wires an optional IRSA ServiceAccount for Bedrock.
 | Docker ignore | `.dockerignore` | Excludes tests/docs/charts from the build context |
 | Helm chart | `charts/inferplane/` | Deployment, Service (data+admin), ServiceAccount, ConfigMap, optional policies ConfigMap (`/etc/inferplane/policies`, live-reloaded — ADR-035), optional Ingress, optional PVC (ADR-023), NOTES.txt |
 | GovernancePolicy CRD | `deploy/crd/` | kubectl-native schema validation for `inferplane.dev/v1alpha1` documents (structural schema + CEL, K8s 1.25+); controller-watch is a named follow-up (ADR-035) |
-| Chart values | `charts/inferplane/values.yaml` | Image, replicaCount (must stay 1, SQLite), existingSecret, IRSA annotation, ingress (data/admin hosts), persistence (opt-in PVC for the key store), commented `config.otel` OTLP-trace example |
+| Chart values | `charts/inferplane/values.yaml` | Image, replicaCount (local=1; shared Postgres supports multiple replicas), existingSecret, IRSA annotation, ingress (data/admin hosts), persistence (opt-in PVC for the key store), commented `config.otel` OTLP-trace example |
 | Grafana dashboard | `deploy/grafana/inferplane.json` | 9-panel Prometheus dashboard |
 
 ### 3. Key Decisions
 - `CGO_ENABLED=0` static binary so the image can be distroless/nonroot with no libc.
 - The admin key console's static assets (`internal/server/adminui/static/`) ship inside the binary via `go:embed` — no image, chart, or build-pipeline change (ADR-001).
 - **Config hot-reload (ADR-006):** edit config and `kill -HUP <pid>` (K8s: signal PID 1 or roll the pods) to apply provider/model/pricing changes with no restart — the topology is swapped atomically, governance counters/keystore/audit persist, and a bad config rolls back. Listen addrs, TLS, drain, and team policy limits are NOT hot (restart required).
-- Single replica **only**, not merely a default (SQLite key store + instance-local governance) — the chart's only `replicaCount != 1` guard is gated on `persistence.enabled` (default `false`), so an operator can render >1 replica with no error today. Multi-replica HA waits for a shared-state backend; maintainer direction as of 2026-08-14 is Postgres-only, recorded in `docs/roadmap.md` pending a real ADR — not the Postgres/Redis split ADR-013 originally designed.
-- **Key-store persistence (ADR-023):** `persistence.enabled` (default `false`, breaking-change-free) mounts a PVC (or `existingClaim`) at `/var/lib/inferplane`; without it, that path is an `emptyDir` and the key store/audit WAL are wiped on every pod restart. Enabling it switches the Deployment to `strategy: Recreate` (an RWO volume cannot attach to two pods) and a template guard refuses to render if `replicaCount != 1`. `virtual_keys` in `config` can declare a virtual key from a secret ref (`secrets.existingSecret`) so a client's key survives a restart even without persistence — see ADR-023 for the trade-off between the two.
+- Default/local mode is single-replica. ADR-046 shared Postgres mode supports multiple gateways; the chart rejects unsafe local replication. Persistent shared mode renders a StatefulSet with separate PVCs, required node anti-affinity and a disruption budget. See [shared governance](../shared-governance.md).
+- **Persistence:** local mode retains its existing Deployment/PVC behavior. Shared mode stores keys and counters in Postgres; per-replica PVCs hold independent audit segments. Do not share one audit WAL between replicas.
 - The chart references an `existingSecret` and never creates secrets (design §7).
 - `Ingress` is off by default (`ingress.enabled: false`); when on, the admin plane
   additionally requires `ingress.admin.enabled: true` to be routed — it carries

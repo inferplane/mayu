@@ -3,6 +3,7 @@
 package requestpolicy
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -14,6 +15,9 @@ import (
 	"github.com/inferplane/inferplane/pkg/ulid"
 )
 
+type bundleKey struct{}
+type bundleRef struct{ generation, requested string }
+
 // Active excludes legacy traffic, preserving its audit bytes and headers.
 // A rejected policy lookup is evidence even when no rule could be loaded.
 func Active(d router.RoutingDecision) bool {
@@ -24,6 +28,9 @@ func Active(d router.RoutingDecision) bool {
 // Observe copies ONLY safe decision scalars; never marshal result or Chain.
 func Observe(w http.ResponseWriter, req *http.Request, result router.RequestRoutingResult, m *metrics.Metrics) *http.Request {
 	d := result.Decision
+	if result.PolicyGeneration != "" {
+		req = req.WithContext(context.WithValue(req.Context(), bundleKey{}, bundleRef{result.PolicyGeneration, d.RequestedModel}))
+	}
 	if !Active(d) {
 		return req
 	}

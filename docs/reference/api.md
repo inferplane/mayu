@@ -97,3 +97,13 @@ Legacy requests receive 409; durable clients reject legacy or invalid responses.
 Each `ActiveTier` preserves team/user scope. `/readyz` includes a live authority
 DB check. See [wire contract](../../internal/authority/pgstore/README.md) and
 [operator configuration](../durable-budgets.md).
+
+### Shared gateway profile (ADR-046)
+
+`key_store.type: postgres` plus `governance_store.type: postgres` enables shared
+identity and atomic resource admission. The heartbeat carries an authority
+namespace; shared gateways verify it and request no local grants. User-scoped rate
+and `tokenQuota` day/month rules require this profile. `GET /v1/usage` returns
+`enforcement_mode: shared` and subject-scoped `shared_limits`. Key CLI commands
+accept `--config`; `keys import --sqlite ... --config ...` preserves raw identities
+and revocation tombstones. See [shared governance](../shared-governance.md).

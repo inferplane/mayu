@@ -91,22 +91,18 @@ remain usable during a control-plane/database outage until their deadlines.
 
 ## Current limits
 
-**A shared gateway deployment still requires a single `mayu` replica.** `internal/keystore` is SQLite-only and
-`internal/limiter`/`internal/budget` are in-memory — running more than one
-`mayu` replica lets each enforce its own copy of every counter, so rate,
-token quota, and (in standalone mode) budget ceilings can each reach up to
-N× the configured value, and key resolution splits across replicas
-(ADR-013). ADR-045 supports global **GovernancePolicy money budgets** across
-independently identified node-local gateways, including user subjects. It does
-not supply shared virtual-key storage or global rate/token-quota enforcement.
-The legacy ADR-034 lease mode remains available with its earlier limitations.
+**Shared gateways now have an explicit Postgres profile (ADR-046).**
+It shares keys, team/key/user RPM and TPM, calendar token quotas and monetary
+reservations across replicas. Admission is transactional and database failures
+fail closed. See [shared governance](docs/shared-governance.md) and the
+[Helm example](examples/helm.shared-governance.yaml). Deploy an HA Postgres endpoint;
+shared mode uses synchronous database reads/writes and does not offer disconnected
+operation. Mutable SQLite provider topology is unsupported in this profile.
 
-**Goal 4 is partially unenforced today.** Per-user *model choice* (goal 2) is
-enforced, and so are per-user *budget* (ADR-042 Phase 3) and policy-driven
-cost substitution (goal 3, `routing.budgetTiers` — ADR-041). Per-user *rate*
-is still rejected at policy load rather than silently ignored: it needs the
-rate-share model (`docs/roadmap.md` item ①). See the purpose-alignment table
-in `docs/roadmap.md` for exact status and code references.
+**The default SQLite/in-memory profile remains single-replica.** Its rate/quota
+and standalone money counters remain local. ADR-045 globalizes policy money for
+node-local fleets; ADR-046 additionally supplies shared identity and complete
+resource admission. User rate/token-quota rules require the shared profile.
 
 **Standalone and legacy budget counters are not durable.** In standalone mode they live only in
 memory: restarting `mayu` mid-window resets every team, key, and user counter
@@ -274,8 +270,9 @@ The project targets CNCF Sandbox.
 - [docs/decisions/](docs/decisions/) — design records (ADRs); start with
   [ADR-031](docs/decisions/ADR-031-monorepo-control-plane-data-plane-split.md),
   the control-plane/data-plane split
+- [docs/shared-governance.md](docs/shared-governance.md) — shared keys, global rate/token quotas and migration
 - [docs/durable-budgets.md](docs/durable-budgets.md) — global monetary budgets and control-plane failover
-- [docs/roadmap.md](docs/roadmap.md) — remaining gaps (global rate limits, shared key storage, self-update, embeddings)
+- [docs/roadmap.md](docs/roadmap.md) — remaining gaps (mutable shared topology, fleet tooling, self-update, embeddings)
 - [CHANGELOG.md](CHANGELOG.md) · [GOVERNANCE.md](GOVERNANCE.md) · [MAINTAINERS.md](MAINTAINERS.md)
 
 ## Contributing
