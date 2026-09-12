@@ -228,7 +228,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		if reserveErr != nil {
 			status := requestpolicy.BudgetStatus(reserveErr)
 			requestpolicy.BudgetErrorHeaders(w, reserveErr)
-			w.Header().Set("Retry-After", "1")
 			h.denied(req, p, model, status, "budget_authority_unavailable", start)
 			writeError(w, status, "insufficient_quota", "budget authority unavailable")
 			return

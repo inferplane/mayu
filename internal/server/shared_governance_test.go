@@ -69,6 +69,9 @@ func TestEveryIngressUsesSharedAdmissionAndOriginalPolicyGeneration(t *testing.T
 					if rec.Code != 429 || len(f.Public.Calls) != 0 || len(probe.finishes) != 0 {
 						t.Fatal("refused shared request reached provider")
 					}
+					if got := rec.Header().Get("Retry-After"); got != "12" {
+						t.Fatalf("shared backoff lost: got %q want 12", got)
+					}
 				} else if rec.Code != 200 || len(probe.finishes) != 1 || !probe.finishes[0].Complete ||
 					probe.finishes[0].Tokens == nil || *probe.finishes[0].Tokens != 5 {
 					t.Fatalf("bad shared settlement: status=%d %+v", rec.Code, probe.finishes)
