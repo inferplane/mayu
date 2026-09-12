@@ -24,6 +24,7 @@ import (
 	"github.com/inferplane/inferplane/internal/audit"
 	"github.com/inferplane/inferplane/internal/audit/s3anchor"
 	localauthority "github.com/inferplane/inferplane/internal/authority/local"
+	sharedpg "github.com/inferplane/inferplane/internal/authority/pgstore"
 	"github.com/inferplane/inferplane/internal/bodystore"
 	"github.com/inferplane/inferplane/internal/budget"
 	"github.com/inferplane/inferplane/internal/config"
@@ -79,10 +80,11 @@ type gateway struct {
 	polStore         *policy.Store               // nil unless policies/control_plane is configured (ADR-033/034); file mode watched in serve
 	syncer           *proxy.Syncer               // nil unless control_plane is configured (ADR-034); heartbeats in serve
 	authority        *localauthority.Store       // boot-owned escrow journal, shared by admission and the syncer
-	authorityUse     sync.RWMutex                // joins durable handlers before their journal and other resources close
-	usagePusher      *proxy.UsagePusher          // nil unless control_plane is configured; drains the collector every minute
-	credSrc          providers.CredentialSource  // nil unless a bedrock provider opted into auth.mode "broker" (ADR-040); reused across rebuilds
-	reloadMu         sync.Mutex                  // serializes reloads AND UI writes (concurrent SIGHUPs/triggers)
+	shared           *sharedpg.Store
+	authorityUse     sync.RWMutex               // joins durable handlers before their journal and other resources close
+	usagePusher      *proxy.UsagePusher         // nil unless control_plane is configured; drains the collector every minute
+	credSrc          providers.CredentialSource // nil unless a bedrock provider opted into auth.mode "broker" (ADR-040); reused across rebuilds
+	reloadMu         sync.Mutex                 // serializes reloads AND UI writes (concurrent SIGHUPs/triggers)
 	dataLn           net.Listener
 	adminLn          net.Listener
 	dataSrv          *http.Server
@@ -122,10 +124,11 @@ func newGateway(cfgPath string) (*gateway, error) {
 	// arrive with the first heartbeat and then fail closed on lease expiry.
 	if raw.ControlPlane != nil {
 		polStore = policy.NewEmptyStore()
+		polStore.SetSharedEnforcement(raw.SharedGovernance())
 		// leases is not a gateway field: it stays alive through the
 		// governor's team-lookup closure, the lease gate, and the syncer
 		// built below — the three places that share it.
-		if raw.ControlPlane.Authority == nil {
+		if raw.ControlPlane.Authority == nil && !raw.SharedGovernance() {
 			leases = proxy.NewLeaseTable()
 		}
 		tiers = tier.NewTable()
@@ -136,11 +139,37 @@ func newGateway(cfgPath string) (*gateway, error) {
 	m := metrics.New()
 
 	// Virtual-key store: KeyAuth resolves client keys against it (§5.1).
-	store, err := keystore.OpenSQLite(raw.KeyStore.Path)
+	store, err := openGatewayKeys(context.Background(), raw.KeyStore)
 	if err != nil {
 		return nil, fmt.Errorf("keystore: %w", err)
 	}
+	var shared *sharedpg.Store
+	sharedTransferred := false
+	if raw.SharedGovernance() {
+		if err := seedSharedKeys(context.Background(), store.(*keystore.PostgresStore), raw); err != nil {
+			_ = store.Close()
+			return nil, fmt.Errorf("shared key bootstrap: %w", err)
+		}
+		shared, err = sharedpg.New(raw.KeyStore.DSN)
+		if err != nil {
+			_ = store.Close()
+			return nil, err
+		}
+		if err := shared.InitializeShared(context.Background()); err != nil {
+			shared.Close()
+			_ = store.Close()
+			return nil, fmt.Errorf("shared governance initialization: %w", err)
+		}
+		defer func() {
+			if !sharedTransferred {
+				shared.Close()
+			}
+		}()
+	}
 	for i, vk := range raw.VirtualKeys {
+		if raw.SharedGovernance() {
+			break // Seed registered immutable original declarations atomically.
+		}
 		teamKnown := false
 		if _, ok := raw.Teams[vk.Team]; ok {
 			teamKnown = true
@@ -389,6 +418,9 @@ func newGateway(cfgPath string) (*gateway, error) {
 	// is passed into Settle per request from the resolved snapshot, so the
 	// governor holds no pricing — only its persistent rate/budget counters.
 	gov := governance.NewGovernor(policies, limiter.NewMemory(), budget.NewMemory(), m) // budget_spend / pricing_miss
+	if shared != nil {
+		gov.SetSharedAuthority(shared)
+	}
 	if authority != nil {
 		gov.SetBudgetAuthority(authority)
 	}
@@ -691,6 +723,13 @@ func newGateway(cfgPath string) (*gateway, error) {
 		if authority != nil {
 			syncer.Authority = authority
 		}
+		if shared != nil {
+			syncer.Authority, err = proxy.NewSharedAuthorityClient(shared.SharedBinding)
+			if err != nil {
+				closeAll(pstore, pgstoreQ, store, aud)
+				return nil, err
+			}
+		}
 	}
 	// Per-team record lookup for NON-governance overrides (D6/ADR-019's
 	// guardrail override; D7/ADR-020's region-lock reuses this same closure).
@@ -872,6 +911,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 		polStore:         polStore,
 		syncer:           syncer,
 		authority:        authority,
+		shared:           shared,
 		usagePusher:      usagePusher,
 		credSrc:          credSrc,
 		dataLn:           dataLn,
@@ -895,7 +935,7 @@ func newGateway(cfgPath string) (*gateway, error) {
 		governanceGate = func() (bool, string) { return syncer.GovernanceReady(maxAge) }
 	}
 	g.dataSrv = &http.Server{Handler: server.DataMux(r, holder, store, aud, gov, m, masking, teamPolicy, bodyRec, cliVerifier(cfg), oidcMapping(cfg), cliAuthConfigView(cfg), cliKeyTTL(cfg), server.WithUsageCollector(usageCol), server.WithMaxRequestBytes(cfg.Server.MaxRequestBytes), server.WithGovernanceGate(governanceGate))}
-	if authority != nil {
+	if authority != nil || shared != nil {
 		next := g.dataSrv.Handler
 		g.dataSrv.Handler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			g.authorityUse.RLock()
@@ -957,8 +997,23 @@ func newGateway(cfgPath string) (*gateway, error) {
 	if ar, ok := anchorer.(audit.AnchorReader); ok {
 		anchorReader = ar
 	}
-	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, anchorReader, governanceGate, m, writer, liveExport(holder), capabilities, analyticsQ, store, configTeams, alertFires, healthSnapshot, bodyRec, authConfigView(cfg), ssoConnectSrc(cfg), cfg.Probe.AllowedHosts...)}
+	readiness := governanceGate
+	if shared != nil {
+		readiness = func() (bool, string) {
+			if governanceGate != nil {
+				if ok, reason := governanceGate(); !ok {
+					return ok, reason
+				}
+			}
+			if err := shared.Ready(context.Background()); err != nil {
+				return false, "shared governance unavailable"
+			}
+			return true, ""
+		}
+	}
+	g.adminSrv = &http.Server{Handler: server.AdminMux(store, cfg.Server.AdminAuth.Tokens, oidcVerifier(cfg), oidcMapping(cfg), liveView(holder, pstore != nil), auditFileSinks, aud, anchorReader, readiness, m, writer, liveExport(holder), capabilities, analyticsQ, store, configTeams, alertFires, healthSnapshot, bodyRec, authConfigView(cfg), ssoConnectSrc(cfg), cfg.Probe.AllowedHosts...)}
 	authorityTransferred = true
+	sharedTransferred = true
 	return g, nil
 }
 
@@ -972,11 +1027,14 @@ func durableJournalPath(cfg *config.Config) string {
 // The durable bound uses model metadata from the same immutable generation as
 // pricing. Explicit zero-price rates still need a verified context bound.
 func validateDurableModels(cfg *config.Config, st *live.State) error {
-	if durableJournalPath(cfg) == "" {
+	if durableJournalPath(cfg) == "" && !cfg.SharedGovernance() {
 		return nil
 	}
 	for _, name := range st.ModelNames() {
 		model, _ := st.Route(name)
+		if cfg.SharedGovernance() && (model.ContextWindow <= 0 || model.ContextWindow > math.MaxInt64/5) {
+			return fmt.Errorf("shared governance: model %q requires a finite context_window", name)
+		}
 		for _, target := range model.Targets {
 			if st.Pricing().HasRate(target.Provider, target.Model) && model.ContextWindow <= 0 {
 				return fmt.Errorf("durable budget authority: model %q requires context_window > 0", name)
@@ -989,6 +1047,9 @@ func validateDurableModels(cfg *config.Config, st *live.State) error {
 // These values bind the running journal to its control-plane report owner.
 // Reloading topology must never silently change them underneath live permits.
 func (g *gateway) validateAuthorityReload(next *config.Config) error {
+	if err := g.validateSharedReload(next); err != nil {
+		return err
+	}
 	oldPath, newPath := durableJournalPath(g.cfg), durableJournalPath(next)
 	if oldPath == "" && newPath == "" {
 		return nil
@@ -1455,7 +1516,7 @@ func (g *gateway) serve(ctx context.Context) error {
 			}
 		}()
 	}
-	if g.authority != nil {
+	if g.authority != nil || g.shared != nil {
 		// Shutdown can time out while handlers still own permits. Cancel their
 		// transports, then join finalization before closing the journal or any
 		// of the shared resources whose defers were registered above.
@@ -1463,8 +1524,13 @@ func (g *gateway) serve(ctx context.Context) error {
 			_ = g.dataSrv.Close()
 			g.authorityUse.Lock()
 			defer g.authorityUse.Unlock()
-			if err := g.authority.Close(); err != nil {
-				fmt.Fprintln(os.Stderr, "inferplane: budget authority close:", err)
+			if g.authority != nil {
+				if err := g.authority.Close(); err != nil {
+					fmt.Fprintln(os.Stderr, "inferplane: budget authority close:", err)
+				}
+			}
+			if g.shared != nil {
+				g.shared.Close()
 			}
 		}()
 	}
@@ -1866,5 +1932,5 @@ func wireRoutingPolicyGates(r *router.Router, store *policy.Store) {
 	r.SetPolicyGate(func(p keystore.Principal, model string, canonical func(string) string) bool {
 		return store.ModelAllowed(p.Team, p.Owner, model, canonical)
 	})
-	r.SetRoutingPolicyLookup(store.MatchingRoutingPolicies)
+	r.SetRoutingPolicySnapshot(store.RoutingSnapshot)
 }

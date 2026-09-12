@@ -94,8 +94,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	var team keystore.TeamRecord
-	if h.teamPolicy != nil {
-		team, _ = h.teamPolicy(p.Team)
+	if h.teamPolicy != nil || p.TeamSnapshotLoaded {
+		team, _ = requestpolicy.TeamSnapshot(p, h.teamPolicy)
 	}
 	chain = router.FilterModelAllowed(chain, func(m string) bool { return h.r.Allows(p, m) })
 	if len(team.AllowedRegions) > 0 {
@@ -227,6 +227,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		reservedReq, finishBudget, reserveErr := requestpolicy.ReserveBudget(req, h.gov, p, ct, st, raw)
 		if reserveErr != nil {
 			status := requestpolicy.BudgetStatus(reserveErr)
+			requestpolicy.BudgetErrorHeaders(w, reserveErr)
 			w.Header().Set("Retry-After", "1")
 			h.denied(req, p, model, status, "budget_authority_unavailable", start)
 			writeError(w, status, "insufficient_quota", "budget authority unavailable")

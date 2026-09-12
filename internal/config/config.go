@@ -214,13 +214,16 @@ func validateServer(s *ServerConfig) error {
 	return nil
 }
 
-// KeyStoreConfig selects the virtual-key backend. Only "sqlite" exists — Type
-// is parsed but currently IGNORED (gateway.go always calls OpenSQLite); a
-// Postgres backend is design-only (ADR-013), not implemented. Setting
-// "postgres" today silently yields SQLite with no error.
+// KeyStoreConfig selects the default SQLite or explicit shared Postgres backend.
 type KeyStoreConfig struct {
+	Type   string     `json:"type"`
+	Path   string     `json:"path,omitempty"`
+	DSNRef *SecretRef `json:"dsn_ref,omitempty"`
+	DSN    string     `json:"-"`
+}
+
+type GovernanceStoreConfig struct {
 	Type string `json:"type"`
-	Path string `json:"path"`
 }
 
 // ProviderStoreConfig optionally enables the DB-authoritative provider/model
@@ -463,6 +466,7 @@ type Config struct {
 	Models              map[string]ModelConfig     `json:"models"`
 	KeyStore            KeyStoreConfig             `json:"key_store"`
 	ProviderStore       *ProviderStoreConfig       `json:"provider_store,omitempty"`
+	GovernanceStore     *GovernanceStoreConfig     `json:"governance_store,omitempty"`
 	Audit               AuditConfig                `json:"audit"`
 	Teams               map[string]TeamConfig      `json:"teams"`
 	Pricing             PricingConfig              `json:"pricing"`
@@ -670,8 +674,10 @@ func LoadRaw(path string) (*Config, error) {
 	// Reject inline secrets before structured parse: any provider object with
 	// a literal "api_key" key is a config error (§7).
 	var probe struct {
-		Providers map[string]map[string]json.RawMessage `json:"providers"`
-		Analytics struct {
+		KeyStore        map[string]json.RawMessage            `json:"key_store"`
+		GovernanceStore map[string]json.RawMessage            `json:"governance_store"`
+		Providers       map[string]map[string]json.RawMessage `json:"providers"`
+		Analytics       struct {
 			ModeB map[string]json.RawMessage `json:"mode_b"`
 		} `json:"analytics"`
 		Audit struct {
@@ -682,6 +688,11 @@ func LoadRaw(path string) (*Config, error) {
 	}
 	if err := json.Unmarshal(data, &probe); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
+	}
+	for name, obj := range map[string]map[string]json.RawMessage{"key_store": probe.KeyStore, "governance_store": probe.GovernanceStore} {
+		if _, bad := obj["dsn"]; bad {
+			return nil, fmt.Errorf("config: %s has inline dsn; use key_store.dsn_ref", name)
+		}
 	}
 	for name, p := range probe.Providers {
 		if _, bad := p["api_key"]; bad {
@@ -767,6 +778,9 @@ func LoadRaw(path string) (*Config, error) {
 		}
 	}
 	if err := validateControlPlane(&cfg); err != nil {
+		return nil, err
+	}
+	if err := validateSharedStores(&cfg); err != nil {
 		return nil, err
 	}
 	return &cfg, nil

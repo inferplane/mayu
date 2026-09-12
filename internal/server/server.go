@@ -126,7 +126,11 @@ func DataMux(r *router.Router, holder *live.Holder, store keystore.Store, aud *a
 	ct := anthropicapi.NewCountTokensHandler(r)
 	ct.SetMasking(mask)          // mask the count body too (T6); never 500
 	ct.SetTeamPolicy(teamPolicy) // region lock (D7, ADR-020): never call an out-of-region TokenCounter
-	ct.SetGovernanceGate(o.governanceGate)
+	countGate := o.governanceGate
+	if gov.HasSharedAuthority() {
+		countGate = func() (bool, string) { return false, "shared counts are local" }
+	}
+	ct.SetGovernanceGate(countGate)
 	ct.SetObservability(aud, m)
 	mux.Handle("POST /v1/messages/count_tokens", ct)
 	chat := openaiapi.NewChatHandlerMetrics(r, aud, gov, m)
@@ -156,7 +160,7 @@ func DataMux(r *router.Router, holder *live.Holder, store keystore.Store, aud *a
 	bct := bedrockapi.NewCountTokensHandler(r, holder)
 	bct.SetMasking(mask)
 	bct.SetTeamPolicy(teamPolicy)
-	bct.SetGovernanceGate(o.governanceGate)
+	bct.SetGovernanceGate(countGate)
 	bct.SetObservability(aud, m)
 	mux.Handle("POST /model/{modelId}/count-tokens", bct)
 	// Both the Anthropic (Claude Code) and OpenAI (OpenCode) clients hit the

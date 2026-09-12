@@ -25,6 +25,8 @@ var errMultiplicity = errors.New("durable budgets require a single generation pe
 type budgetAttempt struct {
 	governor           *governance.Governor
 	permit             *governance.BudgetPermit
+	shared             *governance.SharedPermit
+	subject            governance.Subject
 	done               atomic.Bool
 	table              *pricing.Table
 	provider, upstream string
@@ -35,7 +37,7 @@ type budgetAttempt struct {
 // The returned finalizer MUST run even after a panic/cancellation or early error;
 // absent a proved complete result it retains the entire reservation as uncertain.
 func ReserveBudget(req *http.Request, g *governance.Governor, p keystore.Principal, target router.ChainTarget, state *live.State, raw []byte) (*http.Request, func(), error) {
-	if !g.HasBudgetAuthority() {
+	if !g.HasBudgetAuthority() && !g.HasSharedAuthority() {
 		return req, func() {}, nil
 	}
 	if err := singleGeneration(raw); err != nil {
@@ -52,6 +54,9 @@ func ReserveBudget(req *http.Request, g *governance.Governor, p keystore.Princip
 	if err != nil {
 		return req, nil, governance.ErrAuthorityUnavailable
 	}
+	if g.HasSharedAuthority() {
+		return reserveShared(req, g, p, target, state, model.ContextWindow, bound)
+	}
 	permit, err := g.ReserveBudget(req.Context(), governance.Subject{Team: p.Team, KeyID: p.KeyID, User: p.Owner}, bound)
 	if err != nil {
 		return req, nil, err
@@ -66,6 +71,10 @@ func ReserveBudget(req *http.Request, g *governance.Governor, p keystore.Princip
 }
 
 func (a *budgetAttempt) finish(actual *int64, complete bool) {
+	if a.shared != nil {
+		a.finishShared(governance.SharedSettlement{CostMicroUSD: actual, Complete: complete})
+		return
+	}
 	if !a.done.CompareAndSwap(false, true) {
 		return
 	}
@@ -79,6 +88,13 @@ func (a *budgetAttempt) finish(actual *int64, complete bool) {
 }
 
 func BudgetStatus(err error) int {
+	var shared *governance.SharedDenial
+	if errors.As(err, &shared) {
+		return shared.Status
+	}
+	if errors.Is(err, governance.ErrSharedUnavailable) {
+		return http.StatusServiceUnavailable
+	}
 	if errors.Is(err, errMultiplicity) {
 		return http.StatusBadRequest
 	}
@@ -93,6 +109,10 @@ func BudgetStatus(err error) int {
 func SettleBudget(req *http.Request, _ *audit.CostRef, usage *schema.Usage, complete bool) {
 	a, _ := req.Context().Value(budgetKey{}).(*budgetAttempt)
 	if a == nil {
+		return
+	}
+	if a.shared != nil {
+		a.settleShared(usage, complete)
 		return
 	}
 	u, exact, invalid := authorityUsage(usage, a.window)

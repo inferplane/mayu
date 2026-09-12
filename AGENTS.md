@@ -1,4 +1,4 @@
-<!-- generated-by: co-agent · source: CLAUDE.md · claude-md-sha: 07d9ebadf7b3 · generated-at: 2026-09-11 · DO NOT EDIT — edit CLAUDE.md then run /co-agent sync-context -->
+<!-- generated-by: co-agent · source: CLAUDE.md · claude-md-sha: b4dc0c1468d6 · generated-at: 2026-09-12 · DO NOT EDIT — edit CLAUDE.md then run /co-agent sync-context -->
 > You are an external reviewer for this repo — project context below, distilled
 > from CLAUDE.md. This file is shared verbatim by Kiro, Codex, and Agy (not a
 > per-AI copy).
@@ -146,9 +146,18 @@ credentials, or a real IdP (httptest fakes only).
   fences prior journal users. UTC windows come from database time. Snapshot
   validation and journal installation precede policy publication. No memory
   fallback, hidden transport retries, or fabricated actual cost.
-- Shared gateway key storage, rate limits and token quotas remain node-local.
-  Suppress those tracked limitations as new findings, but flag claims that this
-  monetary profile alone provides interchangeable shared-gateway HA.
+- ADR-046 adds explicit shared Postgres key/governance mode. It synchronously
+  resolves key+team snapshots and atomically reserves every applicable RPM/TPM,
+  token quota and money scope. Policy money shares ADR-045 authority_accounts;
+  separate authority namespaces or stale routing generations refuse.
+- Shared bootstrap uses immutable original declaration fingerprints. Admin edits
+  and revocation/deletion survive unchanged restarts. Conditional revoke checks
+  the authorized snapshot. Imports retain full hashes and revoked rows.
+- Shared mode requires HA Postgres and fails closed on DB loss; it is not the
+  disconnected node-local profile. Counts remain local/200. Mutable SQLite
+  provider topology is rejected; common file/ConfigMap topology is supported.
+- Default/local rate and key stores remain local. Do not mistake the shared
+  profile's explicit DB dependency for a change to ADR-045 node-local admission.
 
 ## Review checklist
 

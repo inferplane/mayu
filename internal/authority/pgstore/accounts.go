@@ -18,7 +18,10 @@ type accountKey struct{ key, window string }
 
 type account struct {
 	hardEncumbered, hardConsumed, softConsumed int64
-	acceptsMeters, frozen                      bool
+	// softPending is the in-flight subset of softConsumed. It remains
+	// admission liability but cannot activate an accounting-only soft tier.
+	softPending           int64
+	acceptsMeters, frozen bool
 }
 
 func orderedKeys[V any](items map[accountKey]V) []accountKey {
@@ -65,9 +68,9 @@ func lockAccounts(ctx context.Context, tx pgx.Tx, owner string, req policy.Autho
 			}
 		}
 		a := &account{}
-		err := tx.QueryRow(ctx, `SELECT hard_encumbered,hard_consumed,soft_consumed,accepts_meters,frozen
+		err := tx.QueryRow(ctx, `SELECT hard_encumbered,hard_consumed,soft_consumed,soft_pending,accepts_meters,frozen
 			FROM authority_accounts WHERE budget_key=$1 AND window_id=$2 FOR UPDATE`, k.key, k.window).
-			Scan(&a.hardEncumbered, &a.hardConsumed, &a.softConsumed, &a.acceptsMeters, &a.frozen)
+			Scan(&a.hardEncumbered, &a.hardConsumed, &a.softConsumed, &a.softPending, &a.acceptsMeters, &a.frozen)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, errors.New("authority postgres: unknown historical budget window")
 		}
@@ -88,10 +91,13 @@ func persistAccounts(ctx context.Context, tx pgx.Tx, accounts map[accountKey]*ac
 		if _, err := checkedAdd(a.hardEncumbered, a.softConsumed); err != nil {
 			return err
 		}
+		if a.softPending < 0 || a.softPending > a.softConsumed {
+			return errors.New("authority postgres: inconsistent pending soft accounting")
+		}
 		if _, err := tx.Exec(ctx, `UPDATE authority_accounts
-			SET hard_encumbered=$3,hard_consumed=$4,soft_consumed=$5,accepts_meters=$6,frozen=$7
+			SET hard_encumbered=$3,hard_consumed=$4,soft_consumed=$5,accepts_meters=$6,frozen=$7,soft_pending=$8
 			WHERE budget_key=$1 AND window_id=$2`, k.key, k.window,
-			a.hardEncumbered, a.hardConsumed, a.softConsumed, a.acceptsMeters, a.frozen); err != nil {
+			a.hardEncumbered, a.hardConsumed, a.softConsumed, a.acceptsMeters, a.frozen, a.softPending); err != nil {
 			return databaseError("persist budget account", err)
 		}
 	}
@@ -117,10 +123,16 @@ func activeTiers(ctx context.Context, tx pgx.Tx, docs []v1alpha1.GovernancePolic
 			}
 			a := accounts[accountKey{b.Key, b.WindowID}]
 			consumed := a.hardConsumed
+			soft := a.softConsumed
 			if b.HardCap {
 				consumed = a.hardEncumbered
+			} else {
+				// Soft routing meters observe terminal spend/uncertainty,
+				// not an in-flight conservative bound. A hard policy still
+				// judges every commitment, including pending soft bookings.
+				soft -= a.softPending
 			}
-			percent := tier.UtilizedPercent(consumed, a.softConsumed, b.LimitMicroUSD)
+			percent := tier.UtilizedPercent(consumed, soft, b.LimitMicroUSD)
 			threshold := 0
 			for _, candidate := range tr.Tiers {
 				if percent >= candidate.ThresholdPercent {

@@ -91,13 +91,14 @@ type AuthorityDenial struct {
 }
 
 type AuthorityResponse struct {
-	Protocol   string                      `json:"protocol"`
-	ServerTime time.Time                   `json:"serverTime"`
-	Generation string                      `json:"generation"`
-	Policies   []v1alpha1.GovernancePolicy `json:"policies"`
-	Budgets    []AuthorityBudget           `json:"budgets"`
-	Grants     []AuthorityGrant            `json:"grants,omitempty"`
-	ReportAcks []AuthorityAck              `json:"reportAcks,omitempty"`
-	MeterAcks  []AuthorityAck              `json:"meterAcks,omitempty"`
-	Denied     []AuthorityDenial           `json:"denied,omitempty"`
+	AuthorityID string                      `json:"authorityID,omitempty"`
+	Protocol    string                      `json:"protocol"`
+	ServerTime  time.Time                   `json:"serverTime"`
+	Generation  string                      `json:"generation"`
+	Policies    []v1alpha1.GovernancePolicy `json:"policies"`
+	Budgets     []AuthorityBudget           `json:"budgets"`
+	Grants      []AuthorityGrant            `json:"grants,omitempty"`
+	ReportAcks  []AuthorityAck              `json:"reportAcks,omitempty"`
+	MeterAcks   []AuthorityAck              `json:"meterAcks,omitempty"`
+	Denied      []AuthorityDenial           `json:"denied,omitempty"`
 }

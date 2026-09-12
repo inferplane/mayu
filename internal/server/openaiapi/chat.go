@@ -203,8 +203,8 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// Team-record fresh lookup (D6/D7, ADR-016 pattern): one call reused below
 	// both for the region filter and the guardrail override.
 	var teamRec keystore.TeamRecord
-	if h.teamPolicy != nil {
-		if rec, ok := h.teamPolicy(p.Team); ok {
+	if h.teamPolicy != nil || p.TeamSnapshotLoaded {
+		if rec, ok := requestpolicy.TeamSnapshot(p, h.teamPolicy); ok {
 			teamRec = rec
 		}
 	}
@@ -337,6 +337,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		reservedReq, finishBudget, reserveErr := requestpolicy.ReserveBudget(req, h.gov, p, ct, st, raw)
 		if reserveErr != nil {
 			status := requestpolicy.BudgetStatus(reserveErr)
+			requestpolicy.BudgetErrorHeaders(w, reserveErr)
 			w.Header().Set("Retry-After", "1")
 			h.audit(req.Context(), p, model, ct.Upstream, &audit.OutcomeRef{Status: status}, traceID)
 			writeErr(w, status, "insufficient_quota", "budget authority unavailable")

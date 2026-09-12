@@ -30,6 +30,7 @@ type Router struct {
 	// SetTierGate). nil = no substitution.
 	tierGate             func(p keystore.Principal) map[string]string
 	routingPolicies      func(team, user string) ([]*policy.Policy, error)
+	routingSnapshot      func(team, user string) ([]*policy.Policy, string, error)
 	requestInspector     sensitivity.Inspector
 	requestRedactor      RequestRedactor
 	budgetConstraintGate func(keystore.Principal) map[string]string
@@ -134,6 +135,10 @@ func (r *Router) SetTierGate(gate func(p keystore.Principal) map[string]string) 
 // disables routing policies. Like SetPolicyGate, assignment is startup-only.
 func (r *Router) SetRoutingPolicyLookup(lookup func(team, user string) ([]*policy.Policy, error)) {
 	r.routingPolicies = lookup
+}
+
+func (r *Router) SetRoutingPolicySnapshot(lookup func(team, user string) ([]*policy.Policy, string, error)) {
+	r.routingSnapshot = lookup
 }
 
 // SetRequestInspector overrides local inspection. nil uses the stateless

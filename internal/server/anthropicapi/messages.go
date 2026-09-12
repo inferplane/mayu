@@ -201,8 +201,8 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// both for the region filter and the guardrail override — a team with no
 	// record is indistinguishable from a record with no overrides (zero value).
 	var teamRec keystore.TeamRecord
-	if h.teamPolicy != nil {
-		if rec, ok := h.teamPolicy(p.Team); ok {
+	if h.teamPolicy != nil || p.TeamSnapshotLoaded {
+		if rec, ok := requestpolicy.TeamSnapshot(p, h.teamPolicy); ok {
 			teamRec = rec
 		}
 	}
@@ -366,6 +366,7 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		reservedReq, finishBudget, reserveErr := requestpolicy.ReserveBudget(req, h.gov, p, ct, st, raw)
 		if reserveErr != nil {
 			status := requestpolicy.BudgetStatus(reserveErr)
+			requestpolicy.BudgetErrorHeaders(w, reserveErr)
 			w.Header().Set("Retry-After", "1")
 			h.audit(req.Context(), p, model, ct.Upstream, &audit.OutcomeRef{Status: status}, false, traceID)
 			writeErr(w, status, "insufficient_quota", "budget authority unavailable")

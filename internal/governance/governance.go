@@ -119,11 +119,13 @@ type QuotaUsage struct {
 }
 
 type UsageStatus struct {
-	Team       string       `json:"team"`
-	TeamBudget *BudgetUsage `json:"team_budget,omitempty"`
-	TeamQuota  *QuotaUsage  `json:"team_quota,omitempty"`
-	KeyBudget  *BudgetUsage `json:"key_budget,omitempty"`
-	KeyQuota   *QuotaUsage  `json:"key_quota,omitempty"`
+	EnforcementMode string        `json:"enforcement_mode,omitempty"`
+	SharedLimits    []SharedLimit `json:"shared_limits,omitempty"`
+	Team            string        `json:"team"`
+	TeamBudget      *BudgetUsage  `json:"team_budget,omitempty"`
+	TeamQuota       *QuotaUsage   `json:"team_quota,omitempty"`
+	KeyBudget       *BudgetUsage  `json:"key_budget,omitempty"`
+	KeyQuota        *QuotaUsage   `json:"key_quota,omitempty"`
 	// TeamBudgetDay/KeyBudgetDay report the calendar-DAY counters. Appended,
 	// never folded into the fields above: repurposing team_budget's window
 	// string would silently change what every existing /v1/usage client
@@ -146,6 +148,7 @@ type UsageStatus struct {
 // (no live/config import) and billing a request on the same generation it
 // resolved on (ADR-006).
 type Governor struct {
+	shared          SharedAuthority
 	authority       BudgetAuthority
 	teams           map[string]TeamPolicy
 	lookup          func(team string) (TeamPolicy, bool)                     // D3/ADR-016: optional dynamic override, checked before teams
@@ -323,6 +326,12 @@ func mustDenyBudget(dec budget.Decision, onExceeded string) bool {
 // scopes the key-level counters; Subject.User, when set and a UserPolicy is
 // found, adds a third scope (see below).
 func (g *Governor) PreCheck(s Subject, kp KeyPolicy, estimateTokens int64) GovDecision {
+	if g.HasSharedAuthority() {
+		// Every resource is reserved atomically at the per-attempt seam, with
+		// current DB policy and key/team metadata. Local buckets are not a
+		// second authority and must neither double-charge nor loosen it.
+		return GovDecision{Allowed: true}
+	}
 	// Budget-lease gate (ADR-034) first: an expired hard-cap lease means the
 	// global budget can no longer be verified locally — fail closed before
 	// charging any rate/quota counter.
@@ -480,6 +489,9 @@ func budgetExceededMessage(kind string, resetsAt time.Time, loc *time.Location, 
 }
 
 func (g *Governor) UsageOf(s Subject, kp KeyPolicy) UsageStatus {
+	if g.HasSharedAuthority() {
+		return UsageStatus{Team: s.Team, EnforcementMode: "shared"}
+	}
 	u := UsageStatus{Team: s.Team}
 	if p, ok := g.policyOf(s.Team); ok {
 		if p.BudgetMicrosPerMonth > 0 {
@@ -590,6 +602,17 @@ func (g *Governor) UsageOf(s Subject, kp KeyPolicy) UsageStatus {
 // Key-level spend is deliberately NOT added to /metrics: metric labels are
 // config-bounded (CLAUDE.md) and must never carry a key_id.
 func (g *Governor) Settle(s Subject, kp KeyPolicy, provider, model string, u pricing.Usage, table *pricing.Table, estimatedTokens int64) (costMicros int64, pricingMissing bool) {
+	if g.HasSharedAuthority() {
+		if table == nil {
+			return 0, true
+		}
+		cost, err := table.CostUSDMicrosChecked(provider, model, u)
+		if err != nil {
+			return 0, true
+		}
+		g.metrics.AddBudgetSpend(s.Team, model, "total", float64(cost)/1e6)
+		return cost, false
+	}
 	p, _ := g.policyOf(s.Team)
 	// Total tokens actually processed, including cache tiers — the same
 	// figure both the daily quota debit and the TPM true-up below use.

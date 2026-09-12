@@ -4,6 +4,8 @@ Status: Accepted implementation design, 2026-09-11.
 Extends ADR-034/044 and narrows the shared-state direction in ADR-013 to
 Postgres-authoritative monetary budgets for node-local fleets.
 
+Shared-profile extension: [ADR-046](ADR-046-shared-governance.md) adds synchronous shared keys/rate/quota admission using the same policy money accounts. The local/no-inference-DB statements below describe the ADR-045 node-local profile.
+
 ## Decision
 
 Postgres reserves the full amount of each grant before returning it. Independent

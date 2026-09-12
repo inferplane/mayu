@@ -67,8 +67,10 @@ spec:
                     required: ["name", "failurePolicy"]
                     x-kubernetes-validations:
                       # Exactly one rule kind — mirrors internal/policy.
-                      - rule: "[has(self.budget), has(self.routing), has(self.modelAccess), has(self.rate), has(self.sensitiveData)].filter(x, x).size() == 1"
-                        message: "exactly one of budget, routing, modelAccess, rate, or sensitiveData must be set"
+                      - rule: "[has(self.budget), has(self.routing), has(self.modelAccess), has(self.rate), has(self.sensitiveData), has(self.tokenQuota)].filter(x, x).size() == 1"
+                        message: "exactly one of budget, routing, modelAccess, rate, sensitiveData, or tokenQuota must be set"
+                      - rule: "!has(self.tokenQuota) || self.failurePolicy == 'FailClosed'"
+                        message: "tokenQuota requires FailClosed"
                       # A hard-cap budget rule must fail closed (ADR-032).
                       - rule: "!has(self.budget) || !(has(self.budget.hardCap) && self.budget.hardCap) || self.failurePolicy == 'FailClosed'"
                         message: "a hard-cap budget rule must be FailClosed"
@@ -253,6 +255,17 @@ spec:
                             items:
                               type: string
                               minLength: 1
+                      tokenQuota:
+                        type: object
+                        required: ["limitTokens", "period"]
+                        properties:
+                          limitTokens:
+                            type: integer
+                            format: int64
+                            minimum: 1
+                          period:
+                            type: string
+                            enum: ["CalendarDay", "CalendarMonth"]
                       rate:
                         type: object
                         x-kubernetes-validations:

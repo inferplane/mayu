@@ -54,10 +54,11 @@ type RequestRoutingInput struct {
 // Decision.SelectedModel names the first planned target; attempts use ct.Model.
 // On error Model/Chain/Decision.SelectedModel are empty; Decision describes denial.
 type RequestRoutingResult struct {
-	Model    string
-	Chain    []ChainTarget
-	State    *live.State
-	Decision RoutingDecision
+	PolicyGeneration string `json:"-"`
+	Model            string
+	Chain            []ChainTarget
+	State            *live.State
+	Decision         RoutingDecision
 	// MaskRequired is an obligation; SanitizedBody is populated only after
 	// successful redaction and independent complete/zero-signal reinspection.
 	// Callers must use SanitizedBody for forwarding AND regenerate Parsed.
@@ -148,9 +149,13 @@ func (r *Router) RouteRequest(ctx context.Context, in RequestRoutingInput) (Requ
 	// Lookup errors must be checked even for count-only/otherwise ineligible
 	// requests. Never expose arbitrary dependency error text in a routing error.
 	var docs []*policy.Policy
-	if r.routingPolicies != nil {
+	if r.routingPolicies != nil || r.routingSnapshot != nil {
 		var err error
-		docs, err = r.routingPolicies(in.Principal.Team, in.Principal.Owner)
+		if r.routingSnapshot != nil {
+			docs, out.PolicyGeneration, err = r.routingSnapshot(in.Principal.Team, in.Principal.Owner)
+		} else {
+			docs, err = r.routingPolicies(in.Principal.Team, in.Principal.Owner)
+		}
 		if err != nil {
 			var cause error
 			if errors.Is(err, policy.ErrRoutingPolicyRejected) {
