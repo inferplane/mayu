@@ -94,8 +94,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	var team keystore.TeamRecord
-	if h.teamPolicy != nil {
-		team, _ = h.teamPolicy(p.Team)
+	if h.teamPolicy != nil || p.TeamSnapshotLoaded {
+		team, _ = requestpolicy.TeamSnapshot(p, h.teamPolicy)
 	}
 	chain = router.FilterModelAllowed(chain, func(m string) bool { return h.r.Allows(p, m) })
 	if len(team.AllowedRegions) > 0 {
@@ -200,8 +200,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				return
 			}
 		}
-		attemptReq := req.WithContext(audit.WithRoutingAttempt(req.Context(), ct.Model, ct.ProviderName, ct.DataBoundary))
-		attemptReq = requestpolicy.WithAffinityAttempt(attemptReq, h.r, result.AffinityToken, ct)
 		headers := req.Header.Clone()
 		tracing.Inject(req.Context(), headers)
 		pr := &providers.ProxyRequest{
@@ -226,6 +224,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				w.Header().Set("x-inferplane-model-fallback", ct.Model)
 			}
 		}
+		reservedReq, finishBudget, reserveErr := requestpolicy.ReserveBudget(req, h.gov, p, ct, st, raw)
+		if reserveErr != nil {
+			status := requestpolicy.BudgetStatus(reserveErr)
+			requestpolicy.BudgetErrorHeaders(w, reserveErr)
+			h.denied(req, p, model, status, "budget_authority_unavailable", start)
+			writeError(w, status, "insufficient_quota", "budget authority unavailable")
+			return
+		}
+		defer finishBudget()
+		attemptReq := reservedReq.WithContext(audit.WithRoutingAttempt(reservedReq.Context(), ct.Model, ct.ProviderName, ct.DataBoundary))
+		attemptReq = requestpolicy.WithAffinityAttempt(attemptReq, h.r, result.AffinityToken, ct)
 		a := attempt{h: h, req: attemptReq, principal: p, target: ct, proxy: pr, table: table, started: start, estimate: estimate, inputBody: raw}
 		h.started(a)
 		last := i == len(chain)-1
@@ -235,6 +244,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		} else {
 			retry = a.complete(w, last)
 		}
+		finishBudget()
 		if !retry {
 			return
 		}

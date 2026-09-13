@@ -269,6 +269,7 @@ func (p *provider) completeConverse(ctx context.Context, req *providers.ProxyReq
 		Usage: usageWithCache(req.Upstream, in, out,
 			cresp.CacheReadTokens, cresp.CacheWrite5m, cresp.CacheWrite1h, cresp.CacheWriteTotal),
 	}
+	resp.Usage.AccountingUncertain = cresp.UsageUncertain
 	rawBody, _ := json.Marshal(resp)
 	return &providers.ProxyResponse{StatusCode: 200, RawBody: rawBody, Parsed: resp}, nil
 }
@@ -312,6 +313,7 @@ func (p *provider) streamConverse(ctx context.Context, req *providers.ProxyReque
 		var usageIn, usageOut int64
 		var usageCacheRead, usageWrite5m, usageWrite1h, usageWriteTotal int64
 		usageSet := false
+		usageUncertain := false
 
 		finish := func() {
 			if blockOpen {
@@ -335,6 +337,7 @@ func (p *provider) streamConverse(ctx context.Context, req *providers.ProxyReque
 			}
 			delta, _ := json.Marshal(map[string]any{"stop_reason": stopReason, "stop_sequence": nil})
 			u := usageWithCache(req.Upstream, usageIn, usageOut, usageCacheRead, usageWrite5m, usageWrite1h, usageWriteTotal)
+			u.AccountingUncertain = !usageSet || !stopReasonSet || usageUncertain
 			if !emit(&schema.ChatChunk{Type: "message_delta", Delta: delta, Usage: u}) {
 				return
 			}
@@ -400,6 +403,7 @@ func (p *provider) streamConverse(ctx context.Context, req *providers.ProxyReque
 					return
 				}
 			case eventUsage:
+				usageUncertain = usageUncertain || e.UsageUncertain
 				usageIn, usageOut = e.InputTokens, e.OutputTokens
 				usageCacheRead, usageWriteTotal = e.CacheReadTokens, e.CacheWriteTotal
 				usageWrite5m, usageWrite1h = e.CacheWrite5m, e.CacheWrite1h

@@ -33,3 +33,10 @@ preserves native bytes except the narrow model rewrite, refuses missing usage,
 and disables credential-bearing redirects. Shared `internal/responses` codecs
 handle observation and stateless cross-protocol adaptation; the new ingress
 applies every policy/identity/admission gate before provider calls.
+
+## Budget attempt ownership (ADR-045)
+
+Bedrock's four generation SDK operations use `aws.NopRetryer`. Gateway fallback
+owns attempts and their reservations; hidden SDK retries after a request body was
+accepted would lose uncertain spend. This applies in all profiles, including
+legacy mode. Health probes remain non-generation operations.

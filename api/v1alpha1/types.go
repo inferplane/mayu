@@ -97,6 +97,14 @@ type Rule struct {
 	ModelAccess   *ModelAccessRule   `json:"modelAccess,omitempty"`
 	Rate          *RateRule          `json:"rate,omitempty"`
 	SensitiveData *SensitiveDataRule `json:"sensitiveData,omitempty"`
+	TokenQuota    *TokenQuotaRule    `json:"tokenQuota,omitempty"`
+}
+
+// TokenQuotaRule is a global calendar token cap. Only the shared-governance
+// profile can enforce it; other data planes explicitly reject the document.
+type TokenQuotaRule struct {
+	LimitTokens int64        `json:"limitTokens"`
+	Period      BudgetPeriod `json:"period"`
 }
 
 // BudgetPeriod is the calendar window a budget rule's limit applies to. It is

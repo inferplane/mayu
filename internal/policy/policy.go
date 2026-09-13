@@ -109,6 +109,12 @@ type Rule struct {
 	ModelAccess   *ModelAccess
 	SensitiveData *SensitiveData
 	Rate          *Rate
+	TokenQuota    *TokenQuota
+}
+
+type TokenQuota struct {
+	LimitTokens int64
+	Period      v1alpha1.BudgetPeriod
 }
 
 // Budget is the internal form of a budget rule. All amounts are integer
@@ -250,17 +256,26 @@ func FromV1Alpha1(doc *v1alpha1.GovernancePolicy) (*Policy, error) {
 			return nil, reject(wr.Name, fmt.Sprintf("unknown failurePolicy %q", wr.FailurePolicy))
 		}
 		kinds := 0
-		for _, set := range []bool{wr.Budget != nil, wr.Routing != nil, wr.ModelAccess != nil, wr.Rate != nil, wr.SensitiveData != nil} {
+		for _, set := range []bool{wr.Budget != nil, wr.Routing != nil, wr.ModelAccess != nil, wr.Rate != nil, wr.SensitiveData != nil, wr.TokenQuota != nil} {
 			if set {
 				kinds++
 			}
 		}
 		if kinds != 1 {
-			return nil, reject(wr.Name, "exactly one of budget, routing, modelAccess, rate, or sensitiveData must be set")
+			return nil, reject(wr.Name, "exactly one of budget, routing, modelAccess, rate, sensitiveData, or tokenQuota must be set")
 		}
 
 		r := Rule{Name: wr.Name, FailurePolicy: wr.FailurePolicy}
 		switch {
+		case wr.TokenQuota != nil:
+			q := wr.TokenQuota
+			if q.LimitTokens <= 0 || (q.Period != v1alpha1.PeriodCalendarDay && q.Period != v1alpha1.PeriodCalendarMonth) {
+				return nil, reject(wr.Name, "tokenQuota requires positive limitTokens and CalendarDay or CalendarMonth period")
+			}
+			if wr.FailurePolicy != v1alpha1.FailClosed {
+				return nil, reject(wr.Name, "tokenQuota requires FailClosed")
+			}
+			r.TokenQuota = &TokenQuota{LimitTokens: q.LimitTokens, Period: q.Period}
 		case wr.SensitiveData != nil:
 			sd, err := sensitiveDataFromV1Alpha1(wr, reject)
 			if err != nil {

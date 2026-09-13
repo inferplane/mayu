@@ -44,9 +44,10 @@ const maxRejections = 100
 
 // Server is the control-plane distribution state and its HTTP handlers.
 type Server struct {
-	paths    []string
-	token    string // shared bearer token; "" = no auth (loopback-only deployments)
-	authOpts authOptions
+	authority BudgetAuthorityBackend
+	paths     []string
+	token     string // shared bearer token; "" = no auth (loopback-only deployments)
+	authOpts  authOptions
 
 	mu         sync.Mutex
 	wire       []v1alpha1.GovernancePolicy
@@ -368,6 +369,14 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Dataplane == "" {
 		http.Error(w, `{"error":"dataplane id required"}`, http.StatusBadRequest)
+		return
+	}
+	if s.authority != nil {
+		s.authoritySync(w, r, req)
+		return
+	}
+	if req.Authority != nil {
+		http.Error(w, `{"error":"server does not support durable budget authority"}`, http.StatusConflict)
 		return
 	}
 	// Validate the entire batch before registration, pruning, accounting, or

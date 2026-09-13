@@ -132,8 +132,11 @@ percentage is promised without measurements.
 Mayu performs classification, policy inspection and pin lookup locally.
 Backend failover is constrained by the same PII, capability, region and cost
 limits. Replicate approved backends and keep control-plane management off the
-inference path. For HA deployment boundaries and the still-unimplemented durable
-shared-authority migration, see [ADR-044](decisions/ADR-044-adaptive-coding-gateway.md).
+inference path. Global monetary authority now has an opt-in Postgres ledger and
+durable node journals; see [durable budgets](durable-budgets.md) and
+[ADR-045](decisions/ADR-045-durable-budget-authority.md). For shared keys and global rate/token quotas, use the explicit
+[shared gateway profile](shared-governance.md), which requires an available HA
+Postgres service. The node-local profile retains its existing rate/key limits.
 
 Regular repository tests use fake providers and disposable stores. An optional
 installed-client check performs a real Codex CLI tool round trip against local

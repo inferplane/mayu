@@ -203,8 +203,8 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// Team-record fresh lookup (D6/D7, ADR-016 pattern): one call reused below
 	// both for the region filter and the guardrail override.
 	var teamRec keystore.TeamRecord
-	if h.teamPolicy != nil {
-		if rec, ok := h.teamPolicy(p.Team); ok {
+	if h.teamPolicy != nil || p.TeamSnapshotLoaded {
+		if rec, ok := requestpolicy.TeamSnapshot(p, h.teamPolicy); ok {
 			teamRec = rec
 		}
 	}
@@ -334,7 +334,16 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				w.Header().Set("x-inferplane-model-fallback", ct.Model)
 			}
 		}
-		attemptReq := req.WithContext(audit.WithRoutingAttempt(req.Context(), ct.Model, ct.ProviderName, ct.DataBoundary))
+		reservedReq, finishBudget, reserveErr := requestpolicy.ReserveBudget(req, h.gov, p, ct, st, raw)
+		if reserveErr != nil {
+			status := requestpolicy.BudgetStatus(reserveErr)
+			requestpolicy.BudgetErrorHeaders(w, reserveErr)
+			h.audit(req.Context(), p, model, ct.Upstream, &audit.OutcomeRef{Status: status}, traceID)
+			writeErr(w, status, "insufficient_quota", "budget authority unavailable")
+			return
+		}
+		defer finishBudget() // also retain authority if a provider panics
+		attemptReq := reservedReq.WithContext(audit.WithRoutingAttempt(reservedReq.Context(), ct.Model, ct.ProviderName, ct.DataBoundary))
 		attemptReq = requestpolicy.WithAffinityAttempt(attemptReq, h.r, result.AffinityToken, ct)
 		var retriable bool
 		if stream {
@@ -342,6 +351,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		} else {
 			retriable = h.serveComplete(w, attemptReq, ct.Provider, pr, p, ct.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, crossModelNext, start, table)
 		}
+		finishBudget()
 		if !retriable {
 			return
 		}
@@ -413,6 +423,7 @@ func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, pr
 	if resp.Parsed != nil {
 		usage = usageRef(resp.Parsed.Usage)
 		cost = h.settle(p, providerName, upstream, resp.Parsed.Usage, table, estimateTokens(pr.RawBody))
+		requestpolicy.SettleBudget(req, cost, resp.Parsed.Usage, resp.StatusCode/100 == 2)
 		h.observeTokens(model, providerName, p.Team, resp.Parsed.Usage)
 	}
 	// Body capture (D4, ADR-018): copy-only, AFTER the response was already
@@ -496,6 +507,7 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 			// mid-flight skipped settle() entirely and everything already
 			// streamed was free, with no pricing_missing flag to show it.
 			partialCost := h.settle(p, providerName, upstream, lastUsage, table, estimateTokens(pr.RawBody))
+			requestpolicy.SettleBudget(req, partialCost, lastUsage, false)
 			// …and count them, on the same usage settle() just billed (see
 			// messages.go's twin: metering only the clean path left the token
 			// counters below the billed spend for every interrupted stream).
@@ -544,6 +556,7 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 		flusher.Flush()
 	}
 	cost := h.settle(p, providerName, upstream, lastUsage, table, estimateTokens(pr.RawBody))
+	requestpolicy.SettleBudget(req, cost, lastUsage, streamCompleted && !streamFailed)
 	if streamCompleted && !streamFailed && lastUsage != nil {
 		requestpolicy.RecordSuccess(req)
 	}

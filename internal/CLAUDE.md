@@ -132,3 +132,26 @@ meter separately from real caps. CP retains reports without issuing that soft
 lease. Tier arithmetic saturates with integers and uses referenced period keys.
 Rejected strict/privacy distribution gates affected routing until valid recovery.
 These changes do not implement durable financial authority or shared-state HA.
+
+## Durable monetary authority (ADR-045)
+
+The legacy lease/store descriptions above remain applicable only outside durable
+mode. `authority/pgstore` reserves globally in the same Postgres schema as policy;
+`authority/local` commits per-attempt reservations to a private SQLite journal.
+The syncer installs a verified financial snapshot before publishing policy; stale
+or incompatible snapshots never mark readiness successful. User scopes survive
+budget and tier distribution. Unknown or incomplete usage retains the bound;
+checked arithmetic and declared usage bounds guard refunds. Process restart burns
+old OPEN grants, never restores credit. No inference-time DB call is added.
+
+## Shared gateway profile (ADR-046)
+
+`governance_store: {type: postgres}` paired with Postgres key_store enables
+synchronous shared identity and atomic resource admission. These statements
+supersede the local-only descriptions above for that explicit profile. The
+requestpolicy seam reserves per attempt; local PreCheck/Settle counters are
+bypassed. Fresh key/team revision and routing policy generation must match the DB.
+Shared policy money uses authority_accounts alongside node-local grants. Soft
+pending reservations remain liabilities but do not prematurely latch soft tiers.
+Counts are always local; DB failures deny generation. Mutable SQLite topology is
+unsupported. Separate per-replica audit segments are still required.

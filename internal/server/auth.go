@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -25,6 +26,10 @@ func KeyAuth(store keystore.Store, next http.Handler) http.Handler {
 		}
 		p, err := store.Resolve(r.Context(), key)
 		if err != nil {
+			if errors.Is(err, keystore.ErrStoreUnavailable) {
+				storeUnavailable(w, r)
+				return
+			}
 			// 401 either way (never reveal which keys exist) — but a distinct
 			// message for "expired" lets a CLI-minted key holder know to re-run
 			// `mayu login` rather than suspect a typo. Claude Code's
@@ -39,4 +44,28 @@ func KeyAuth(store keystore.Store, next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r.WithContext(principal.With(r.Context(), p)))
 	})
+}
+
+func storeUnavailable(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method == http.MethodPost && r.URL.Path == "/v1/messages/count_tokens" {
+		_ = json.NewEncoder(w).Encode(map[string]int{"input_tokens": 0})
+		return
+	}
+	if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/model/") && strings.HasSuffix(r.URL.Path, "/count-tokens") {
+		_ = json.NewEncoder(w).Encode(map[string]int{"inputTokens": 0})
+		return
+	}
+	w.Header().Set("Retry-After", "1")
+	if strings.HasPrefix(r.URL.Path, "/model/") {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"__type": "ServiceUnavailableException", "message": "identity store unavailable"})
+		return
+	}
+	if r.URL.Path == "/v1/chat/completions" || r.URL.Path == "/v1/responses" || r.URL.Path == "/v1/usage" {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"type": "server_error", "code": "store_unavailable", "message": "identity store unavailable"}})
+		return
+	}
+	writeAnthropicError(w, http.StatusServiceUnavailable, "api_error", "identity store unavailable")
 }

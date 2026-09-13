@@ -1,6 +1,6 @@
 // Package keystore stores virtual API keys (SHA-256 hashed) and the team /
 // model-allow-list metadata behind them. Store is the swappable backend
-// interface; M3 ships SQLite, Postgres is the HA path (v0.2). Only the key
+// interface; SQLite is the default, Postgres serves shared gateways. Only the key
 // HASH is persisted — the plaintext is shown once at Create and never stored.
 package keystore
 
@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/base32"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"time"
 )
@@ -35,6 +36,36 @@ type Principal struct {
 	Team          string
 	AllowedModels []string // "*" allows all; else explicit allow-list (§5.1 policy)
 	KeyOptions
+	// SharedRevision and the nullable team snapshot are internal authorization
+	// evidence. A loaded nil snapshot means the team had no database record.
+	// They must never appear in the admin API or other JSON output.
+	SharedRevision     string      `json:"-"`
+	TeamSnapshot       *TeamRecord `json:"-"`
+	TeamSnapshotLoaded bool        `json:"-"`
+}
+
+// ErrStoreUnavailable deliberately contains no driver error, DSN, or row data.
+// Shared gateways fail closed on this error and can expose a retryable failure.
+var ErrStoreUnavailable = errors.New("keystore: store unavailable")
+
+// ErrSnapshotChanged means an authorization snapshot, original seed declaration,
+// or imported row conflicts with stored state. Authorization must be renewed;
+// seed/import conflicts require explicit reconciliation.
+var ErrSnapshotChanged = errors.New("keystore: snapshot changed")
+
+// SeedKey declares a bootstrap identity. Only its hash is persisted.
+type SeedKey struct {
+	Plaintext     string
+	Team          string
+	AllowedModels []string
+	Options       KeyOptions
+}
+
+// ImportResult counts newly inserted records; an identical retry returns zero.
+// It intentionally carries no hashes, IDs, or plaintext.
+type ImportResult struct {
+	Keys  int
+	Teams int
 }
 
 // Allows reports whether this principal may use the given model.

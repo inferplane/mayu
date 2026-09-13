@@ -86,3 +86,24 @@ ADR-044 adds `sensitiveData.onDetected: Mask`, optional context
 Strict tiers allow threshold 100; their soft budget reference is an accounting
 threshold, not a second admission lease. Local session hints cannot authorize
 access, and every pin/attempt is revalidated. See [fields and Codex setup](../adaptive-routing.md).
+
+### Durable budget heartbeat (ADR-045)
+
+`POST /v1alpha1/sync` negotiates `authority.protocol: escrow-v1` when
+`INFERPLANED_DURABLE_BUDGETS=true`. It requires the non-JWT machine bearer;
+console OIDC cannot issue budget grants. The response carries a complete policy
+bundle, database-owned window definitions, grants and report/meter acknowledgments.
+Legacy requests receive 409; durable clients reject legacy or invalid responses.
+Each `ActiveTier` preserves team/user scope. `/readyz` includes a live authority
+DB check. See [wire contract](../../internal/authority/pgstore/README.md) and
+[operator configuration](../durable-budgets.md).
+
+### Shared gateway profile (ADR-046)
+
+`key_store.type: postgres` plus `governance_store.type: postgres` enables shared
+identity and atomic resource admission. The heartbeat carries an authority
+namespace; shared gateways verify it and request no local grants. User-scoped rate
+and `tokenQuota` day/month rules require this profile. `GET /v1/usage` returns
+`enforcement_mode: shared` and subject-scoped `shared_limits`. Key CLI commands
+accept `--config`; `keys import --sqlite ... --config ...` preserves raw identities
+and revocation tombstones. See [shared governance](../shared-governance.md).
