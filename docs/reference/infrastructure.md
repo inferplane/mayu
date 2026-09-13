@@ -12,15 +12,15 @@ wires an optional IRSA ServiceAccount for Bedrock.
 | Docker ignore | `.dockerignore` | Excludes tests/docs/charts from the build context |
 | Helm chart | `charts/inferplane/` | Deployment, Service (data+admin), ServiceAccount, ConfigMap, optional policies ConfigMap (`/etc/inferplane/policies`, live-reloaded — ADR-035), optional Ingress, optional PVC (ADR-023), NOTES.txt |
 | GovernancePolicy CRD | `deploy/crd/` | kubectl-native schema validation for `inferplane.dev/v1alpha1` documents (structural schema + CEL, K8s 1.25+); controller-watch is a named follow-up (ADR-035) |
-| Chart values | `charts/inferplane/values.yaml` | Image, replicaCount (must stay 1, SQLite), existingSecret, IRSA annotation, ingress (data/admin hosts), persistence (opt-in PVC for the key store), commented `config.otel` OTLP-trace example |
+| Chart values | `charts/inferplane/values.yaml` | Image, replicaCount (local=1; shared Postgres supports multiple replicas), existingSecret, IRSA annotation, ingress (data/admin hosts), persistence (opt-in PVC for the key store), commented `config.otel` OTLP-trace example |
 | Grafana dashboard | `deploy/grafana/inferplane.json` | 9-panel Prometheus dashboard |
 
 ### 3. Key Decisions
 - `CGO_ENABLED=0` static binary so the image can be distroless/nonroot with no libc.
 - The admin key console's static assets (`internal/server/adminui/static/`) ship inside the binary via `go:embed` — no image, chart, or build-pipeline change (ADR-001).
 - **Config hot-reload (ADR-006):** edit config and `kill -HUP <pid>` (K8s: signal PID 1 or roll the pods) to apply provider/model/pricing changes with no restart — the topology is swapped atomically, governance counters/keystore/audit persist, and a bad config rolls back. Listen addrs, TLS, drain, and team policy limits are NOT hot (restart required).
-- Single replica **only**, not merely a default (SQLite key store + instance-local governance) — the chart's only `replicaCount != 1` guard is gated on `persistence.enabled` (default `false`), so an operator can render >1 replica with no error today. Multi-replica HA waits for a shared-state backend; maintainer direction as of 2026-08-14 is Postgres-only, recorded in `docs/roadmap.md` pending a real ADR — not the Postgres/Redis split ADR-013 originally designed.
-- **Key-store persistence (ADR-023):** `persistence.enabled` (default `false`, breaking-change-free) mounts a PVC (or `existingClaim`) at `/var/lib/inferplane`; without it, that path is an `emptyDir` and the key store/audit WAL are wiped on every pod restart. Enabling it switches the Deployment to `strategy: Recreate` (an RWO volume cannot attach to two pods) and a template guard refuses to render if `replicaCount != 1`. `virtual_keys` in `config` can declare a virtual key from a secret ref (`secrets.existingSecret`) so a client's key survives a restart even without persistence — see ADR-023 for the trade-off between the two.
+- Default/local mode is single-replica. ADR-046 shared Postgres mode supports multiple gateways; the chart rejects unsafe local replication. Persistent shared mode renders a StatefulSet with separate PVCs, required node anti-affinity and a disruption budget. See [shared governance](../shared-governance.md).
+- **Persistence:** local mode retains its existing Deployment/PVC behavior. Shared mode stores keys and counters in Postgres; per-replica PVCs hold independent audit segments. Do not share one audit WAL between replicas.
 - The chart references an `existingSecret` and never creates secrets (design §7).
 - `Ingress` is off by default (`ingress.enabled: false`); when on, the admin plane
   additionally requires `ingress.admin.enabled: true` to be routed — it carries
@@ -66,3 +66,27 @@ wires an optional IRSA ServiceAccount for Bedrock.
 - Related modules: [docs/architecture.md](../architecture.md) (Infrastructure section)
 - Related ADRs: docs/decisions/ (none yet)
 - Related runbooks: docs/runbooks/ (create `deploy-production.md`)
+
+### Routing rollout (ADR-043)
+
+Upgrade all mayu instances, inferplaned, and the GovernancePolicy CRD when used
+before activating sensitiveData/context rules. Install routes, explicit pricing,
+and verified boundary/capability metadata first. Local policy is revalidated after
+effective topology assembly and before listening; CP ApplyWire validates targets
+on each data plane. Set `control_plane.require_sync` for privacy from first request,
+optionally `max_policy_age` for staleness. Counts stay local/200 while unready/stale.
+Use the isolated `examples/policy-routing/governance.yaml`, not the quick-start
+`examples/policies/` directory. Shadow applies only to context preferences; privacy
+already enforces. No fleet HA or durability improvement is implied. See
+[operator guide](../policy-routing.md).
+
+ADR-044 keeps adaptive decisions and bounded affinity state node-local, with no
+central classifier/cache dependency. Backend failover remains inside approved
+privacy/cost constraints. Already installed rules remain usable during a control
+plane outage while required authority is valid; expired hard leases still deny.
+ADR-045 adds opt-in Postgres global monetary authority with interchangeable
+control-plane replicas and private durable node journals. Its readiness endpoint
+checks the database; data planes retain only finite previously committed credit
+during outages. Deploy a replicated database and a stable control-plane endpoint.
+This does not remove the shared-gateway key/rate/quota limits above.
+See [deployment and failure behavior](../durable-budgets.md).

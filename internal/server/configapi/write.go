@@ -37,6 +37,7 @@ type secretRefWrite struct {
 // ProviderWrite is the register/replace DTO. It has NO field that can hold a
 // secret value — only the ref (env name / file path) and the bedrock IAM mode.
 type ProviderWrite struct {
+	DataBoundary     string          `json:"data_boundary,omitempty"`
 	Type             string          `json:"type"`
 	BaseURL          string          `json:"base_url,omitempty"`
 	Region           string          `json:"region,omitempty"`
@@ -56,8 +57,10 @@ type authWrite struct {
 // aliases (ADR-021 follow-up — config-file aliases extended to the UI-write
 // DB path).
 type ModelWrite struct {
-	Aliases []string      `json:"aliases,omitempty"`
-	Targets []targetWrite `json:"targets"`
+	ContextWindow int64         `json:"context_window,omitempty"`
+	Capabilities  []string      `json:"capabilities,omitempty"`
+	Aliases       []string      `json:"aliases,omitempty"`
+	Targets       []targetWrite `json:"targets"`
 }
 
 type targetWrite struct {
@@ -89,6 +92,9 @@ func ParseProviderWrite(name string, body []byte) (providerstore.ProviderRow, er
 	var w ProviderWrite
 	if err := json.Unmarshal(body, &w); err != nil {
 		return zero, fmt.Errorf("invalid provider body: %w", err)
+	}
+	if err := config.ValidateDataBoundary(w.DataBoundary); err != nil {
+		return zero, err
 	}
 	if strings.TrimSpace(w.Type) == "" {
 		return zero, fmt.Errorf("provider type is required")
@@ -147,7 +153,7 @@ func ParseProviderWrite(name string, body []byte) (providerstore.ProviderRow, er
 	}
 
 	row := providerstore.ProviderRow{
-		Name: name, Type: w.Type, BaseURL: w.BaseURL, Region: w.Region,
+		Name: name, Type: w.Type, BaseURL: w.BaseURL, Region: w.Region, DataBoundary: w.DataBoundary,
 		AuthMode: w.Auth.Mode, AuthProfile: w.Auth.Profile, AuthHeader: w.AuthHeader,
 		GuardrailID: w.GuardrailID, GuardrailVersion: w.GuardrailVersion,
 	}
@@ -179,6 +185,9 @@ func ParseModelWrite(body []byte) (providerstore.ModelRoute, error) {
 	if err := json.Unmarshal(body, &w); err != nil {
 		return zero, fmt.Errorf("invalid model body: %w", err)
 	}
+	if err := config.ValidateModelMetadata(w.ContextWindow, w.Capabilities); err != nil {
+		return zero, err
+	}
 	if len(w.Targets) == 0 {
 		return zero, fmt.Errorf("a model route requires at least one target")
 	}
@@ -199,7 +208,7 @@ func ParseModelWrite(body []byte) (providerstore.ModelRoute, error) {
 		}
 		seen[alias] = true
 	}
-	return providerstore.ModelRoute{Aliases: w.Aliases, Targets: targets}, nil
+	return providerstore.ModelRoute{Aliases: w.Aliases, Targets: targets, ContextWindow: w.ContextWindow, Capabilities: append([]string(nil), w.Capabilities...)}, nil
 }
 
 // Writer is the assembly-provided callback set the write handlers invoke. Each

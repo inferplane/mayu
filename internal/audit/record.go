@@ -38,6 +38,8 @@ type RequestRef struct {
 	// Appended at the end (like PIIMasked) so mixed-version chains still
 	// verify byte-identically; empty means no substitution occurred.
 	ModelSubstitutedFrom string `json:"model_substituted_from,omitempty"`
+	// Append-only: legacy requests omit routing and retain exact audit bytes.
+	Routing *RoutingRef `json:"routing,omitempty"`
 }
 
 type OutcomeRef struct {

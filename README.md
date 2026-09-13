@@ -6,12 +6,13 @@
 
 **inferplane** — a control plane for LLM consumption governance.
 Policy and budget are distributed from the center; **`mayu`**, the
-node-local data plane, enforces them without sitting in anyone's critical path.
+node-local data plane, enforces them locally. The control plane stays off the
+inference path.
 
 `mayu` is a component name, not a project name — it holds the same position in
 inferplane that ztunnel/waypoint hold in Istio. It runs on localhost or on each
 Kubernetes node, speaks your coding agent's native protocol (Anthropic Messages,
-OpenAI Chat Completions, Bedrock InvokeModel), and enforces the rules the control
+OpenAI Chat Completions/Responses, Bedrock InvokeModel), and enforces the rules the control
 plane (`inferplaned`) hands it: per-user attribution, budget cutoffs, and model
 routing.
 
@@ -25,15 +26,16 @@ routing.
    Sonnet → GLM) when cost, not just capability, decides.
 4. Set spend limits per team and per individual, block on breach, and always
    show how much has been spent.
-5. Keep the control plane off the inference path, so a control-plane outage
-   never stops request traffic (no SPOF).
+5. Keep the control plane off the inference path: installed policy and valid
+   authority remain locally usable during an outage. Expired hard authority
+   and configured readiness gates still fail closed.
 
 Goal 5 pulls against making goal 4 accurate under horizontal scale — see
 [Current limits](#current-limits) below and `docs/roadmap.md`.
 
-[^codex]: Codex support is a goal, not yet a verified capability — no
-    Codex-specific code, fixture, or test exists in the tree; see the
-    Purpose alignment table in `docs/roadmap.md`.
+[^codex]: Responses ingress and native/stateless adapters have local protocol
+    tests and an opt-in installed Codex CLI tool-round-trip test. Model quality
+    and unsupported stateful features remain separate; see [Codex setup](docs/adaptive-routing.md).
 
 ## Target users
 
@@ -53,28 +55,56 @@ more than one team is on it.
 - **No embeddings, image, audio, or rerank support in v1.** Chat/completions
   traffic only until that lane is proven (see `docs/roadmap.md`).
 
+## Policy-aware routing
+
+`GovernancePolicy.sensitiveData` selects approved internal destinations, complete
+masking, or refusal before egress. Independent `routing.context` rules classify
+weak/simple, optional normal, and strong/complex tasks. Context starts in **Shadow**;
+explicit stability and **Enforce** support compatible multi-turn/tool workflows
+and retain the actual successful model/provider between related requests.
+Privacy always enforces, including during Shadow (ADR-043/044).
+
+Strict budget tiers (`enforceTargets: true`) constrain every later selection and
+retry after a switching threshold. A separate total hard cap remains binding.
+The soft switching threshold does not become a smaller blocking admission cap.
+Legacy optional tiers and two-class context rules retain their behavior.
+
+Start with [the operator guide](docs/policy-routing.md) and the isolated
+[config](examples/config.policy-routing.json) /
+[policy](examples/policy-routing/governance.yaml). Detectors are finite heuristics;
+provider boundary labels and model capabilities are operator assertions. Unknown
+content can fail closed, and existing transport limits still apply. Upgrade all
+participating binaries and the CRD before activating new rules. For protection
+before first control-plane sync, set `require_sync`; both count APIs remain local
+HTTP 200 while unready. Evaluate task success, total cost including cold-cache
+writes/retries, p95 latency, and privacy negative cases before Enforce. For the
+combined three-class, PII, budget and Codex setup, use the
+[adaptive guide](docs/adaptive-routing.md) and
+[example configuration](examples/config.adaptive-routing.json). Local pins and
+protocol tests do not establish measured savings or shared-state HA.
+
+For global monetary budgets across node-local gateways, enable the
+[durable budget profile](docs/durable-budgets.md) (ADR-045). Control-plane replicas
+share a Postgres authority ledger; each gateway durably reserves a conservative
+per-attempt bound locally before invoking a provider. Committed local grants
+remain usable during a control-plane/database outage until their deadlines.
+
 ## Current limits
 
-**Single-replica `mayu` only, today.** `internal/keystore` is SQLite-only and
-`internal/limiter`/`internal/budget` are in-memory — running more than one
-`mayu` replica lets each enforce its own copy of every counter, so rate,
-token quota, and (in standalone mode) budget ceilings can each reach up to
-N× the configured value, and key resolution splits across replicas
-(ADR-013, design-only, not yet implemented). Budget is only *partially*
-better: when a control plane is attached, ADR-034's lease pattern bounds
-team-level overspend across data planes (worst case is the sum of
-outstanding grants, not exact) — but per-key budgets and standalone `mayu`
-get no lease at all. Making rate/quota equally accurate, and closing budget's
-remaining gaps, is the tracked next step — see `docs/roadmap.md`.
+**Shared gateways now have an explicit Postgres profile (ADR-046).**
+It shares keys, team/key/user RPM and TPM, calendar token quotas and monetary
+reservations across replicas. Admission is transactional and database failures
+fail closed. See [shared governance](docs/shared-governance.md) and the
+[Helm example](examples/helm.shared-governance.yaml). Deploy an HA Postgres endpoint;
+shared mode uses synchronous database reads/writes and does not offer disconnected
+operation. Mutable SQLite provider topology is unsupported in this profile.
 
-**Goal 4 is partially unenforced today.** Per-user *model choice* (goal 2) is
-enforced, and so are per-user *budget* (ADR-042 Phase 3) and policy-driven
-cost substitution (goal 3, `routing.budgetTiers` — ADR-041). Per-user *rate*
-is still rejected at policy load rather than silently ignored: it needs the
-rate-share model (`docs/roadmap.md` item ①). See the purpose-alignment table
-in `docs/roadmap.md` for exact status and code references.
+**The default SQLite/in-memory profile remains single-replica.** Its rate/quota
+and standalone money counters remain local. ADR-045 globalizes policy money for
+node-local fleets; ADR-046 additionally supplies shared identity and complete
+resource admission. User rate/token-quota rules require the shared profile.
 
-**Budget counters are not durable.** In standalone mode they live only in
+**Standalone and legacy budget counters are not durable.** In standalone mode they live only in
 memory: restarting `mayu` mid-window resets every team, key, and user counter
 to zero, even though the spend stays in the audit chain (`mayu report` still
 shows it). With a control plane attached, a hard-cap lease fails *closed* only
@@ -83,6 +113,8 @@ once a lease has been received — if the control plane is unreachable at
 first heartbeat succeeds. Set `control_plane.require_sync: true` (optionally with
 `max_policy_age`) to fail closed instead: governed requests 503 and `/readyz`
 reports not-ready until a policy generation has arrived.
+The opt-in ADR-045 profile requires initial sync, a private durable node journal,
+and Postgres. It never falls back to these in-memory counters for global authority.
 
 **Policy enforcement assumes the node operator is not the adversary.** `mayu`
 proxies credentials that live on the node (`env:`/`file:` refs), so whoever
@@ -238,7 +270,9 @@ The project targets CNCF Sandbox.
 - [docs/decisions/](docs/decisions/) — design records (ADRs); start with
   [ADR-031](docs/decisions/ADR-031-monorepo-control-plane-data-plane-split.md),
   the control-plane/data-plane split
-- [docs/roadmap.md](docs/roadmap.md) — open gaps vs. central-proxy gateways (global rate limits, durable ledger, self-update, embeddings)
+- [docs/shared-governance.md](docs/shared-governance.md) — shared keys, global rate/token quotas and migration
+- [docs/durable-budgets.md](docs/durable-budgets.md) — global monetary budgets and control-plane failover
+- [docs/roadmap.md](docs/roadmap.md) — remaining gaps (mutable shared topology, fleet tooling, self-update, embeddings)
 - [CHANGELOG.md](CHANGELOG.md) · [GOVERNANCE.md](GOVERNANCE.md) · [MAINTAINERS.md](MAINTAINERS.md)
 
 ## Contributing

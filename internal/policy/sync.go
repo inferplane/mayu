@@ -35,7 +35,8 @@ type SyncRequest struct {
 	// heartbeat — explicit version-skew reporting, never silent.
 	Rejections []Rejection `json:"rejections,omitempty"`
 	// Reports carries cumulative spend per lease-managed budget rule.
-	Reports []ConsumptionReport `json:"reports,omitempty"`
+	Reports   []ConsumptionReport `json:"reports,omitempty"`
+	Authority *AuthorityRequest   `json:"authority,omitempty"`
 }
 
 // Rejection is one refused policy document (or rule), reported upstream.
@@ -88,7 +89,8 @@ type SyncResponse struct {
 	ActiveTiers []ActiveTier `json:"activeTiers,omitempty"`
 	// SyncIntervalSeconds is the control plane's requested heartbeat
 	// cadence (derived from the tightest lease renew interval).
-	SyncIntervalSeconds int `json:"syncIntervalSeconds"`
+	SyncIntervalSeconds int                `json:"syncIntervalSeconds"`
+	Authority           *AuthorityResponse `json:"authority,omitempty"`
 }
 
 // ActiveTier is the currently-active budget tier for one budgetTiers routing
@@ -102,6 +104,10 @@ type ActiveTier struct {
 	Team             string            `json:"team"`
 	ThresholdPercent int               `json:"thresholdPercent"`
 	Substitute       map[string]string `json:"substitute"`
+	EnforceTargets   bool              `json:"enforceTargets,omitempty"`
+	// User preserves an optional opaque user selector. When both Team and User
+	// are present, both must match; an empty User retains team-only semantics.
+	User string `json:"user,omitempty"`
 }
 
 // LeaseGrant is one budget lease: the data plane may serve this rule's team

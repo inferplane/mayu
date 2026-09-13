@@ -16,6 +16,9 @@ type Usage struct {
 	CacheCreationInputTokens *int64                     `json:"cache_creation_input_tokens,omitempty"`
 	CacheCreation            *CacheCreation             `json:"cache_creation,omitempty"`
 	Extra                    map[string]json.RawMessage `json:"-"`
+	// AccountingUncertain preserves a provider adapter's loss of billing
+	// information. It is observation-only and never changes wire bytes.
+	AccountingUncertain bool `json:"-"`
 }
 
 type CacheCreation struct {

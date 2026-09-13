@@ -1,0 +1,27 @@
+{{- $shared := and (eq (default "" .Values.config.key_store.type) "postgres") (eq (dig "governance_store" "type" "" .Values.config) "postgres") }}
+{{- if and $shared .Values.persistence.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "inferplane.fullname" . }}-headless
+spec:
+  clusterIP: None
+  selector:
+    {{- include "inferplane.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: data
+      port: {{ .Values.service.dataPort }}
+      targetPort: data
+---
+{{- end }}
+{{- if and $shared (gt (int .Values.replicaCount) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "inferplane.fullname" . }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "inferplane.selectorLabels" . | nindent 6 }}
+{{- end }}

@@ -1,4 +1,5 @@
-{{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) }}
+{{- $shared := and (eq (default "" .Values.config.key_store.type) "postgres") (eq (dig "governance_store" "type" "" .Values.config) "postgres") }}
+{{- if and .Values.persistence.enabled (not .Values.persistence.existingClaim) (not $shared) }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

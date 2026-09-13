@@ -22,7 +22,22 @@ type ExportDoc struct {
 // generation's provider configs + model routes). The APIKey field on each
 // ProviderConfig is dropped by its `json:"-"` tag at marshal time.
 func ExportDocFrom(providers map[string]config.ProviderConfig, models map[string]config.ModelConfig) ExportDoc {
-	return ExportDoc{Providers: providers, Models: models}
+	provs := make(map[string]config.ProviderConfig, len(providers))
+	for name, p := range providers {
+		if p.APIKeyRef != nil {
+			ref := *p.APIKeyRef
+			p.APIKeyRef = &ref
+		}
+		provs[name] = p
+	}
+	routes := make(map[string]config.ModelConfig, len(models))
+	for name, m := range models {
+		m.Aliases = append([]string(nil), m.Aliases...)
+		m.Targets = append([]config.Target(nil), m.Targets...)
+		m.Capabilities = append([]string(nil), m.Capabilities...)
+		routes[name] = m
+	}
+	return ExportDoc{Providers: provs, Models: routes}
 }
 
 // ExportHandler serves GET /admin/config/export as a secret-free config

@@ -2,12 +2,9 @@ image:
   repository: inferplane
   tag: "0.2.0"
   pullPolicy: IfNotPresent
-replicaCount: 1   # MUST stay 1 — SQLite key store + in-memory limiter/budget are per-instance: N
-                  # replicas means N x the configured rate/quota limits, and any key issued via
-                  # the admin console/CLI (not this file's config.virtual_keys, which every
-                  # replica reproduces identically at boot) 401s on the replica that didn't
-                  # issue it. Multi-replica HA is design-only (ADR-013), not implemented — this
-                  # is not a knob to raise yet.
+replicaCount: 1   # Values >1 require the explicit Postgres shared-governance profile.
+                  # See examples/helm.shared-governance.yaml and docs/shared-governance.md.
+                  # Default SQLite/in-memory mode remains single-replica.
 service:
   dataPort: 8080
   adminPort: 9090
@@ -22,6 +19,8 @@ persistence:
   size: 1Gi
   storageClass: ""
   accessMode: ReadWriteOnce
+# Shared profile + persistence renders a StatefulSet with a separate claim per
+# replica. Collect audit segments from every replica; never share an audit WAL.
 # Off by default: the data plane needs a host to be genuinely useful, and the
 # admin plane defaults to OFF even when ingress.enabled is true (see admin.enabled
 # below) because it carries key-issuance/governance actions and should stay on a

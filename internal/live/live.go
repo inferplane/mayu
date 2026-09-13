@@ -78,6 +78,7 @@ func (s *State) Models() map[string]config.ModelConfig {
 			Aliases:       append([]string(nil), v.Aliases...),
 			Targets:       append([]config.Target(nil), v.Targets...),
 			ContextWindow: v.ContextWindow,
+			Capabilities:  append([]string(nil), v.Capabilities...),
 		}
 		out[k] = mc
 	}
@@ -100,6 +101,7 @@ func (s *State) Route(model string) (config.ModelConfig, bool) {
 		Aliases:       append([]string(nil), mc.Aliases...),
 		Targets:       append([]config.Target(nil), mc.Targets...),
 		ContextWindow: mc.ContextWindow,
+		Capabilities:  append([]string(nil), mc.Capabilities...),
 	}, true
 }
 
@@ -233,6 +235,10 @@ func (s *State) Region(name string) string {
 func (s *State) ProviderConfigs() map[string]config.ProviderConfig {
 	out := make(map[string]config.ProviderConfig, len(s.providerConfigs))
 	for k, v := range s.providerConfigs {
+		if v.APIKeyRef != nil {
+			ref := *v.APIKeyRef
+			v.APIKeyRef = &ref
+		}
 		out[k] = v
 	}
 	return out
@@ -253,6 +259,7 @@ func NewState(provs map[string]providers.Provider, models map[string]config.Mode
 			Aliases:       append([]string(nil), v.Aliases...),
 			Targets:       append([]config.Target(nil), v.Targets...),
 			ContextWindow: v.ContextWindow,
+			Capabilities:  append([]string(nil), v.Capabilities...),
 		}
 		for _, alias := range v.Aliases {
 			a[alias] = k
@@ -312,6 +319,14 @@ func BuildState(cfg *config.Config) (*State, map[string]string, error) {
 // It returns an error WITHOUT a State if anything fails, so callers (initial
 // boot and reload alike) can fail safely. It touches no stateful component.
 func BuildStateWith(cfg *config.Config, deps Deps) (*State, map[string]string, error) {
+	for name, pc := range cfg.Providers {
+		if err := config.ValidateDataBoundary(pc.DataBoundary); err != nil {
+			return nil, nil, fmt.Errorf("live: provider %q: %w", name, err)
+		}
+	}
+	if err := config.ValidateModelAliases(cfg.Models); err != nil {
+		return nil, nil, err
+	}
 	// model_api[providerName] = {upstreamModelID: api} so the bedrock factory
 	// can override invoke/converse routing per upstream model.
 	modelAPIByProvider := map[string]map[string]string{}
@@ -376,6 +391,10 @@ func BuildStateWith(cfg *config.Config, deps Deps) (*State, map[string]string, e
 	// published State is independent of the caller's cfg).
 	st.providerConfigs = make(map[string]config.ProviderConfig, len(cfg.Providers))
 	for k, v := range cfg.Providers {
+		if v.APIKeyRef != nil {
+			ref := *v.APIKeyRef
+			v.APIKeyRef = &ref
+		}
 		st.providerConfigs[k] = v
 	}
 	st.fallbacks = make(map[string]string, len(cfg.ModelFallbacks))
@@ -502,3 +521,13 @@ func pricingFromConfig(cfg *config.Config) *pricing.Table {
 // exactly the table BuildState validates — including the derived cache rates and
 // the Bedrock region-prefix fallback — rather than reimplementing the assembly.
 func PricingTableFor(cfg *config.Config) *pricing.Table { return pricingFromConfig(cfg) }
+
+// DataBoundary returns the operator-attested boundary in this topology generation.
+// Absent providers and unlabeled/unrecognized boundaries are always unknown.
+func (s *State) DataBoundary(provider string) string {
+	switch b := s.providerConfigs[provider].DataBoundary; b {
+	case "internal", "external":
+		return b
+	}
+	return "unknown"
+}

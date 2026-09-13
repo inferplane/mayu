@@ -25,3 +25,18 @@ lives in its own package. This is the project's headline extensibility promise
 - When provider protocol == ingress protocol, forward `RawBody` verbatim (cache safety).
 - Streaming: `Stream` returns an `iter.Seq2[*StreamEvent, error]`; never retry mid-stream (pre-TTFT failover only).
 - Cache-affecting rewrites (e.g. Bedrock model injection) must be top-level-only so `cache_control` stays byte-stable.
+
+## Native Responses (ADR-044)
+
+`openairesponses/` registers `openai_responses`, accepts Responses ingress,
+preserves native bytes except the narrow model rewrite, refuses missing usage,
+and disables credential-bearing redirects. Shared `internal/responses` codecs
+handle observation and stateless cross-protocol adaptation; the new ingress
+applies every policy/identity/admission gate before provider calls.
+
+## Budget attempt ownership (ADR-045)
+
+Bedrock's four generation SDK operations use `aws.NopRetryer`. Gateway fallback
+owns attempts and their reservations; hidden SDK retries after a request body was
+accepted would lose uncertain spend. This applies in all profiles, including
+legacy mode. Health probes remain non-generation operations.

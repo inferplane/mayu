@@ -302,6 +302,14 @@
               <option value="openai_compatible">openai_compatible</option>
               <option value="bedrock">bedrock</option>
             </select>
+            <label class="form-field" for="pf-data-boundary">
+              <span data-i18n="prov.dataBoundary">Data boundary</span>
+              <select id="pf-data-boundary">
+                <option value="" data-i18n="prov.boundaryUnknown">unknown</option>
+                <option value="internal" data-i18n="prov.boundaryInternal">internal</option>
+                <option value="external" data-i18n="prov.boundaryExternal">external</option>
+              </select>
+            </label>
             <input id="pf-baseurl" type="text" data-i18n-placeholder="prov.baseUrlPlaceholder" placeholder="base_url (anthropic / openai_compatible)">
             <select id="pf-refkind">
               <option value="env" data-i18n="prov.refEnv">api_key_ref · env var NAME</option>
@@ -314,6 +322,7 @@
             <input id="pf-guardrail-id" type="text" data-i18n-placeholder="common.guardrailIdPlaceholder" placeholder="guardrail ID override (optional, bedrock)">
             <input id="pf-guardrail-version" type="text" data-i18n-placeholder="common.guardrailVersionPlaceholder" placeholder="guardrail version (optional, default DRAFT)">
             <button type="button" id="pf-test" class="ghost" data-i18n="prov.testBtn">TEST CONNECTION</button>
+            <button type="reset" id="pf-new" class="ghost" data-i18n="prov.newProvider">NEW PROVIDER</button>
             <button type="submit" data-i18n="prov.saveBtn">SAVE PROVIDER</button>
           </form>
           <p class="hint warn-label" data-i18n="prov.warnHint">⚠ enter the env var NAME or file PATH — the gateway
@@ -338,9 +347,21 @@
             <div class="row">
               <input id="mf-name" type="text" data-i18n-placeholder="prov.modelNamePlaceholder" placeholder="model name (e.g. claude-sonnet-4-6)" required>
             </div>
+            <label class="form-field" for="mf-context-window">
+              <span data-i18n="prov.contextWindow">Context window · input + output tokens (blank / 0 = unknown)</span>
+              <input id="mf-context-window" type="number" min="0" max="9007199254740991" step="1">
+            </label>
+            <fieldset class="model-capabilities">
+              <legend data-i18n="prov.capabilities">Declared capabilities · uncheck all to clear</legend>
+              <label><input id="mf-cap-tools" type="checkbox"><span data-i18n="prov.capTools">Tools</span></label>
+              <label><input id="mf-cap-vision" type="checkbox"><span data-i18n="prov.capVision">Vision</span></label>
+              <label><input id="mf-cap-reasoning" type="checkbox"><span data-i18n="prov.capReasoning">Reasoning</span></label>
+              <label><input id="mf-cap-structured-output" type="checkbox"><span data-i18n="prov.capStructuredOutput">Structured output</span></label>
+            </fieldset>
             <div id="mf-targets"></div>
             <div class="row">
               <button id="mf-add-target" type="button" class="ghost" data-i18n="prov.addTargetBtn">+ ADD TARGET</button>
+              <button id="mf-new" type="reset" class="ghost" data-i18n="prov.newModel">NEW MODEL</button>
               <button type="submit" data-i18n="prov.saveRouteBtn">SAVE ROUTE</button>
             </div>
           </form>

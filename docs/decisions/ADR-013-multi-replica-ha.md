@@ -1,5 +1,7 @@
 # ADR-013: Multi-replica HA — shared state design (implementation deferred)
 
+**Implementation update (2026-09-12):** [ADR-046](ADR-046-shared-governance.md) supersedes the shared-key/counter backend portions with Postgres-only shared admission. Mutable provider topology remains deferred; the original proposal below is retained as design history.
+
 **Date:** 2026-06-14
 **Status:** Proposed — **design refined via a 3-family gate (codex + gemini +
 kiro); implementation deferred** (requires a Postgres + Redis/Valkey environment
