@@ -18,3 +18,5 @@ key decisions, and code pointers. The current architecture overview is
 
 Add a layer with `/add-reference-doc <layer>` (project-init). Available layers not yet
 present: data-derived (frontend, ui, iac) — not applicable to this Go gateway.
+
+Operator-facing routing schema, example, limits, and rollout gates: [Policy-aware routing](../policy-routing.md) (ADR-043).

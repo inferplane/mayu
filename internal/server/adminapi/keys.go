@@ -6,7 +6,9 @@
 package adminapi
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -226,17 +228,33 @@ func (h *KeysHandler) revoke(w http.ResponseWriter, r *http.Request, id principa
 	// material, so the existence signal is acceptable and the audit trail
 	// is worth more. A lookup ERROR fails closed (P4 gate): proceeding
 	// without a team would skip the entitlement check entirely.
-	team, found, err := h.teamOf(r, keyID)
+	key, found, err := h.keyOf(r, keyID)
 	if err != nil {
 		http.Error(w, `{"error":"team lookup failed"}`, http.StatusInternalServerError)
 		return
 	}
+	if !found {
+		http.Error(w, `{"error":"key not found"}`, http.StatusNotFound)
+		return
+	}
+	team := key.Team
 	if found && !id.Entitled(team) {
 		h.adminEvent("admin_denied", id, team, keyID)
 		http.Error(w, `{"error":"not entitled to team"}`, http.StatusForbidden)
 		return
 	}
-	if err := h.store.Revoke(r.Context(), keyID); err != nil {
+	if conditional, ok := h.store.(interface {
+		RevokeSnapshot(context.Context, keystore.Principal) error
+	}); ok {
+		err = conditional.RevokeSnapshot(r.Context(), key)
+	} else {
+		err = h.store.Revoke(r.Context(), keyID)
+	}
+	if errors.Is(err, keystore.ErrSnapshotChanged) {
+		http.Error(w, `{"error":"key changed; retry authorization"}`, http.StatusConflict)
+		return
+	}
+	if err != nil {
 		http.Error(w, `{"error":"revoke failed"}`, http.StatusNotFound)
 		return
 	}
@@ -245,14 +263,19 @@ func (h *KeysHandler) revoke(w http.ResponseWriter, r *http.Request, id principa
 }
 
 func (h *KeysHandler) teamOf(r *http.Request, keyID string) (string, bool, error) {
+	key, found, err := h.keyOf(r, keyID)
+	return key.Team, found, err
+}
+
+func (h *KeysHandler) keyOf(r *http.Request, keyID string) (keystore.Principal, bool, error) {
 	ps, err := h.store.List(r.Context())
 	if err != nil {
-		return "", false, err
+		return keystore.Principal{}, false, err
 	}
 	for _, p := range ps {
 		if p.KeyID == keyID {
-			return p.Team, true, nil
+			return p, true, nil
 		}
 	}
-	return "", false, nil
+	return keystore.Principal{}, false, nil
 }

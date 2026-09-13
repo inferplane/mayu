@@ -403,6 +403,7 @@ func toolsToOAI(raw json.RawMessage) []map[string]any {
 		Name        string          `json:"name"`
 		Description string          `json:"description,omitempty"`
 		InputSchema json.RawMessage `json:"input_schema,omitempty"`
+		Strict      *bool           `json:"strict,omitempty"`
 	}
 	if json.Unmarshal(raw, &tools) != nil || len(tools) == 0 {
 		return nil
@@ -418,6 +419,9 @@ func toolsToOAI(raw json.RawMessage) []map[string]any {
 		}
 		if len(t.InputSchema) > 0 {
 			fn["parameters"] = json.RawMessage(t.InputSchema)
+		}
+		if t.Strict != nil {
+			fn["strict"] = *t.Strict
 		}
 		out = append(out, map[string]any{"type": "function", "function": fn})
 	}

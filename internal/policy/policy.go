@@ -19,6 +19,7 @@ package policy
 import (
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	v1alpha1 "github.com/inferplane/inferplane/api/v1alpha1"
@@ -45,6 +46,10 @@ const (
 	// reconcile poll to.
 	MinPolicySyncInterval = 15 * time.Second
 )
+
+// maxPolicyRules matches the CRD's rules.maxItems bound. Besides bounding local
+// validation work, it makes the API server's aggregate CEL cost finite.
+const maxPolicyRules = 256
 
 // SupportedAPIVersions lists the config API generations this build
 // understands. The control plane exposes the version distribution of
@@ -102,7 +107,14 @@ type Rule struct {
 	Budget        *Budget
 	Routing       *Routing
 	ModelAccess   *ModelAccess
+	SensitiveData *SensitiveData
 	Rate          *Rate
+	TokenQuota    *TokenQuota
+}
+
+type TokenQuota struct {
+	LimitTokens int64
+	Period      v1alpha1.BudgetPeriod
 }
 
 // Budget is the internal form of a budget rule. All amounts are integer
@@ -141,11 +153,12 @@ type Rate struct {
 	TPM       int64
 }
 
-// Routing is the internal form of a routing rule: exactly one of Affinity or
-// BudgetTiers is set (ADR-041 added the second half).
+// Routing is the internal form of a routing rule: exactly one of Affinity,
+// BudgetTiers, or Context is set.
 type Routing struct {
 	Affinity    *Affinity
 	BudgetTiers *BudgetTiers
+	Context     *Context
 }
 
 // Affinity is the internal form of the cache-affinity half of a routing
@@ -157,8 +170,9 @@ type Affinity struct {
 // BudgetTiers is the internal form of the ADR-041 budget-tier substitution
 // half of a routing rule.
 type BudgetTiers struct {
-	BudgetRef string
-	Tiers     []BudgetTier
+	BudgetRef      string
+	Tiers          []BudgetTier
+	EnforceTargets bool
 }
 
 // BudgetTier is the internal form of one tier: at ThresholdPercent
@@ -185,6 +199,7 @@ type Lease struct {
 // the design fixes:
 //
 //   - the subject must select a team and/or a user;
+//   - spec.rules must contain 1..maxPolicyRules rules, matching the CRD;
 //   - failurePolicy is required per rule — no silent defaults;
 //   - a hard-cap budget rule must be FailClosed (soft budgets fail open);
 //   - a budget rule's period is CalendarDay or CalendarMonth (empty defaults to
@@ -208,6 +223,12 @@ func FromV1Alpha1(doc *v1alpha1.GovernancePolicy) (*Policy, error) {
 	}
 	if doc.Spec.Subject.Team == "" && doc.Spec.Subject.User == "" {
 		return nil, reject("", "spec.subject must select a team and/or a user")
+	}
+	if len(doc.Spec.Rules) == 0 {
+		return nil, reject("", "spec.rules must contain at least one rule")
+	}
+	if len(doc.Spec.Rules) > maxPolicyRules {
+		return nil, reject("", fmt.Sprintf("spec.rules must contain at most %d rules", maxPolicyRules))
 	}
 
 	p := &Policy{
@@ -235,17 +256,32 @@ func FromV1Alpha1(doc *v1alpha1.GovernancePolicy) (*Policy, error) {
 			return nil, reject(wr.Name, fmt.Sprintf("unknown failurePolicy %q", wr.FailurePolicy))
 		}
 		kinds := 0
-		for _, set := range []bool{wr.Budget != nil, wr.Routing != nil, wr.ModelAccess != nil, wr.Rate != nil} {
+		for _, set := range []bool{wr.Budget != nil, wr.Routing != nil, wr.ModelAccess != nil, wr.Rate != nil, wr.SensitiveData != nil, wr.TokenQuota != nil} {
 			if set {
 				kinds++
 			}
 		}
 		if kinds != 1 {
-			return nil, reject(wr.Name, "exactly one of budget, routing, modelAccess, or rate must be set")
+			return nil, reject(wr.Name, "exactly one of budget, routing, modelAccess, rate, sensitiveData, or tokenQuota must be set")
 		}
 
 		r := Rule{Name: wr.Name, FailurePolicy: wr.FailurePolicy}
 		switch {
+		case wr.TokenQuota != nil:
+			q := wr.TokenQuota
+			if q.LimitTokens <= 0 || (q.Period != v1alpha1.PeriodCalendarDay && q.Period != v1alpha1.PeriodCalendarMonth) {
+				return nil, reject(wr.Name, "tokenQuota requires positive limitTokens and CalendarDay or CalendarMonth period")
+			}
+			if wr.FailurePolicy != v1alpha1.FailClosed {
+				return nil, reject(wr.Name, "tokenQuota requires FailClosed")
+			}
+			r.TokenQuota = &TokenQuota{LimitTokens: q.LimitTokens, Period: q.Period}
+		case wr.SensitiveData != nil:
+			sd, err := sensitiveDataFromV1Alpha1(wr, reject)
+			if err != nil {
+				return nil, err
+			}
+			r.SensitiveData = sd
 		case wr.Budget != nil:
 			b, err := budgetFromV1Alpha1(wr, reject)
 			if err != nil {
@@ -362,15 +398,28 @@ func budgetFromV1Alpha1(wr v1alpha1.Rule, reject func(rule, reason string) *Unsu
 	}, nil
 }
 
-// routingFromV1Alpha1 converts the routing rule's exactly-one-of-two halves.
+// routingFromV1Alpha1 converts the routing rule's exactly-one-of-three shapes.
 // doc is the whole document so BudgetTiers.budgetRef can be resolved against
 // a budget rule declared elsewhere in the same policy (ADR-041 D1).
 func routingFromV1Alpha1(wr v1alpha1.Rule, doc *v1alpha1.GovernancePolicy, reject func(rule, reason string) *UnsupportedError) (*Routing, error) {
 	wrt := wr.Routing
 	affinitySet := wrt.OnAffinityConflict != ""
 	tiersSet := wrt.BudgetTiers != nil
-	if affinitySet == tiersSet {
-		return nil, reject(wr.Name, "routing rule must set exactly one of onAffinityConflict or budgetTiers")
+	shapes := 0
+	for _, set := range []bool{affinitySet, tiersSet, wrt.Context != nil} {
+		if set {
+			shapes++
+		}
+	}
+	if shapes != 1 {
+		return nil, reject(wr.Name, "routing rule must set exactly one of onAffinityConflict, budgetTiers, or context")
+	}
+	if wrt.Context != nil {
+		c, err := contextFromV1Alpha1(wr, reject)
+		if err != nil {
+			return nil, err
+		}
+		return &Routing{Context: c}, nil
 	}
 	if affinitySet {
 		switch wrt.OnAffinityConflict {
@@ -382,6 +431,9 @@ func routingFromV1Alpha1(wr v1alpha1.Rule, doc *v1alpha1.GovernancePolicy, rejec
 	}
 
 	bt := wrt.BudgetTiers
+	if bt.EnforceTargets && (doc.Spec.Subject.Team == "" || doc.Spec.Subject.User != "") {
+		return nil, reject(wr.Name, "strict budget tiers require a team-only subject in this build")
+	}
 	if bt.BudgetRef == "" {
 		return nil, reject(wr.Name, "routing.budgetTiers.budgetRef is required: it names the budget rule this tier's utilization is judged against")
 	}
@@ -403,10 +455,14 @@ func routingFromV1Alpha1(wr v1alpha1.Rule, doc *v1alpha1.GovernancePolicy, rejec
 	}
 
 	tiers := make([]BudgetTier, 0, len(bt.Tiers))
+	maxThreshold := 99
+	if bt.EnforceTargets {
+		maxThreshold = 100
+	}
 	prevThreshold := 0
 	for _, t := range bt.Tiers {
-		if t.ThresholdPercent < 1 || t.ThresholdPercent > 99 {
-			return nil, reject(wr.Name, fmt.Sprintf("routing.budgetTiers.tiers.thresholdPercent must be in [1, 99], got %d", t.ThresholdPercent))
+		if t.ThresholdPercent < 1 || t.ThresholdPercent > maxThreshold {
+			return nil, reject(wr.Name, fmt.Sprintf("routing.budgetTiers.tiers.thresholdPercent must be in [1, %d], got %d", maxThreshold, t.ThresholdPercent))
 		}
 		if t.ThresholdPercent <= prevThreshold {
 			return nil, reject(wr.Name, "routing.budgetTiers.tiers.thresholdPercent must be strictly increasing across tiers")
@@ -435,5 +491,118 @@ func routingFromV1Alpha1(wr v1alpha1.Rule, doc *v1alpha1.GovernancePolicy, rejec
 		tiers = append(tiers, BudgetTier{ThresholdPercent: t.ThresholdPercent, Substitute: sub})
 	}
 
-	return &Routing{BudgetTiers: &BudgetTiers{BudgetRef: bt.BudgetRef, Tiers: tiers}}, nil
+	return &Routing{BudgetTiers: &BudgetTiers{BudgetRef: bt.BudgetRef, Tiers: tiers, EnforceTargets: bt.EnforceTargets}}, nil
+}
+
+// SensitiveData is a validated privacy restriction. The slices are owned.
+type SensitiveData struct {
+	OnDetected      v1alpha1.SensitiveDataAction
+	OnUninspectable v1alpha1.SensitiveDataAction
+	InternalModels  []string
+}
+
+// Context is a validated optional model recommendation. Mode is never empty.
+type Context struct {
+	Mode                 v1alpha1.ContextMode
+	FromModels           []string
+	SimpleModel          string
+	ComplexModel         string
+	MaxSimpleInputTokens int64
+	ComplexKeywords      []string
+	NormalModel          string
+	MaxNormalInputTokens int64
+	Stability            *ContextStability
+}
+
+// ContextStability contains validated finite local affinity limits.
+type ContextStability struct {
+	MinHold     time.Duration
+	MinRequests int
+	SessionTTL  time.Duration
+}
+
+func explicitModel(name string) bool {
+	return strings.TrimSpace(name) != "" && !strings.ContainsAny(name, "*?[]")
+}
+
+func sensitiveDataFromV1Alpha1(wr v1alpha1.Rule, reject func(string, string) *UnsupportedError) (*SensitiveData, error) {
+	sd := wr.SensitiveData
+	if wr.FailurePolicy != v1alpha1.FailClosed {
+		return nil, reject(wr.Name, "sensitiveData requires FailClosed")
+	}
+	if sd.OnDetected != v1alpha1.InternalOnly && sd.OnDetected != v1alpha1.Block && sd.OnDetected != v1alpha1.Mask {
+		return nil, reject(wr.Name, "sensitiveData.onDetected must be InternalOnly, Block or Mask")
+	}
+	if sd.OnUninspectable != v1alpha1.InternalOnly && sd.OnUninspectable != v1alpha1.Block {
+		return nil, reject(wr.Name, "sensitiveData.onUninspectable must be InternalOnly or Block")
+	}
+	if (sd.OnDetected == v1alpha1.InternalOnly || sd.OnUninspectable == v1alpha1.InternalOnly) && len(sd.InternalModels) == 0 {
+		return nil, reject(wr.Name, "InternalOnly requires non-empty internalModels")
+	}
+	for _, m := range sd.InternalModels {
+		if !explicitModel(m) {
+			return nil, reject(wr.Name, "internalModels requires explicit non-empty model names without wildcards")
+		}
+	}
+	return &SensitiveData{OnDetected: sd.OnDetected, OnUninspectable: sd.OnUninspectable, InternalModels: append([]string(nil), sd.InternalModels...)}, nil
+}
+
+func contextFromV1Alpha1(wr v1alpha1.Rule, reject func(string, string) *UnsupportedError) (*Context, error) {
+	c := wr.Routing.Context
+	if wr.FailurePolicy != v1alpha1.FailOpen {
+		return nil, reject(wr.Name, "routing.context requires FailOpen")
+	}
+	mode := c.Mode
+	if mode == "" {
+		mode = v1alpha1.Shadow
+	}
+	if mode != v1alpha1.Shadow && mode != v1alpha1.Enforce {
+		return nil, reject(wr.Name, "routing.context.mode must be Shadow or Enforce")
+	}
+	if len(c.FromModels) == 0 || !explicitModel(c.SimpleModel) || !explicitModel(c.ComplexModel) {
+		return nil, reject(wr.Name, "routing.context requires fromModels and explicit simpleModel/complexModel")
+	}
+	for _, m := range c.FromModels {
+		if !explicitModel(m) {
+			return nil, reject(wr.Name, "routing.context.fromModels requires explicit non-empty model names")
+		}
+	}
+	if c.MaxSimpleInputTokens <= 0 {
+		return nil, reject(wr.Name, "routing.context.maxSimpleInputTokens must be positive")
+	}
+	if (c.NormalModel == "" && c.MaxNormalInputTokens != 0) ||
+		(c.NormalModel != "" && (!explicitModel(c.NormalModel) || c.MaxNormalInputTokens <= c.MaxSimpleInputTokens)) {
+		return nil, reject(wr.Name, "routing.context.normalModel requires an explicit model and maxNormalInputTokens greater than maxSimpleInputTokens")
+	}
+	var stability *ContextStability
+	if c.Stability != nil {
+		stability = &ContextStability{MinHold: 5 * time.Minute, MinRequests: 3, SessionTTL: 30 * time.Minute}
+		var err error
+		if c.Stability.MinHold != "" {
+			stability.MinHold, err = time.ParseDuration(c.Stability.MinHold)
+			if err != nil {
+				return nil, reject(wr.Name, "routing.context.stability.minHold must be a duration")
+			}
+		}
+		if c.Stability.SessionTTL != "" {
+			stability.SessionTTL, err = time.ParseDuration(c.Stability.SessionTTL)
+			if err != nil {
+				return nil, reject(wr.Name, "routing.context.stability.sessionTTL must be a duration")
+			}
+		}
+		if c.Stability.MinRequests != 0 {
+			stability.MinRequests = c.Stability.MinRequests
+		}
+		if stability.MinHold < 0 || stability.MinHold > 24*time.Hour ||
+			stability.SessionTTL <= 0 || stability.SessionTTL > 24*time.Hour ||
+			stability.SessionTTL < stability.MinHold || stability.MinRequests < 1 || stability.MinRequests > 10000 {
+			return nil, reject(wr.Name, "routing.context.stability requires 0<=minHold<=sessionTTL<=24h, positive sessionTTL, and 1..10000 minRequests")
+		}
+	}
+	for _, k := range c.ComplexKeywords {
+		if strings.TrimSpace(k) == "" {
+			return nil, reject(wr.Name, "routing.context.complexKeywords must not contain blank strings")
+		}
+	}
+	return &Context{Mode: mode, FromModels: append([]string(nil), c.FromModels...), SimpleModel: c.SimpleModel, ComplexModel: c.ComplexModel, MaxSimpleInputTokens: c.MaxSimpleInputTokens, ComplexKeywords: append([]string(nil), c.ComplexKeywords...), NormalModel: c.NormalModel, MaxNormalInputTokens: c.MaxNormalInputTokens, Stability: stability}, nil
 }

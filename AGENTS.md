@@ -1,4 +1,4 @@
-<!-- generated-by: co-agent · source: CLAUDE.md · claude-md-sha: 44c6da2c807e · generated-at: 2026-08-26 · DO NOT EDIT — edit CLAUDE.md then run /co-agent sync-context -->
+<!-- generated-by: co-agent · source: CLAUDE.md · claude-md-sha: b4dc0c1468d6 · generated-at: 2026-09-12 · DO NOT EDIT — edit CLAUDE.md then run /co-agent sync-context -->
 > You are an external reviewer for this repo — project context below, distilled
 > from CLAUDE.md. This file is shared verbatim by Kiro, Codex, and Agy (not a
 > per-AI copy).
@@ -16,8 +16,8 @@ Kubernetes-native, Apache-2.0, CNCF Sandbox aspirant.
 coding-assistant traffic, (2) per-user model choice, (3) cost-driven model
 substitution — enforceable via `routing.budgetTiers` (ADR-041): a budget
 rule crossing a threshold substitutes a cheaper target for a requested
-model name, judged globally by the control plane, never widening access
-or denying, (4) team/per-user budget control with visibility, (5) no SPOF.
+model name. Legacy substitutions never widen access or deny; opt-in ADR-044
+strict targets constrain every attempt and may refuse. (4) team/per-user budget control with visibility, (5) no SPOF.
 Known tension: (5)'s no-SPOF pulls against making (4)'s enforcement accurate
 under multi-replica — see the HA note below.
 
@@ -36,6 +36,7 @@ chain.
 
 ```bash
 CGO_ENABLED=0 go build -trimpath -o bin/mayu ./cmd/mayu
+CGO_ENABLED=0 go build -trimpath -o bin/inferplaned ./cmd/inferplaned
 go test ./... -race
 go vet ./... && gofmt -l .
 bash tests/run-all.sh   # harness tests (bash, not Go)
@@ -63,12 +64,45 @@ credentials, or a real IdP (httptest fakes only).
   once.
 - `internal/cache` (VolatileStore, for cache-affinity routing) is an
   unimplemented interface with no importers today — don't assume
-  cache-affinity is enforced anywhere yet. This is unrelated to `internal/tier`
+  the legacy affinity subtype is enforced. ADR-044 context stability has its own
+  bounded local successful-target store; it is not financial authority. This is unrelated to `internal/tier`
   (ADR-041 budget-tier substitution), which is implemented and does not
   depend on `internal/cache`.
-- A budget-tier substitution TARGET must pass RBAC and be routed on the
-  enforcing data plane, or the ORIGINAL model is served — substitution must
-  never widen access and must never itself deny a request.
+- A legacy budget-tier substitution TARGET must pass RBAC and be routed or
+  the ORIGINAL is served. Opt-in enforceTargets instead restricts every
+  choice/retry to its target; unavailable/conflicting targets deny. Its soft
+  budget reference is an accounting threshold, not an admission lease or a
+  smaller hard cap. Independent hard caps always remain binding.
+
+## Adaptive routing (ADR-043/044)
+
+- Local original-byte inspection returns finite email/phone/card/SSN/IPv4/Korean-ID
+  signals and coverage. Unknown/opaque input is not clean. No universal PII claim.
+- Privacy requires FailClosed: Block wins, internal-model sets intersect, Mask
+  remains required alongside InternalOnly. Complete and independently reinspect
+  redaction before returning a usable chain; ingresses consume SanitizedBody and
+  reparse. Unsafe structural/numeric changes refuse. Remote tools cannot bypass
+  an internal boundary by selecting an internal model.
+- Legacy context stays single-turn/two-class. Optional normalModel/stability
+  enables compatible tool/history sessions. Extended keywords use latest user
+  intent; full input size still constrains capacity. All context remains Shadow
+  by default and cannot loosen privacy or strict budget targets.
+- Affinity pins an actual successful model/provider/upstream, with bounded TTL
+  and identity-scoped HMAC hints. Revalidate every hit; no raw prompt/session ID
+  in storage, observability or authorization. No network dependency; restart or
+  capacity loss can cause a cold cache, never permission expansion.
+- Responses ingress uses the same identity/readiness/routing/governance gates.
+  Native transport preserves bytes; stateless adapters reject unsupported opaque
+  or provider-owned state. CLI/fake-provider tests do not establish model quality.
+- Requested is resolved pre-tier; selected/proposed differ from actual attempts.
+  All attempts and pricing use one topology snapshot. Policy/metadata changes
+  still require runtime revalidation and an upgraded producer/consumer/CRD set.
+- Rejected privacy or strict-budget distribution gates affected subjects until
+  valid recovery. Count APIs stay local/200 on refusal or unready/stale gates.
+- Audit additions are append-only/omitempty; metric dimensions remain bounded.
+  No prompt, detected value, session ID, user or key ID enters new metric labels.
+- Evaluate task success, total settled cost including cold-cache/retries and
+  latency before enabling Enforce. Model names do not attest privacy or price.
 
 ## Banned patterns / security mandates (violations are CRITICAL)
 
@@ -82,8 +116,9 @@ credentials, or a real IdP (httptest fakes only).
   must be config-bounded — never raw client input).
 - `count_tokens` returning non-200 (it crashes Claude Code).
 - Float cost arithmetic — cost is integer microUSD, round-half-even.
-- Mutating a request body when ingress protocol == provider protocol (cache
-  invariant: verbatim `RawBody` passthrough preserves prompt-cache hits).
+- Mutating same-protocol content outside documented model substitution or
+  explicitly required, completely verified PII masking. Default RawBody
+  passthrough preserves prompt-cache bytes.
 - Admin-plane: JWT-shaped static tokens with OIDC enabled; non-https OIDC
   issuer; email or raw IdP groups in audit records or request context
   (opaque `sub` only); auditing 401s (only authenticated 403s are audited).
@@ -104,16 +139,25 @@ credentials, or a real IdP (httptest fakes only).
 - Audit chain: records are hashed as exact line bytes — new fields are
   append-only with `omitempty`, proven by a mixed-version fixture test.
 - Fail closed: missing identity/lookup errors deny, never default-allow.
-- Data-plane multi-replica HA has a maintainer-stated direction, not yet an
-  ADR (Postgres-only shared state, narrower than ADR-013's original
-  Postgres+Redis design) — implementation is still deferred, ADR-013 itself
-  is not marked superseded,
-  and no implementation ADR exists yet. Rate-limit counters, budget/quota
-  stores, and the circuit breaker are all instance-local today. **Suppress**
-  "the in-memory limiter/budget won't scale past one replica" as a new
-  architecture finding — that's the known, tracked gap. **Do flag** any doc,
-  chart value, config comment, or code comment that implies multi-replica/HA
-  works *today* — that's a docs-accuracy bug, not the known gap.
+- ADR-045 implements opt-in Postgres global GovernancePolicy monetary authority
+  across node-local gateways and control-plane replicas. Every provider attempt
+  reserves durable local credit; incomplete/unknown usage retains uncertainty.
+  Expiry never refunds central grants; node restart burns old OPEN grants and
+  fences prior journal users. UTC windows come from database time. Snapshot
+  validation and journal installation precede policy publication. No memory
+  fallback, hidden transport retries, or fabricated actual cost.
+- ADR-046 adds explicit shared Postgres key/governance mode. It synchronously
+  resolves key+team snapshots and atomically reserves every applicable RPM/TPM,
+  token quota and money scope. Policy money shares ADR-045 authority_accounts;
+  separate authority namespaces or stale routing generations refuse.
+- Shared bootstrap uses immutable original declaration fingerprints. Admin edits
+  and revocation/deletion survive unchanged restarts. Conditional revoke checks
+  the authorized snapshot. Imports retain full hashes and revoked rows.
+- Shared mode requires HA Postgres and fails closed on DB loss; it is not the
+  disconnected node-local profile. Counts remain local/200. Mutable SQLite
+  provider topology is rejected; common file/ConfigMap topology is supported.
+- Default/local rate and key stores remain local. Do not mistake the shared
+  profile's explicit DB dependency for a change to ADR-045 node-local admission.
 
 ## Review checklist
 

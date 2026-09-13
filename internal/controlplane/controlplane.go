@@ -15,6 +15,7 @@ package controlplane
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"sync"
@@ -43,9 +44,10 @@ const maxRejections = 100
 
 // Server is the control-plane distribution state and its HTTP handlers.
 type Server struct {
-	paths    []string
-	token    string // shared bearer token; "" = no auth (loopback-only deployments)
-	authOpts authOptions
+	authority BudgetAuthorityBackend
+	paths     []string
+	token     string // shared bearer token; "" = no auth (loopback-only deployments)
+	authOpts  authOptions
 
 	mu         sync.Mutex
 	wire       []v1alpha1.GovernancePolicy
@@ -76,14 +78,15 @@ type ruleKey struct{ policy, rule string }
 // and cumulative allowance per data plane. remaining = limit − Σspent −
 // Σ(outstanding allowance beyond reported spend of OTHER data planes).
 type ruleLedger struct {
-	team       string
-	limitMicro int64
-	grantMicro int64
-	renew      time.Duration
-	hard       bool
-	period     v1alpha1.BudgetPeriod
-	spent      map[string]int64 // dataplane → cumulative reported µUSD (monotonic)
-	allowance  map[string]int64 // dataplane → cumulative granted µUSD
+	team        string
+	limitMicro  int64
+	grantMicro  int64
+	renew       time.Duration
+	hard        bool
+	period      v1alpha1.BudgetPeriod
+	routingOnly bool
+	spent       map[string]int64 // dataplane → cumulative reported µUSD (monotonic)
+	allowance   map[string]int64 // dataplane → cumulative granted µUSD
 }
 
 // totals returns the ledger's global reported spend and outstanding
@@ -97,7 +100,7 @@ type ruleLedger struct {
 // differently by accident.
 func (l *ruleLedger) totals(now time.Time, dataplanes map[string]*dpInfo, excludeDataplane string) (spent, outstanding int64) {
 	for _, sp := range l.spent {
-		spent += sp
+		spent = addAccounting(spent, sp)
 	}
 	for d, al := range l.allowance {
 		if d == excludeDataplane {
@@ -108,10 +111,19 @@ func (l *ruleLedger) totals(now time.Time, dataplanes map[string]*dpInfo, exclud
 			continue // lease expired (or holder pruned): grant released
 		}
 		if extra := al - l.spent[d]; extra > 0 {
-			outstanding += extra
+			outstanding = addAccounting(outstanding, extra)
 		}
 	}
 	return spent, outstanding
+}
+
+// addAccounting saturates amounts already consumed or reserved. Its result must
+// never be used to create a grant: saturation there would manufacture authority.
+func addAccounting(a, b int64) int64 {
+	if a < 0 || b < 0 || a > math.MaxInt64-b {
+		return math.MaxInt64 // unknown/overflowing accounting never creates authority
+	}
+	return a + b
 }
 
 // tierRule is the control plane's evaluation state for one ADR-041
@@ -119,10 +131,11 @@ func (l *ruleLedger) totals(now time.Time, dataplanes map[string]*dpInfo, exclud
 // against, and the tier ladder (thresholds must be strictly increasing,
 // validated at FromV1Alpha1).
 type tierRule struct {
-	policy, rule  string
-	team          string
-	budgetRuleKey ruleKey
-	tiers         []policy.BudgetTier
+	policy, rule   string
+	team           string
+	budgetRuleKey  ruleKey
+	tiers          []policy.BudgetTier
+	enforceTargets bool
 }
 
 type dpInfo struct {
@@ -194,8 +207,9 @@ func (s *Server) applyWire(wire []v1alpha1.GovernancePolicy, mtimes map[string]t
 				bt := r.Routing.BudgetTiers
 				tiers[ruleKey{policy: internal.Name, rule: r.Name}] = &tierRule{
 					policy: internal.Name, rule: r.Name, team: internal.Subject.Team,
-					budgetRuleKey: ruleKey{policy: internal.Name, rule: bt.BudgetRef},
-					tiers:         bt.Tiers,
+					budgetRuleKey:  ruleKey{policy: internal.Name, rule: bt.BudgetRef},
+					tiers:          bt.Tiers,
+					enforceTargets: bt.EnforceTargets,
 				}
 			}
 			// A USER-scoped budget rule gets no ledger row and no lease
@@ -218,14 +232,15 @@ func (s *Server) applyWire(wire []v1alpha1.GovernancePolicy, mtimes map[string]t
 			}
 			k := ruleKey{policy: internal.Name, rule: r.Name}
 			l := &ruleLedger{
-				team:       internal.Subject.Team,
-				limitMicro: r.Budget.LimitMicroUSD,
-				grantMicro: r.Budget.LeaseGrantMicroUSD,
-				renew:      r.Budget.LeaseRenewInterval,
-				hard:       r.Budget.HardCap,
-				period:     r.Budget.Period,
-				spent:      map[string]int64{},
-				allowance:  map[string]int64{},
+				team:        internal.Subject.Team,
+				limitMicro:  r.Budget.LimitMicroUSD,
+				routingOnly: policy.IsRoutingOnlyBudget(internal, r.Name),
+				grantMicro:  r.Budget.LeaseGrantMicroUSD,
+				renew:       r.Budget.LeaseRenewInterval,
+				hard:        r.Budget.HardCap,
+				period:      r.Budget.Period,
+				spent:       map[string]int64{},
+				allowance:   map[string]int64{},
 			}
 			// Carry spend/allowance forward only when the rule's period is
 			// UNCHANGED. A month's cumulative spend is not the same quantity
@@ -233,7 +248,13 @@ func (s *Server) applyWire(wire []v1alpha1.GovernancePolicy, mtimes map[string]t
 			// must start the new window's ledger row at zero rather than
 			// inheriting a number measured against a different window.
 			if prev, ok := s.ledger[k]; ok && prev.period == l.period {
-				l.spent, l.allowance = prev.spent, prev.allowance
+				l.spent = prev.spent
+				// A soft switching threshold has no admission authority.
+				// Preserve its measured spend, but drop any allowance from
+				// before it became routing-only. Hard budgets never qualify.
+				if !l.routingOnly {
+					l.allowance = prev.allowance
+				}
 			}
 			ledger[k] = l
 			if minRenew == 0 || r.Budget.LeaseRenewInterval < minRenew {
@@ -252,10 +273,18 @@ func (s *Server) applyWire(wire []v1alpha1.GovernancePolicy, mtimes map[string]t
 	// The latch itself (s.tierLatch) is NOT rebuilt here — it must survive a
 	// policy edit the same way ledger spend/allowance do (carried forward
 	// above by ruleKey match), or every reload would silently un-latch every
-	// team mid-window. Only forget state for rules that no longer exist, so
-	// the latch's map doesn't grow without bound across repeated edits.
+	// team mid-window. Removed rules lose their state. A budget's transition
+	// from admission to routing-only also changes the quantity being judged:
+	// discard a latch that may have fired from obsolete reserved allowance,
+	// then reevaluate it from the preserved actual spend at the next sync.
 	for k := range s.tiers {
-		if _, stillExists := tiers[k]; !stillExists {
+		next, stillExists := tiers[k]
+		if !stillExists {
+			s.tierLatch.Forget(k.policy + "/" + k.rule)
+			continue
+		}
+		previousBudget, nextBudget := s.ledger[next.budgetRuleKey], ledger[next.budgetRuleKey]
+		if previousBudget != nil && nextBudget != nil && !previousBudget.routingOnly && nextBudget.routingOnly {
 			s.tierLatch.Forget(k.policy + "/" + k.rule)
 		}
 	}
@@ -342,6 +371,23 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"dataplane id required"}`, http.StatusBadRequest)
 		return
 	}
+	if s.authority != nil {
+		s.authoritySync(w, r, req)
+		return
+	}
+	if req.Authority != nil {
+		http.Error(w, `{"error":"server does not support durable budget authority"}`, http.StatusConflict)
+		return
+	}
+	// Validate the entire batch before registration, pruning, accounting, or
+	// granting anything. Even an unknown rule or stale-period report must not
+	// smuggle negative accounting past this boundary; a bad batch is atomic.
+	for _, rep := range req.Reports {
+		if rep.SpentMicroUSD < 0 {
+			http.Error(w, `{"error":"reported spend must be non-negative"}`, http.StatusBadRequest)
+			return
+		}
+	}
 
 	s.mu.Lock()
 	now := s.now()
@@ -413,19 +459,26 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 	// permanently shrinking everyone's remaining budget.
 	resp := policy.SyncResponse{Generation: s.generation, SyncIntervalSeconds: s.interval}
 	for k, l := range s.ledger {
+		if l.routingOnly {
+			// A switching threshold measures spend; it is not a second
+			// admission allowance that can shrink an independent total cap.
+			continue
+		}
 		// Outstanding iterates the ALLOWANCE map, not the spent map: a
 		// freshly granted data plane that has never reported yet has no
 		// spent entry, and skipping its grant here would hand the same
 		// remaining budget to every newcomer at once.
 		globalSpent, outstanding := l.totals(now, s.dataplanes, req.Dataplane)
-		remaining := l.limitMicro - globalSpent - outstanding
-		if remaining < 0 {
-			remaining = 0
+		remaining := int64(0)
+		if globalSpent < l.limitMicro && outstanding < l.limitMicro-globalSpent {
+			remaining = l.limitMicro - globalSpent - outstanding
 		}
 		add := l.grantMicro
 		if add > remaining {
 			add = remaining
 		}
+		// Reports are nonnegative. add is at most limit-globalSpent, or zero
+		// when exhausted, so this sum fits int64 without grant saturation.
 		allowance := l.spent[req.Dataplane] + add
 		l.allowance[req.Dataplane] = allowance
 		resp.Leases = append(resp.Leases, policy.LeaseGrant{
@@ -450,15 +503,12 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 			continue // budgetRef's budget rule doesn't exist (e.g. unlimited, or removed)
 		}
 		spent, outstanding := l.totals(now, s.dataplanes, "")
-		utilizedPercent := 0
-		if l.limitMicro > 0 {
-			utilizedPercent = int(100 * float64(spent+outstanding) / float64(l.limitMicro))
-		}
+		utilizedPercent := tier.UtilizedPercent(spent, outstanding, l.limitMicro)
 		thresholds := make([]int, len(tr.tiers))
 		for i, t := range tr.tiers {
 			thresholds[i] = t.ThresholdPercent
 		}
-		idx := s.tierLatch.Evaluate(k.policy+"/"+k.rule, tier.WindowKey(now), thresholds, utilizedPercent)
+		idx := s.tierLatch.Evaluate(k.policy+"/"+k.rule, tier.WindowKeyForPeriod(now.UTC(), l.period), thresholds, utilizedPercent)
 		if idx < 0 {
 			continue
 		}
@@ -466,6 +516,7 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 		resp.ActiveTiers = append(resp.ActiveTiers, policy.ActiveTier{
 			Policy: tr.policy, Rule: tr.rule, BudgetRef: tr.budgetRuleKey.rule, Team: tr.team,
 			ThresholdPercent: active.ThresholdPercent, Substitute: active.Substitute,
+			EnforceTargets: tr.enforceTargets,
 		})
 	}
 

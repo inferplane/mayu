@@ -23,6 +23,7 @@ import (
 	"github.com/inferplane/inferplane/internal/pricing"
 	"github.com/inferplane/inferplane/internal/principal"
 	"github.com/inferplane/inferplane/internal/router"
+	"github.com/inferplane/inferplane/internal/server/requestpolicy"
 	"github.com/inferplane/inferplane/internal/telemetry"
 	"github.com/inferplane/inferplane/internal/tracing"
 	"github.com/inferplane/inferplane/pkg/schema"
@@ -163,6 +164,7 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// deny": it only fires when the ORIGINAL is already allowed and the
 	// TARGET also passes RBAC, so the Allows check below is never bypassed,
 	// only ever re-run against a (still fully RBAC'd) different model.
+	requestedModel := model // resolved PRE-TIER model; raw client aliases/fallbacks are already handled
 	if served, tierSubstituted := h.r.SubstituteTier(p, model); tierSubstituted {
 		h.metrics.ObserveModelSubstitution(p.Team, model, served)
 		req = req.WithContext(audit.WithSubstitutedFrom(req.Context(), model))
@@ -199,33 +201,61 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// both for the region filter and the guardrail override — a team with no
 	// record is indistinguishable from a record with no overrides (zero value).
 	var teamRec keystore.TeamRecord
-	if h.teamPolicy != nil {
-		if rec, ok := h.teamPolicy(p.Team); ok {
+	if h.teamPolicy != nil || p.TeamSnapshotLoaded {
+		if rec, ok := requestpolicy.TeamSnapshot(p, h.teamPolicy); ok {
 			teamRec = rec
 		}
 	}
 	// Per-team region lock (D7, ADR-020): drop targets outside the team's
 	// allowed regions BEFORE any billing/masking work. An unlabeled target is
 	// always dropped for a restricted team (fail-closed — it cannot prove
-	// residency). If every target is filtered out, this is a hard deny, same
-	// shape as the allow-list 403 above.
+	// residency). Defer an empty result until policy routing has considered
+	// approved alternatives under the same region restriction.
 	if len(teamRec.AllowedRegions) > 0 {
-		if filtered := router.FilterRegions(chain, teamRec.AllowedRegions); len(filtered) == 0 {
-			h.audit(req.Context(), p, model, "", &audit.OutcomeRef{Status: 403, Error: audit.DenyRegionBlocked.Ptr()}, false, traceID)
-			h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 403, time.Since(start).Seconds(), 0)
-			tracing.SetStatus(span, false, "region blocked")
-			writeErr(w, 403, "permission_error", "no allowed-region target for model: "+model)
-			return
-		} else {
-			chain = filtered
-		}
+		chain = router.FilterRegions(chain, teamRec.AllowedRegions)
 	}
+	result, routeErr := h.r.RouteRequest(req.Context(), router.RequestRoutingInput{
+		Principal: p, Protocol: "anthropic", RawBody: raw, RequestedModel: requestedModel,
+		Model: model, Chain: chain, State: st, AllowedRegions: teamRec.AllowedRegions,
+		SessionHint: requestpolicy.SessionHint(req),
+		Redactor:    requestpolicy.CombinedRedactor(h.mask, p.Team),
+	})
+	req = requestpolicy.Observe(w, req, result, h.metrics)
+	if routeErr != nil {
+		// Legacy filtered-chain errors retain their established wire/audit shape.
+		// The chain is NEVER restored, even when no policy was applicable.
+		if !requestpolicy.Active(result.Decision) {
+			if len(chain) == 0 && len(teamRec.AllowedRegions) > 0 {
+				h.audit(req.Context(), p, model, "", &audit.OutcomeRef{Status: 403, Error: audit.DenyRegionBlocked.Ptr()}, false, traceID)
+				h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 403, time.Since(start).Seconds(), 0)
+				tracing.SetStatus(span, false, "region blocked")
+				writeErr(w, 403, "permission_error", "no allowed-region target for model: "+model)
+				return
+			}
+		}
+		reason := result.Decision.Reason
+		h.audit(req.Context(), p, model, "", &audit.OutcomeRef{Status: http.StatusForbidden, Error: &reason}, false, traceID)
+		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, http.StatusForbidden, time.Since(start).Seconds(), 0)
+		tracing.SetStatus(span, false, reason)
+		writeErr(w, http.StatusForbidden, "permission_error", routeErr.Error())
+		return
+	}
+	model, chain, st = result.Model, result.Chain, result.State
+	tracing.SetGenAIRequest(span, model)
+	if result.MaskRequired {
+		if len(result.SanitizedBody) == 0 || json.Unmarshal(result.SanitizedBody, &parsed) != nil {
+			writeErr(w, 400, "invalid_request_error", "request could not be PII-masked")
+			return
+		}
+		raw = result.SanitizedBody
+	}
+
 	// PII masking (ADR-009): for a masked team, mask request text BEFORE the
 	// governance estimate and the upstream call. Masking updates BOTH RawBody and
 	// the parsed request (the openai_compatible provider converts from Parsed, not
 	// RawBody — masking only one would leak PII). FAIL CLOSED: a masker error
 	// rejects the request; the unmasked body is never forwarded.
-	piiMasked := false
+	piiMasked := result.Decision.Masked
 	if h.mask.Enabled(p.Team) {
 		masked, n, err := maskBody(raw, h.mask.Filter)
 		if err != nil {
@@ -263,7 +293,7 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// requests; anything borderline falls through to the upstream's exact
 	// check. Runs before PreCheck so a doomed request never charges the TPM
 	// estimate.
-	if win := h.r.ContextWindow(model); win > 0 {
+	if win := requestpolicy.ContextWindow(st, model); win > 0 {
 		if est := estimateTokens(raw); est > win {
 			msg := fmt.Sprintf("request is ~%d tokens but model %s has a %d-token context window — reduce the input (or raise models.%s.context_window if the declaration is wrong)", est, model, win, model)
 			h.audit(req.Context(), p, model, chain[0].Upstream, &audit.OutcomeRef{Status: http.StatusBadRequest}, false, traceID)
@@ -333,12 +363,24 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				w.Header().Set("x-inferplane-model-fallback", ct.Model)
 			}
 		}
+		reservedReq, finishBudget, reserveErr := requestpolicy.ReserveBudget(req, h.gov, p, ct, st, raw)
+		if reserveErr != nil {
+			status := requestpolicy.BudgetStatus(reserveErr)
+			requestpolicy.BudgetErrorHeaders(w, reserveErr)
+			h.audit(req.Context(), p, model, ct.Upstream, &audit.OutcomeRef{Status: status}, false, traceID)
+			writeErr(w, status, "insufficient_quota", "budget authority unavailable")
+			return
+		}
+		defer finishBudget() // also retain authority if a provider panics
+		attemptReq := reservedReq.WithContext(audit.WithRoutingAttempt(reservedReq.Context(), ct.Model, ct.ProviderName, ct.DataBoundary))
+		attemptReq = requestpolicy.WithAffinityAttempt(attemptReq, h.r, result.AffinityToken, ct)
 		var retriable bool
 		if stream {
-			retriable = h.serveStream(w, req, ct.Provider, pr, p, ct.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, crossModelNext, start, table)
+			retriable = h.serveStream(w, attemptReq, ct.Provider, pr, p, ct.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, crossModelNext, start, table)
 		} else {
-			retriable = h.serveComplete(w, req, ct.Provider, pr, p, ct.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, crossModelNext, start, table)
+			retriable = h.serveComplete(w, attemptReq, ct.Provider, pr, p, ct.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, crossModelNext, start, table)
 		}
+		finishBudget()
 		if !retriable {
 			return // committed (success, or terminal error on the last target)
 		}
@@ -431,6 +473,9 @@ func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request
 	// counted (it was teed as the client's real upstream error).
 	if resp.StatusCode < 400 {
 		h.r.RecordResult(providerName, identity, true)
+		if resp.StatusCode/100 == 2 && resp.Parsed != nil && resp.Parsed.Usage != nil {
+			requestpolicy.RecordSuccess(req)
+		}
 	}
 	// resp.Parsed.Usage is the observation hook for M3 audit / M5 quota.
 	var usage *audit.UsageRef
@@ -438,6 +483,7 @@ func (h *MessagesHandler) serveComplete(w http.ResponseWriter, req *http.Request
 	if resp.Parsed != nil {
 		usage = usageRef(resp.Parsed.Usage)
 		cost = h.settle(p, providerName, model, upstream, resp.Parsed.Usage, table, estimateTokens(pr.RawBody))
+		requestpolicy.SettleBudget(req, cost, resp.Parsed.Usage, resp.StatusCode/100 == 2)
 		h.observeTokens(model, providerName, p.Team, resp.Parsed.Usage)
 	}
 	// Body capture (D4, ADR-018): copy-only, AFTER the response was already
@@ -509,6 +555,7 @@ func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, 
 	var usage *audit.UsageRef
 	var lastUsage *schema.Usage
 	var ttft float64
+	var streamCompleted, streamFailed bool
 	for ev, err := range seq {
 		if err != nil {
 			// upstream broke mid-stream: the 200 is already committed, so the
@@ -525,6 +572,7 @@ func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, 
 			// mid-flight skipped settle() entirely and everything already
 			// streamed was free, with no pricing_missing flag to show it.
 			partialCost := h.settle(p, providerName, model, upstream, lastUsage, table, estimateTokens(pr.RawBody))
+			requestpolicy.SettleBudget(req, partialCost, lastUsage, false)
 			// …and count them, on the same usage settle() just billed. Metering
 			// only the clean path left gen_ai_client_token_usage_total below the
 			// budget spend, the audit ledger, and the usage windows for every
@@ -547,6 +595,8 @@ func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, 
 		// output_tokens alone. Reading only the top-level usage of the last
 		// frame billed streaming requests for output tokens only.
 		if ev.Chunk != nil {
+			streamCompleted = streamCompleted || ev.Chunk.Type == "message_stop"
+			streamFailed = streamFailed || ev.Chunk.Type == "error"
 			if ev.Chunk.Message != nil && ev.Chunk.Message.Usage != nil {
 				lastUsage = schema.MergeUsage(lastUsage, ev.Chunk.Message.Usage)
 			}
@@ -557,6 +607,10 @@ func (h *MessagesHandler) serveStream(w http.ResponseWriter, req *http.Request, 
 		}
 	}
 	cost := h.settle(p, providerName, model, upstream, lastUsage, table, estimateTokens(pr.RawBody))
+	requestpolicy.SettleBudget(req, cost, lastUsage, streamCompleted && !streamFailed)
+	if streamCompleted && !streamFailed && lastUsage != nil {
+		requestpolicy.RecordSuccess(req)
+	}
 	h.observeTokens(model, providerName, p.Team, lastUsage)
 	// Body capture (D4, ADR-018): REQUEST ONLY for streams — a streaming
 	// response exists only as per-event ev.Raw, never buffered as a whole
@@ -669,7 +723,7 @@ func (h *MessagesHandler) audit(ctx context.Context, p keystore.Principal, model
 		ID:            ulid.New(),
 		TS:            time.Now().UTC().Format(time.RFC3339Nano),
 		Principal:     audit.PrincipalRef{KeyID: p.KeyID, Team: p.Team},
-		Request:       audit.RequestRef{Ingress: "anthropic", ModelRequested: model, ModelResolved: upstream, PIIMasked: piiMasked, ModelSubstitutedFrom: audit.SubstitutedFrom(ctx)},
+		Request:       audit.RequestRef{Ingress: "anthropic", ModelRequested: model, ModelResolved: upstream, PIIMasked: piiMasked, ModelSubstitutedFrom: audit.SubstitutedFrom(ctx), Routing: audit.RoutingFrom(ctx)},
 		Outcome:       outcome,
 	}
 	if traceID != "" {
@@ -694,7 +748,7 @@ func (h *MessagesHandler) auditCompleted(ctx context.Context, id string, p keyst
 		ID:            id,
 		TS:            time.Now().UTC().Format(time.RFC3339Nano),
 		Principal:     audit.PrincipalRef{KeyID: p.KeyID, Team: p.Team},
-		Request:       audit.RequestRef{Ingress: "anthropic", ModelRequested: model, ModelResolved: upstream, ModelSubstitutedFrom: audit.SubstitutedFrom(ctx)},
+		Request:       audit.RequestRef{Ingress: "anthropic", ModelRequested: model, ModelResolved: upstream, ModelSubstitutedFrom: audit.SubstitutedFrom(ctx), Routing: audit.RoutingFrom(ctx)},
 		Outcome:       &audit.OutcomeRef{Status: status},
 		Usage:         usage,
 		Cost:          cost,
@@ -726,7 +780,7 @@ func (h *MessagesHandler) auditCompletedPartial(ctx context.Context, p keystore.
 		ID:            ulid.New(),
 		TS:            time.Now().UTC().Format(time.RFC3339Nano),
 		Principal:     audit.PrincipalRef{KeyID: p.KeyID, Team: p.Team},
-		Request:       audit.RequestRef{Ingress: "anthropic", ModelRequested: model, ModelResolved: upstream, ModelSubstitutedFrom: audit.SubstitutedFrom(ctx)},
+		Request:       audit.RequestRef{Ingress: "anthropic", ModelRequested: model, ModelResolved: upstream, ModelSubstitutedFrom: audit.SubstitutedFrom(ctx), Routing: audit.RoutingFrom(ctx)},
 		Outcome:       &audit.OutcomeRef{Status: 200, Partial: true},
 		Usage:         usage,
 		Cost:          cost,

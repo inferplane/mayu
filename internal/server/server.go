@@ -27,6 +27,8 @@ import (
 	"github.com/inferplane/inferplane/internal/server/bedrockapi"
 	"github.com/inferplane/inferplane/internal/server/configapi"
 	"github.com/inferplane/inferplane/internal/server/openaiapi"
+	"github.com/inferplane/inferplane/internal/server/requestpolicy"
+	"github.com/inferplane/inferplane/internal/server/responsesapi"
 	"github.com/inferplane/inferplane/internal/server/usageapi"
 	"github.com/inferplane/inferplane/internal/telemetry"
 	"github.com/inferplane/inferplane/pkg/ulid"
@@ -124,6 +126,12 @@ func DataMux(r *router.Router, holder *live.Holder, store keystore.Store, aud *a
 	ct := anthropicapi.NewCountTokensHandler(r)
 	ct.SetMasking(mask)          // mask the count body too (T6); never 500
 	ct.SetTeamPolicy(teamPolicy) // region lock (D7, ADR-020): never call an out-of-region TokenCounter
+	countGate := o.governanceGate
+	if gov.HasSharedAuthority() {
+		countGate = func() (bool, string) { return false, "shared counts are local" }
+	}
+	ct.SetGovernanceGate(countGate)
+	ct.SetObservability(aud, m)
 	mux.Handle("POST /v1/messages/count_tokens", ct)
 	chat := openaiapi.NewChatHandlerMetrics(r, aud, gov, m)
 	chat.SetMasking(mask) // masked teams rejected on the OpenAI ingress (T6b)
@@ -131,6 +139,12 @@ func DataMux(r *router.Router, holder *live.Holder, store keystore.Store, aud *a
 	chat.SetBodyRecorder(bodies)
 	chat.SetUsageCollector(o.usage)
 	mux.Handle("POST /v1/chat/completions", chat)
+	resp := responsesapi.NewHandler(r, aud, gov, m)
+	resp.SetMasking(mask)
+	resp.SetTeamPolicy(teamPolicy)
+	resp.SetBodyRecorder(bodies)
+	resp.SetUsageCollector(o.usage)
+	mux.Handle("POST /v1/responses", resp)
 	invoke := bedrockapi.NewInvokeHandlerMetrics(r, holder, aud, gov, m, false)
 	invoke.SetMasking(mask)
 	invoke.SetTeamPolicy(teamPolicy)
@@ -146,6 +160,8 @@ func DataMux(r *router.Router, holder *live.Holder, store keystore.Store, aud *a
 	bct := bedrockapi.NewCountTokensHandler(r, holder)
 	bct.SetMasking(mask)
 	bct.SetTeamPolicy(teamPolicy)
+	bct.SetGovernanceGate(countGate)
+	bct.SetObservability(aud, m)
 	mux.Handle("POST /model/{modelId}/count-tokens", bct)
 	// Both the Anthropic (Claude Code) and OpenAI (OpenCode) clients hit the
 	// same GET /v1/models path but expect different response shapes, so we
@@ -235,15 +251,19 @@ func governanceGateMiddleware(gate func() (bool, string), next http.Handler) htt
 // whose read error surfaces through the SAME io.ReadAll each generation
 // ingress already treats as a malformed body — so this wrap changes no
 // handler's error path, only whether/when it fires. The two count_tokens
-// handlers ignore the read error entirely and fall back to the local
-// estimator, so they stay 200 either way (the never-non-200 invariant).
+// handlers use a local estimate on read errors. Declared oversized counts must
+// also reach that bounded reader, preserving their 200 contract after KeyAuth.
 func maxBytesMiddleware(limit int64, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.ContentLength > limit {
+		count := strings.HasSuffix(r.URL.Path, "/count_tokens") || strings.HasSuffix(r.URL.Path, "/count-tokens")
+		if r.ContentLength > limit && !count {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusRequestEntityTooLarge)
 			_, _ = w.Write([]byte(`{"error":"request body too large"}`))
 			return
+		}
+		if r.ContentLength > limit && count {
+			r = r.WithContext(requestpolicy.WithLocalCount(r.Context()))
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, limit)
 		next.ServeHTTP(w, r)

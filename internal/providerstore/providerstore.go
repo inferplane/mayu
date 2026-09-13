@@ -27,6 +27,7 @@ var ErrNotFound = errors.New("providerstore: not found")
 // APIKeyRefEnv (env var name) or APIKeyRefFile (file path), plus the bedrock IAM
 // AuthMode/AuthProfile — and has NO field that can hold a secret value.
 type ProviderRow struct {
+	DataBoundary  string
 	Name          string
 	Type          string
 	BaseURL       string
@@ -56,14 +57,16 @@ type Target struct {
 	API      string
 }
 
-// ModelRoute is a model's alias list plus its ordered target chain — the model
+// ModelRoute holds model-level metadata, aliases, and an ordered target chain — the model
 // analog of ProviderRow for a group-level (not per-target) attribute. Aliases
 // are stored per MODEL, not per target row, so they cannot be duplicated across
 // a multi-target fallback chain the way a column on model_targets would (ADR-021
 // follow-up: aliases in the providerstore/UI-write DB path).
 type ModelRoute struct {
-	Aliases []string
-	Targets []Target
+	ContextWindow int64
+	Capabilities  []string
+	Aliases       []string
+	Targets       []Target
 }
 
 // Store is the persistence interface for the topology. The SQLite implementation
@@ -74,12 +77,12 @@ type Store interface {
 	ListProviders(ctx context.Context) ([]ProviderRow, error)
 	DeleteProvider(ctx context.Context, name string) error
 
-	// SetModel replaces a model's aliases and ordered target chain (replace-all,
+	// SetModel replaces a model's metadata, aliases, and ordered target chain (replace-all,
 	// in a txn).
 	SetModel(ctx context.Context, name string, route ModelRoute) error
-	// ListModels returns every model name → its aliases + ordered targets.
+	// ListModels returns every model name → metadata, aliases, and ordered targets.
 	ListModels(ctx context.Context) (map[string]ModelRoute, error)
-	// DeleteModel removes a model route and its aliases (ErrNotFound if absent).
+	// DeleteModel removes a model route, metadata, and aliases (ErrNotFound if absent).
 	DeleteModel(ctx context.Context, name string) error
 
 	// Seeded reports whether the one-time file→DB seed has run (durable marker).

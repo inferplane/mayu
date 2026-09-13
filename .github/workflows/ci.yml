@@ -46,6 +46,9 @@ jobs:
         with:
           go-version-file: go.mod
           check-latest: true
+          cache-dependency-path: |
+            go.sum
+            deploy/crd/validation/go.sum
 
       - name: gofmt
         run: |
@@ -57,6 +60,9 @@ jobs:
 
       - name: go vet
         run: go vet ./...
+
+      - name: Native Kubernetes CRD and CEL validation
+        run: go -C deploy/crd/validation run -mod=readonly . ../inferplane.dev_governancepolicies.yaml
 
       - name: Build both binaries (static, CGO off)
         run: |
@@ -86,4 +92,9 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - name: Run govulncheck
+        # setup-go v6+ exports GOTOOLCHAIN=local; the scanner may need a newer Go.
+        # Scope this override to the scanner so builds still use go.mod's version.
+        env:
+          GOTOOLCHAIN: auto
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...

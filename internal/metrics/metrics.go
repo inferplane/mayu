@@ -39,12 +39,16 @@ type Metrics struct {
 	budgetRejected     prometheus.Counter     // inferplane_budget_store_rejected_total
 	budgetRejectedSeen int64                  // last value passed to SetBudgetStoreRejections; atomic
 	substitution       *prometheus.CounterVec // inferplane_model_substitution_total (ADR-041)
+	routingDecisions   *prometheus.CounterVec // inferplane_routing_decisions_total
 }
 
 func New() *Metrics {
 	reg := prometheus.NewRegistry()
 	m := &Metrics{
 		reg: reg,
+		routingDecisions: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "inferplane_routing_decisions_total", Help: "Request routing decisions by bounded mode and reason.",
+		}, []string{"team", "mode", "reason"}),
 		tokenUsage: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "gen_ai_client_token_usage_total",
 			Help: "Tokens used, by type (input|output|cache_read|cache_write_5m|cache_write_1h).",
@@ -112,13 +116,37 @@ func New() *Metrics {
 	}
 	reg.MustRegister(m.tokenUsage, m.requestDuration, m.ttft, m.requestsTotal,
 		m.fallbackTotal, m.circuitState, m.quotaUtil, m.budgetUtil, m.budgetSpend, m.pricingMiss,
-		m.auditFailures, m.auditBufferUtil, m.piiMask, m.anchorFail, m.usageDropped, m.budgetRejected, m.substitution)
+		m.auditFailures, m.auditBufferUtil, m.piiMask, m.anchorFail, m.usageDropped, m.budgetRejected, m.substitution, m.routingDecisions)
 	// Prometheus only emits a labeled metric family once it has at least one
 	// observed child series. Pre-initialize the token-usage family to zero so
 	// gen_ai_client_token_usage_total is always present in exposition (stable
 	// dashboards / scrape contracts) even before the first token is recorded.
 	m.tokenUsage.WithLabelValues("input", "", "", "")
 	return m
+}
+
+// ObserveRoutingDecision accepts only bounded enum values. Team comes from the
+// authenticated principal (the same trusted team dimension as existing metrics).
+// No model, policy name, detected value, user or key enters these labels.
+func (m *Metrics) ObserveRoutingDecision(team, mode, reason string) {
+	if m == nil {
+		return
+	}
+	switch mode {
+	case "Shadow", "Enforce":
+	default:
+		mode = "none"
+	}
+	switch reason {
+	case "unchanged", "internal_only", "context_inspection_failed", "context_conflict",
+		"context_shadow", "context_ineligible", "context_unchanged", "context_unavailable",
+		"context_selected", "policy_lookup_failed", "model_forbidden", "inspection_failed",
+		"sensitive_blocked", "no_safe_route", "context_affinity", "mask_failed",
+		"budget_target", "budget_target_unavailable", "legacy_mask":
+	default:
+		reason = "unknown"
+	}
+	m.routingDecisions.WithLabelValues(team, mode, reason).Inc()
 }
 
 // Registry exposes the registry for the /metrics handler.

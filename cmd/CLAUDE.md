@@ -27,3 +27,29 @@ import `internal/policy`, so schema version skew fails at compile time.
 - New providers are registered here by blank import (`_ "…/providers/<name>"`) — this is the only core file a provider PR may touch.
 - Subcommand wiring stays thin; real logic lives in `internal/*`. Keep `main` readable as the system's assembly diagram.
 - On any config/provider error, fail fast with a wrapped error and non-zero exit.
+
+## Policy-routing assembly (ADR-043)
+
+`mayu/gateway.go` loads local policy syntax first, builds the effective file/DB
+`live.State`, then installs `polStore.SetRoutedAndPriced(holder.RoutedAndPriced)`.
+Reload local policy before any listener binds: syntax-only initial acceptance is
+insufficient. This same callback follows topology changes and validates future
+CP `ApplyWire`; topology-check logic stays in `internal/live`. The router receives
+both model-access and `MatchingRoutingPolicies` gates. Keep credential and Task 4
+ingress APIs unchanged. Both count handlers share DataMux's readiness gate and
+stay local/200 while unready or stale. Upgrade binaries and CRD before activating
+rules; set `require_sync` for CP privacy from the first request.
+
+`policy_routing_acceptance_test.go` covers startup target rejection, distributed
+privacy rejection/recovery, DB metadata reload, budget-before-privacy selection,
+and admission before provider calls using in-memory providers and the real mux.
+The bound gateway needs local listener permission; no external service is used.
+
+## Adaptive gateway assembly (ADR-044)
+
+mayu registers openai_responses, injects the complete local sensitivity redactor,
+and wires both optional tier substitutions and strict tier constraints. Local
+evaluation uses the referenced period, configured timezone and integer
+utilization. Soft switching meters do not lower independent hard caps or issue
+admission leases. `TestE2ECodexCLI*` is opt-in local fake-upstream acceptance,
+not a network/model-quality test.

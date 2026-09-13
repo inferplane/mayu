@@ -11,11 +11,11 @@ import (
 	sqlite3 "modernc.org/sqlite/lib"
 )
 
-// SQLiteStore is the shipping Store. Schema uses only portable types (TEXT) so
+// SQLiteStore is the shipping Store. Schema uses only portable types (TEXT/INTEGER) so
 // the same DDL maps cleanly onto Postgres for the v0.2 HA path (keystore pattern).
 type SQLiteStore struct{ db *sql.DB }
 
-// schema — TEXT-only, Postgres-portable. The providers table has NO secret
+// schema — TEXT/INTEGER, Postgres-portable. The providers table has NO secret
 // column: api_key_ref_env / api_key_ref_file hold the REFERENCE, never a value.
 // auth_header and guardrail fields are included directly here (not just via the
 // migration below) so a FRESH database gets the canonical shape in one DDL
@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS providers (
     api_key_ref_file TEXT NOT NULL DEFAULT '',
     auth_header       TEXT NOT NULL DEFAULT '',
     guardrail_id      TEXT NOT NULL DEFAULT '',
-    guardrail_version TEXT NOT NULL DEFAULT ''
+    guardrail_version TEXT NOT NULL DEFAULT '',
+    data_boundary TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS model_targets (
     model    TEXT NOT NULL,
@@ -48,6 +49,11 @@ CREATE TABLE IF NOT EXISTS model_targets (
 CREATE TABLE IF NOT EXISTS model_aliases (
     model TEXT NOT NULL,
     alias TEXT PRIMARY KEY
+);
+CREATE TABLE IF NOT EXISTS model_metadata (
+    model TEXT PRIMARY KEY,
+    context_window INTEGER NOT NULL DEFAULT 0,
+    capabilities TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -140,6 +146,7 @@ func ensureSchema(db *sql.DB) error {
 	rows.Close()
 
 	columns := []struct{ name, ddl string }{
+		{"data_boundary", `ALTER TABLE providers ADD COLUMN data_boundary TEXT NOT NULL DEFAULT ''`},
 		{"auth_header", `ALTER TABLE providers ADD COLUMN auth_header TEXT NOT NULL DEFAULT ''`},
 		{"guardrail_id", `ALTER TABLE providers ADD COLUMN guardrail_id TEXT NOT NULL DEFAULT ''`},
 		{"guardrail_version", `ALTER TABLE providers ADD COLUMN guardrail_version TEXT NOT NULL DEFAULT ''`},
@@ -161,16 +168,19 @@ func ensureSchema(db *sql.DB) error {
 }
 
 func (s *SQLiteStore) UpsertProvider(ctx context.Context, p ProviderRow) error {
+	if err := validateProviderMetadata(p); err != nil {
+		return fmt.Errorf("providerstore: provider metadata: %w", err)
+	}
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO providers (name, type, base_url, region, auth_mode, auth_profile, api_key_ref_env, api_key_ref_file, auth_header, guardrail_id, guardrail_version)
-VALUES (?,?,?,?,?,?,?,?,?,?,?)
+INSERT INTO providers (name, type, base_url, region, auth_mode, auth_profile, api_key_ref_env, api_key_ref_file, auth_header, guardrail_id, guardrail_version, data_boundary)
+VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(name) DO UPDATE SET
     type=excluded.type, base_url=excluded.base_url, region=excluded.region,
     auth_mode=excluded.auth_mode, auth_profile=excluded.auth_profile,
     api_key_ref_env=excluded.api_key_ref_env, api_key_ref_file=excluded.api_key_ref_file,
     auth_header=excluded.auth_header,
-    guardrail_id=excluded.guardrail_id, guardrail_version=excluded.guardrail_version`,
-		p.Name, p.Type, p.BaseURL, p.Region, p.AuthMode, p.AuthProfile, p.APIKeyRefEnv, p.APIKeyRefFile, p.AuthHeader, p.GuardrailID, p.GuardrailVersion)
+    guardrail_id=excluded.guardrail_id, guardrail_version=excluded.guardrail_version, data_boundary=excluded.data_boundary`,
+		p.Name, p.Type, p.BaseURL, p.Region, p.AuthMode, p.AuthProfile, p.APIKeyRefEnv, p.APIKeyRefFile, p.AuthHeader, p.GuardrailID, p.GuardrailVersion, p.DataBoundary)
 	if err != nil {
 		return fmt.Errorf("providerstore: upsert: %w", err)
 	}
@@ -180,9 +190,9 @@ ON CONFLICT(name) DO UPDATE SET
 func (s *SQLiteStore) GetProvider(ctx context.Context, name string) (ProviderRow, error) {
 	var p ProviderRow
 	err := s.db.QueryRowContext(ctx, `
-SELECT name, type, base_url, region, auth_mode, auth_profile, api_key_ref_env, api_key_ref_file, auth_header, guardrail_id, guardrail_version
+SELECT name, type, base_url, region, auth_mode, auth_profile, api_key_ref_env, api_key_ref_file, auth_header, guardrail_id, guardrail_version, data_boundary
 FROM providers WHERE name = ?`, name).
-		Scan(&p.Name, &p.Type, &p.BaseURL, &p.Region, &p.AuthMode, &p.AuthProfile, &p.APIKeyRefEnv, &p.APIKeyRefFile, &p.AuthHeader, &p.GuardrailID, &p.GuardrailVersion)
+		Scan(&p.Name, &p.Type, &p.BaseURL, &p.Region, &p.AuthMode, &p.AuthProfile, &p.APIKeyRefEnv, &p.APIKeyRefFile, &p.AuthHeader, &p.GuardrailID, &p.GuardrailVersion, &p.DataBoundary)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ProviderRow{}, ErrNotFound
 	}
@@ -194,7 +204,7 @@ FROM providers WHERE name = ?`, name).
 
 func (s *SQLiteStore) ListProviders(ctx context.Context) ([]ProviderRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT name, type, base_url, region, auth_mode, auth_profile, api_key_ref_env, api_key_ref_file, auth_header, guardrail_id, guardrail_version
+SELECT name, type, base_url, region, auth_mode, auth_profile, api_key_ref_env, api_key_ref_file, auth_header, guardrail_id, guardrail_version, data_boundary
 FROM providers ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -203,7 +213,7 @@ FROM providers ORDER BY name`)
 	var out []ProviderRow
 	for rows.Next() {
 		var p ProviderRow
-		if err := rows.Scan(&p.Name, &p.Type, &p.BaseURL, &p.Region, &p.AuthMode, &p.AuthProfile, &p.APIKeyRefEnv, &p.APIKeyRefFile, &p.AuthHeader, &p.GuardrailID, &p.GuardrailVersion); err != nil {
+		if err := rows.Scan(&p.Name, &p.Type, &p.BaseURL, &p.Region, &p.AuthMode, &p.AuthProfile, &p.APIKeyRefEnv, &p.APIKeyRefFile, &p.AuthHeader, &p.GuardrailID, &p.GuardrailVersion, &p.DataBoundary); err != nil {
 			return nil, err
 		}
 		out = append(out, p)

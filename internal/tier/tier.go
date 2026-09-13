@@ -1,7 +1,7 @@
 // Package tier holds the ADR-041 budget-tier model substitution primitives
 // shared by the control plane (which judges utilization and decides the
 // active tier) and the data plane (which applies it at ingress): the
-// request-path Table of per-team substitution maps, and the Latch that
+// request-path Table of subject-scoped substitution maps, and the Latch that
 // makes tier activation monotone within a budget window instead of flapping
 // on every heartbeat's utilization sample.
 //
@@ -17,34 +17,104 @@ import (
 	"github.com/inferplane/inferplane/internal/policy"
 )
 
-// Table is the request-path view of the currently active per-team
+// Table is the request-path view of the currently active subject-scoped
 // substitution map: requested model name -> target model name. Reads are on
 // the ingress hot path; writes happen once per heartbeat (control-plane
 // mode) or once per governance evaluation (standalone mode).
 type Table struct {
-	mu     sync.RWMutex
-	byTeam map[string]map[string]string
+	mu        sync.RWMutex
+	bySubject map[subjectKey]map[string]choice
+	strict    map[subjectKey]map[string]string
+}
+
+type subjectKey struct{ team, user string }
+
+type choice struct {
+	target   string
+	priority winner
 }
 
 // NewTable returns an empty table.
 func NewTable() *Table {
-	return &Table{byTeam: map[string]map[string]string{}}
+	return &Table{bySubject: map[subjectKey]map[string]choice{}}
 }
 
-// Get returns a defensive copy of team's active substitution map, or nil if
-// no tier is active for it.
+// Get returns only team-wide substitutions. User-scoped callers must supply
+// their authenticated user to GetForSubject.
 func (t *Table) Get(team string) map[string]string {
+	return t.GetForSubject(team, "")
+}
+
+// GetForSubject merges team-only, user-only and team+user matches with the same
+// pressure and policy/rule tie-breaks used within each scope. A user-only rule
+// follows that user across teams; team+user rules require both selectors.
+func (t *Table) GetForSubject(team, user string) map[string]string {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	m := t.byTeam[team]
-	if len(m) == 0 {
+	var selected map[string]choice
+	for _, key := range matchingKeys(team, user) {
+		if key == (subjectKey{}) {
+			continue
+		}
+		for from, candidate := range t.bySubject[key] {
+			if selected == nil {
+				selected = make(map[string]choice)
+			}
+			if previous, exists := selected[from]; !exists || higherPressure(candidate.priority, previous.priority) {
+				selected[from] = candidate
+			}
+		}
+	}
+	if len(selected) == 0 {
 		return nil
 	}
-	out := make(map[string]string, len(m))
-	for k, v := range m {
-		out[k] = v
+	out := make(map[string]string, len(selected))
+	for from, candidate := range selected {
+		out[from] = candidate.target
 	}
 	return out
+}
+
+// Constraints returns only team-wide strict restrictions.
+func (t *Table) Constraints(team string) map[string]string {
+	return t.ConstraintsForSubject(team, "")
+}
+
+// ConstraintsForSubject returns an owned map of all matching strict restrictions.
+// An empty target denotes conflicting restrictions and must deny, never restore
+// the original model. Legacy tiers cannot loosen these independent constraints.
+func (t *Table) ConstraintsForSubject(team, user string) map[string]string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	var out map[string]string
+	for _, key := range matchingKeys(team, user) {
+		if key == (subjectKey{}) || len(t.strict[key]) == 0 {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string)
+		}
+		mergeConstraints(out, t.strict[key])
+	}
+	return out
+}
+
+func matchingKeys(team, user string) [3]subjectKey {
+	keys := [3]subjectKey{{team: team}, {user: user}}
+	if team != "" && user != "" {
+		keys[2] = subjectKey{team, user}
+	}
+	return keys
+}
+
+func mergeConstraints(out, restrictions map[string]string) {
+	for from, to := range restrictions {
+		if old, exists := out[from]; exists && old != to {
+			out[from] = ""
+		} else {
+			out[from] = to
+		}
+	}
 }
 
 // winner tracks which active tier contributed one substitution key, so a
@@ -71,36 +141,41 @@ func higherPressure(cand, cur winner) bool {
 
 // Set replaces the table from one heartbeat's (or one local evaluation's)
 // active tiers. Merge rule: the union of every active tier's substitution
-// map, per team; when two active tiers of DIFFERENT rules disagree on the
+// map, per subject; when two active tiers of DIFFERENT rules disagree on the
 // same requested-model key, the tier with the higher ThresholdPercent wins
 // (it represents deeper budget pressure), ties broken by (Policy, Rule) for
 // determinism. Exported so both the control-plane sync client (mayu) and a
 // standalone local evaluator can drive it.
 func (t *Table) Set(active []policy.ActiveTier) {
-	byTeam := make(map[string]map[string]string, len(active))
-	chosen := make(map[string]map[string]winner, len(active))
+	bySubject := make(map[subjectKey]map[string]choice, len(active))
+	strict := make(map[subjectKey]map[string]string)
 	for _, a := range active {
-		m, ok := byTeam[a.Team]
-		if !ok {
-			m = map[string]string{}
-			byTeam[a.Team] = m
+		key := subjectKey{a.Team, a.User}
+		if key == (subjectKey{}) {
+			continue
 		}
-		w, ok := chosen[a.Team]
+		if a.EnforceTargets {
+			if strict[key] == nil {
+				strict[key] = make(map[string]string)
+			}
+			mergeConstraints(strict[key], a.Substitute)
+		}
+		m, ok := bySubject[key]
 		if !ok {
-			w = map[string]winner{}
-			chosen[a.Team] = w
+			m = map[string]choice{}
+			bySubject[key] = m
 		}
 		cand := winner{threshold: a.ThresholdPercent, policy: a.Policy, rule: a.Rule}
 		for from, to := range a.Substitute {
-			if cur, exists := w[from]; exists && !higherPressure(cand, cur) {
+			if cur, exists := m[from]; exists && !higherPressure(cand, cur.priority) {
 				continue
 			}
-			w[from] = cand
-			m[from] = to
+			m[from] = choice{target: to, priority: cand}
 		}
 	}
 	t.mu.Lock()
-	t.byTeam = byTeam
+	t.bySubject = bySubject
+	t.strict = strict
 	t.mu.Unlock()
 }
 

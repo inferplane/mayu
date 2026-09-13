@@ -1,0 +1,42 @@
+apiVersion: inferplane.dev/v1alpha1
+kind: GovernancePolicy
+metadata: {name: engineering-adaptive, generation: 1}
+spec:
+  subject: {team: engineering}
+  rules:
+    - name: switch-threshold
+      failurePolicy: FailOpen
+      budget: {limitMilliUSD: 100000, period: CalendarMonth}
+    - name: total-cap
+      failurePolicy: FailClosed
+      budget: {limitMilliUSD: 150000, period: CalendarMonth, hardCap: true}
+    - name: exhausted-to-local
+      failurePolicy: FailOpen
+      routing:
+        budgetTiers:
+          budgetRef: switch-threshold
+          enforceTargets: true
+          tiers:
+            - thresholdPercent: 100
+              substitute:
+                auto: economy
+                weak: economy
+                normal: economy
+                strong: economy
+                codex-native: economy
+    - name: task-class
+      failurePolicy: FailOpen
+      routing:
+        context:
+          mode: Shadow
+          fromModels: [auto]
+          simpleModel: weak
+          normalModel: normal
+          complexModel: strong
+          maxSimpleInputTokens: 40000
+          maxNormalInputTokens: 100000
+          complexKeywords: [architecture, security, migration, complex, 아키텍처, 보안]
+          stability:
+            minHold: 5m
+            minRequests: 3
+            sessionTTL: 30m

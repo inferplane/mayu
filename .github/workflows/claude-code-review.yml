@@ -24,7 +24,29 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 1
+          fetch-depth: 0
+
+      - name: Prepare complete file-by-file review diff
+        env:
+          REVIEW_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          base, head = os.environ["REVIEW_BASE_SHA"], os.environ["REVIEW_HEAD_SHA"]
+          merge_base = subprocess.check_output(["git", "merge-base", base, head], text=True).strip()
+          names = subprocess.check_output(["git", "diff", "--no-renames", "--name-only", "-z", merge_base, head]).decode().split("\0")
+          destination = pathlib.Path(".pr-review")
+          destination.mkdir(exist_ok=True)
+          files = []
+          for number, name in enumerate(filter(None, names)):
+              patch = f"{number:04d}.diff"
+              content = subprocess.check_output(["git", "diff", "--no-ext-diff", "--no-renames", "--binary", merge_base, head, "--", name])
+              (destination / patch).write_bytes(content)
+              files.append({"path": name, "patch": patch})
+          (destination / "index.json").write_text(json.dumps({"base_sha": base, "merge_base": merge_base, "head_sha": head, "files": files}, indent=2))
+          print(f"Prepared {len(files)} complete per-file patches for {head}")
+          PY
 
       - name: Configure AWS credentials (OIDC → Bedrock)
         uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6.2.3
@@ -45,6 +67,15 @@ jobs:
           allowed_bots: "dependabot[bot]"
           prompt: |
             Review pull request #${{ github.event.pull_request.number }}.
+            The reviewed HEAD must be ${{ github.event.pull_request.head.sha }}.
+            Read .pr-review/index.json and EVERY listed per-file diff in .pr-review/.
+            These patches are generated directly from the exact Git commits and
+            avoid GitHub's 20,000-line diff API limit. Do not treat a failed
+            `gh pr diff`, truncated output, or unread patches as completed coverage.
+            Read the corresponding checked-out source for context as needed.
+            Perform this review synchronously. Do not delegate to background agents
+            or return a progress update as the final answer. Finish reading all
+            patches and posting the findings before returning the structured verdict.
             Be a rigorous but constructive reviewer. Prioritize:
             - Correctness and bugs
             - Security and the project's NON-NEGOTIABLE invariants in CLAUDE.md:
@@ -62,24 +93,32 @@ jobs:
             "approve". Be conservative: if genuinely unsure whether something is HIGH
             vs MEDIUM, round UP — a false "block" costs a human look; a false "approve"
             ships a real bug.
+            Set review_complete=true only after reviewing every listed changed
+            file; otherwise set it false and explain the missing coverage.
+            Return reviewed_head_sha from .pr-review/index.json.
           # Single-line claude_args: unambiguous tokenization; read + comment only.
           # --json-schema forces the structured max_severity/verdict output the next
           # step gates on (see "Enforce no CRITICAL/HIGH findings" below) — this is
           # what turns the review from advisory-only into an actual merge gate once
           # this check is marked required in branch protection.
-          claude_args: '--model ${{ vars.CLAUDE_BEDROCK_MODEL || ''us.anthropic.claude-fable-5'' }} --allowed-tools "Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh search:*),Bash(gh issue view:*)" --json-schema "{\"type\":\"object\",\"required\":[\"max_severity\",\"verdict\"],\"properties\":{\"max_severity\":{\"type\":\"string\",\"enum\":[\"NONE\",\"LOW\",\"MEDIUM\",\"HIGH\",\"CRITICAL\"]},\"verdict\":{\"type\":\"string\",\"enum\":[\"approve\",\"block\"]},\"summary\":{\"type\":\"string\"}}}"'
+          claude_args: '--model ${{ vars.CLAUDE_BEDROCK_MODEL || ''us.anthropic.claude-fable-5'' }} --disallowed-tools "Agent,Task" --allowed-tools "Read,Glob,Grep,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh search:*),Bash(gh issue view:*)" --json-schema "{\"type\":\"object\",\"required\":[\"max_severity\",\"verdict\",\"review_complete\",\"reviewed_head_sha\"],\"properties\":{\"max_severity\":{\"type\":\"string\",\"enum\":[\"NONE\",\"LOW\",\"MEDIUM\",\"HIGH\",\"CRITICAL\"]},\"verdict\":{\"type\":\"string\",\"enum\":[\"approve\",\"block\"]},\"review_complete\":{\"type\":\"boolean\"},\"reviewed_head_sha\":{\"type\":\"string\"},\"summary\":{\"type\":\"string\"}}}"'
 
       - name: Enforce no CRITICAL/HIGH findings
         if: always()
         env:
           REVIEW_JSON: ${{ steps.claude-review.outputs.structured_output }}
           REVIEW_OUTCOME: ${{ steps.claude-review.outcome }}
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           # Fail closed: if the review step itself didn't succeed, or produced
           # no structured verdict, that is NOT a clean bill of health — do not
           # let a broken/missing review silently pass this gate.
           if [ "$REVIEW_OUTCOME" != "success" ] || [ -z "$REVIEW_JSON" ]; then
             echo "::error::Review step outcome='$REVIEW_OUTCOME' produced no usable structured_output — failing closed (not a pass-by-default)."
+            exit 1
+          fi
+          if ! jq -e --arg head "$EXPECTED_HEAD_SHA" '.review_complete == true and .reviewed_head_sha == $head' <<< "$REVIEW_JSON" >/dev/null; then
+            echo "::error::Review coverage is incomplete or its HEAD does not match this run."
             exit 1
           fi
           SEVERITY=$(echo "$REVIEW_JSON" | jq -r '.max_severity // "NONE"')

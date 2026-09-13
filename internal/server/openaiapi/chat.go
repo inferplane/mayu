@@ -30,6 +30,7 @@ import (
 	"github.com/inferplane/inferplane/internal/pricing"
 	"github.com/inferplane/inferplane/internal/principal"
 	"github.com/inferplane/inferplane/internal/router"
+	"github.com/inferplane/inferplane/internal/server/requestpolicy"
 	"github.com/inferplane/inferplane/internal/telemetry"
 	"github.com/inferplane/inferplane/internal/tracing"
 	"github.com/inferplane/inferplane/pkg/schema"
@@ -168,6 +169,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// ADR-041: budget-tier substitution — see anthropicapi.MessagesHandler's
 	// identical seam for the full rationale (runs after model_fallbacks,
 	// before RBAC; never widens access, never denies).
+	requestedModel := model // resolved PRE-TIER model; raw client aliases/fallbacks are already handled
 	if served, tierSubstituted := h.r.SubstituteTier(p, model); tierSubstituted {
 		h.metrics.ObserveModelSubstitution(p.Team, model, served)
 		req = req.WithContext(audit.WithSubstitutedFrom(req.Context(), model))
@@ -175,19 +177,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		tracing.SetGenAIRequest(span, model)
 		w.Header().Set("x-inferplane-substituted-model", model)
 	}
-	// Fail closed for masked teams on the OpenAI ingress (ADR-009 round-2
-	// CRITICAL): v1 masks only the Anthropic ingress, so a masked team must not
-	// bypass PII masking by using /v1/chat/completions. Reject until OpenAI-ingress
-	// masking ships.
-	if h.mask.Enabled(p.Team) {
-		// Audit the security-critical rejection (a masking-bypass attempt) — a
-		// silent reject would be a blind spot in the tamper-evident chain (P4 gate).
-		h.audit(req.Context(), p, model, "", &audit.OutcomeRef{Status: 400}, traceID)
-		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 400, time.Since(start).Seconds(), 0)
-		tracing.SetStatus(span, false, "pii mask bypass blocked")
-		writeErr(w, 400, "invalid_request_error", "PII masking is enabled for your team but not supported on the OpenAI-compatible endpoint yet; use /v1/messages")
-		return
-	}
+
 	if !h.r.Allows(p, model) {
 		h.audit(req.Context(), p, model, "", &audit.OutcomeRef{Status: 403, Error: audit.DenyModelNotAllowed.Ptr()}, traceID)
 		// Pre-resolution reject: model is still attacker-controlled → sentinel label.
@@ -213,24 +203,68 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// Team-record fresh lookup (D6/D7, ADR-016 pattern): one call reused below
 	// both for the region filter and the guardrail override.
 	var teamRec keystore.TeamRecord
-	if h.teamPolicy != nil {
-		if rec, ok := h.teamPolicy(p.Team); ok {
+	if h.teamPolicy != nil || p.TeamSnapshotLoaded {
+		if rec, ok := requestpolicy.TeamSnapshot(p, h.teamPolicy); ok {
 			teamRec = rec
 		}
 	}
 	// Per-team region lock (D7, ADR-020): drop targets outside the team's
 	// allowed regions BEFORE governance/billing. An unlabeled target is always
-	// dropped for a restricted team (fail-closed). Empty result → hard deny.
+	// dropped for a restricted team. Policy routing may recover an empty
+	// chain through an approved alternative in an allowed region.
 	if len(teamRec.AllowedRegions) > 0 {
-		if filtered := router.FilterRegions(chain, teamRec.AllowedRegions); len(filtered) == 0 {
-			h.audit(req.Context(), p, model, "", &audit.OutcomeRef{Status: 403, Error: audit.DenyRegionBlocked.Ptr()}, traceID)
-			h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 403, time.Since(start).Seconds(), 0)
-			tracing.SetStatus(span, false, "region blocked")
-			writeErr(w, 403, "permission_error", "no allowed-region target for model: "+model)
-			return
-		} else {
-			chain = filtered
+		chain = router.FilterRegions(chain, teamRec.AllowedRegions)
+	}
+	result, routeErr := h.r.RouteRequest(req.Context(), router.RequestRoutingInput{
+		Principal: p, Protocol: "openai", RawBody: raw, RequestedModel: requestedModel,
+		Model: model, Chain: chain, State: st, AllowedRegions: teamRec.AllowedRegions,
+		SessionHint: requestpolicy.SessionHint(req),
+		Redactor:    requestpolicy.CombinedRedactor(h.mask, p.Team),
+	})
+	req = requestpolicy.Observe(w, req, result, h.metrics)
+	if routeErr != nil {
+		// Legacy filtered-chain errors retain their established wire/audit shape.
+		// The chain is NEVER restored, even when no policy was applicable.
+		if !requestpolicy.Active(result.Decision) {
+			if len(chain) == 0 && len(teamRec.AllowedRegions) > 0 {
+				h.audit(req.Context(), p, model, "", &audit.OutcomeRef{Status: 403, Error: audit.DenyRegionBlocked.Ptr()}, traceID)
+				h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 403, time.Since(start).Seconds(), 0)
+				tracing.SetStatus(span, false, "region blocked")
+				writeErr(w, 403, "permission_error", "no allowed-region target for model: "+model)
+				return
+			}
 		}
+		reason := result.Decision.Reason
+		h.audit(req.Context(), p, model, "", &audit.OutcomeRef{Status: http.StatusForbidden, Error: &reason}, traceID)
+		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, http.StatusForbidden, time.Since(start).Seconds(), 0)
+		tracing.SetStatus(span, false, reason)
+		writeErr(w, http.StatusForbidden, "permission_error", routeErr.Error())
+		return
+	}
+	model, chain, st = result.Model, result.Chain, result.State
+	tracing.SetGenAIRequest(span, model)
+	if result.MaskRequired {
+		var maskErr error
+		canonical, maskErr = openai.RequestToCanonical(result.SanitizedBody)
+		if len(result.SanitizedBody) == 0 || maskErr != nil {
+			writeErr(w, 400, "invalid_request_error", "request could not be PII-masked")
+			return
+		}
+		raw = result.SanitizedBody
+	}
+
+	// Fail closed for masked teams on the OpenAI ingress (ADR-009 round-2
+	// CRITICAL): v1 masks only the Anthropic ingress, so a masked team must not
+	// bypass PII masking by using /v1/chat/completions. Reject until OpenAI-ingress
+	// masking ships.
+	if h.mask.Enabled(p.Team) && !result.Decision.Masked {
+		// Audit the security-critical rejection (a masking-bypass attempt) — a
+		// silent reject would be a blind spot in the tamper-evident chain (P4 gate).
+		h.audit(req.Context(), p, model, "", &audit.OutcomeRef{Status: 400}, traceID)
+		h.metrics.ObserveRequest(ingressName, rejectedModelLabel, "", p.Team, 400, time.Since(start).Seconds(), 0)
+		tracing.SetStatus(span, false, "pii mask bypass blocked")
+		writeErr(w, 400, "invalid_request_error", "PII masking is enabled for your team but not supported on the OpenAI-compatible endpoint yet; use /v1/messages")
+		return
 	}
 	// Governance pre-check (rate/quota/budget) BEFORE the upstream call.
 	// Pricing table from the SAME generation we resolved on (ADR-006).
@@ -238,7 +272,7 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// Context-window fast-fail (same rule and rationale as anthropicapi's —
 	// estimate-only, before PreCheck, clear message; deliberate per-package
 	// duplication like subjectOf).
-	if win := h.r.ContextWindow(model); win > 0 {
+	if win := requestpolicy.ContextWindow(st, model); win > 0 {
 		if est := estimateTokens(raw); est > win {
 			msg := fmt.Sprintf("request is ~%d tokens but model %s has a %d-token context window — reduce the input (or raise models.%s.context_window if the declaration is wrong)", est, model, win, model)
 			h.audit(req.Context(), p, model, chain[0].Upstream, &audit.OutcomeRef{Status: http.StatusBadRequest}, traceID)
@@ -300,12 +334,24 @@ func (h *ChatHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 				w.Header().Set("x-inferplane-model-fallback", ct.Model)
 			}
 		}
+		reservedReq, finishBudget, reserveErr := requestpolicy.ReserveBudget(req, h.gov, p, ct, st, raw)
+		if reserveErr != nil {
+			status := requestpolicy.BudgetStatus(reserveErr)
+			requestpolicy.BudgetErrorHeaders(w, reserveErr)
+			h.audit(req.Context(), p, model, ct.Upstream, &audit.OutcomeRef{Status: status}, traceID)
+			writeErr(w, status, "insufficient_quota", "budget authority unavailable")
+			return
+		}
+		defer finishBudget() // also retain authority if a provider panics
+		attemptReq := reservedReq.WithContext(audit.WithRoutingAttempt(reservedReq.Context(), ct.Model, ct.ProviderName, ct.DataBoundary))
+		attemptReq = requestpolicy.WithAffinityAttempt(attemptReq, h.r, result.AffinityToken, ct)
 		var retriable bool
 		if stream {
-			retriable = h.serveStream(w, req, ct.Provider, pr, p, ct.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, crossModelNext, start, table)
+			retriable = h.serveStream(w, attemptReq, ct.Provider, pr, p, ct.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, crossModelNext, start, table)
 		} else {
-			retriable = h.serveComplete(w, req, ct.Provider, pr, p, ct.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, crossModelNext, start, table)
+			retriable = h.serveComplete(w, attemptReq, ct.Provider, pr, p, ct.Model, ct.ProviderName, ct.Identity, ct.Upstream, last, crossModelNext, start, table)
 		}
+		finishBudget()
 		if !retriable {
 			return
 		}
@@ -352,6 +398,9 @@ func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, pr
 	}
 	if resp.StatusCode < 400 {
 		h.r.RecordResult(providerName, identity, true)
+		if resp.StatusCode/100 == 2 && resp.Parsed != nil && resp.Parsed.Usage != nil {
+			requestpolicy.RecordSuccess(req)
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	var clientBody []byte
@@ -374,6 +423,7 @@ func (h *ChatHandler) serveComplete(w http.ResponseWriter, req *http.Request, pr
 	if resp.Parsed != nil {
 		usage = usageRef(resp.Parsed.Usage)
 		cost = h.settle(p, providerName, upstream, resp.Parsed.Usage, table, estimateTokens(pr.RawBody))
+		requestpolicy.SettleBudget(req, cost, resp.Parsed.Usage, resp.StatusCode/100 == 2)
 		h.observeTokens(model, providerName, p.Team, resp.Parsed.Usage)
 	}
 	// Body capture (D4, ADR-018): copy-only, AFTER the response was already
@@ -440,6 +490,7 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 	var usage *audit.UsageRef
 	var lastUsage *schema.Usage
 	var ttft float64
+	var streamCompleted, streamFailed bool
 	for ev, err := range seq {
 		if err != nil {
 			// upstream broke mid-stream: the 200 is already committed, so the
@@ -456,6 +507,7 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 			// mid-flight skipped settle() entirely and everything already
 			// streamed was free, with no pricing_missing flag to show it.
 			partialCost := h.settle(p, providerName, upstream, lastUsage, table, estimateTokens(pr.RawBody))
+			requestpolicy.SettleBudget(req, partialCost, lastUsage, false)
 			// …and count them, on the same usage settle() just billed (see
 			// messages.go's twin: metering only the clean path left the token
 			// counters below the billed spend for every interrupted stream).
@@ -487,6 +539,8 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 		// input and cache counts arrive on message_start (nested under
 		// message.usage) while message_delta commonly carries output alone.
 		if ev.Chunk != nil {
+			streamCompleted = streamCompleted || ev.Chunk.Type == "message_stop"
+			streamFailed = streamFailed || ev.Chunk.Type == "error"
 			if ev.Chunk.Message != nil && ev.Chunk.Message.Usage != nil {
 				lastUsage = schema.MergeUsage(lastUsage, ev.Chunk.Message.Usage)
 			}
@@ -502,6 +556,10 @@ func (h *ChatHandler) serveStream(w http.ResponseWriter, req *http.Request, prov
 		flusher.Flush()
 	}
 	cost := h.settle(p, providerName, upstream, lastUsage, table, estimateTokens(pr.RawBody))
+	requestpolicy.SettleBudget(req, cost, lastUsage, streamCompleted && !streamFailed)
+	if streamCompleted && !streamFailed && lastUsage != nil {
+		requestpolicy.RecordSuccess(req)
+	}
 	h.observeTokens(model, providerName, p.Team, lastUsage)
 	// Body capture (D4, ADR-018): REQUEST ONLY for streams (no buffered
 	// response bytes exist to capture — see messages.go's serveStream).
@@ -666,7 +724,7 @@ func (h *ChatHandler) audit(ctx context.Context, p keystore.Principal, model, up
 		ID:            ulid.New(),
 		TS:            time.Now().UTC().Format(time.RFC3339Nano),
 		Principal:     audit.PrincipalRef{KeyID: p.KeyID, Team: p.Team},
-		Request:       audit.RequestRef{Ingress: "openai", ModelRequested: model, ModelResolved: upstream, ModelSubstitutedFrom: audit.SubstitutedFrom(ctx)},
+		Request:       audit.RequestRef{Ingress: "openai", ModelRequested: model, ModelResolved: upstream, ModelSubstitutedFrom: audit.SubstitutedFrom(ctx), Routing: audit.RoutingFrom(ctx)},
 		Outcome:       outcome,
 	}
 	if traceID != "" {
@@ -689,7 +747,7 @@ func (h *ChatHandler) auditCompleted(ctx context.Context, id string, p keystore.
 		ID:            id,
 		TS:            time.Now().UTC().Format(time.RFC3339Nano),
 		Principal:     audit.PrincipalRef{KeyID: p.KeyID, Team: p.Team},
-		Request:       audit.RequestRef{Ingress: "openai", ModelRequested: model, ModelResolved: upstream, ModelSubstitutedFrom: audit.SubstitutedFrom(ctx)},
+		Request:       audit.RequestRef{Ingress: "openai", ModelRequested: model, ModelResolved: upstream, ModelSubstitutedFrom: audit.SubstitutedFrom(ctx), Routing: audit.RoutingFrom(ctx)},
 		Outcome:       &audit.OutcomeRef{Status: status},
 		Usage:         usage,
 		Cost:          cost,
@@ -719,7 +777,7 @@ func (h *ChatHandler) auditCompletedPartial(ctx context.Context, p keystore.Prin
 		ID:            ulid.New(),
 		TS:            time.Now().UTC().Format(time.RFC3339Nano),
 		Principal:     audit.PrincipalRef{KeyID: p.KeyID, Team: p.Team},
-		Request:       audit.RequestRef{Ingress: "openai", ModelRequested: model, ModelResolved: upstream, ModelSubstitutedFrom: audit.SubstitutedFrom(ctx)},
+		Request:       audit.RequestRef{Ingress: "openai", ModelRequested: model, ModelResolved: upstream, ModelSubstitutedFrom: audit.SubstitutedFrom(ctx), Routing: audit.RoutingFrom(ctx)},
 		Outcome:       &audit.OutcomeRef{Status: 200, Partial: true},
 		Usage:         usage,
 		Cost:          cost,

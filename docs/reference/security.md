@@ -39,3 +39,34 @@ are non-negotiable invariants (see CLAUDE.md → Security mandates).
 - Related modules: `internal/keystore`, `internal/audit`, `internal/metrics`
 - Related ADRs: docs/decisions/ADR-004-oidc-admin-authz.md, docs/decisions/ADR-026-console-sso-login.md, docs/decisions/ADR-028-cli-oidc-login-short-lived-keys.md, docs/decisions/ADR-029-model-level-fallback.md, docs/decisions/ADR-040-credential-brokering.md
 - Related runbooks: docs/runbooks/ ; docs/runbooks/cli-login.md ; policy in `SECURITY.md`
+
+### Sensitive-data destination restrictions (ADR-043)
+
+`InternalOnly` requires an approved canonical model AND a provider explicitly
+attested `internal` on every attempt. Unknown/omitted boundary is not trusted.
+All matching rules intersect, Block wins, and no safe chain denies before masking,
+admission or provider calls. Privacy always enforces, including context Shadow;
+optional context failures keep the already-safe route. Original model RBAC must
+pass. New alternatives need pricing/context/capability and physical ingress checks.
+
+The local inspector has finite email/phone/Luhn-card/SSN/IPv4/Korean-ID coverage,
+not universal PII detection. Opaque/unknown content is uninspectable; malformed or
+cancelled inspection fails closed under sensitive rules. Legacy opt-in masking is
+independent and does not cover every inspected surface. Provider labels are
+operator assertions, not endpoint verification. No prompts/detected values enter
+new audit/headers/metrics; the routing counter labels only team/mode/reason.
+
+A rejected distributed privacy generation gates affected subjects until valid
+recovery. Boot local policy is revalidated against usable topology before serving.
+Upgrade mayu/inferplaned/CRD before activating new rules. `require_sync` is necessary
+for CP privacy before first sync; `max_policy_age` bounds readiness staleness. Both
+count APIs stay local/200 while unready, stale, or refused. See
+[limits and rollout](../policy-routing.md).
+
+ADR-044 adds complete finite Mask transformation before an egress chain is
+returned. Masking remains required even alongside InternalOnly. Unsafe structural
+or numeric changes, remaining detections and incomplete transformations refuse.
+Responses remote-tool egress cannot be authorized merely by an internal model
+label. Strict budget constraints also gate rejected policy updates and filter
+every subsequent context choice, affinity hit and fallback. Session hints are
+scoped HMAC inputs only; they never become principals or audit dimensions.

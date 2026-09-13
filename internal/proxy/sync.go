@@ -135,11 +135,13 @@ func (t *LeaseTable) set(grants []policy.LeaseGrant) {
 
 // Syncer runs the heartbeat loop against inferplaned.
 type Syncer struct {
-	URL       string // control plane base URL
-	Token     string // shared bearer token; "" = none
-	Dataplane string // stable instance id
-	Store     *policy.Store
-	Leases    *LeaseTable
+	Authority        AuthorityClient
+	authorityInvalid atomic.Bool
+	URL              string // control plane base URL
+	Token            string // shared bearer token; "" = none
+	Dataplane        string // stable instance id
+	Store            *policy.Store
+	Leases           *LeaseTable
 	// Tiers is the request-path ADR-041 budget-tier substitution table,
 	// kept in step with every heartbeat's resp.ActiveTiers the same way
 	// Leases tracks resp.Leases. nil = no substitution applied.
@@ -172,6 +174,9 @@ type Syncer struct {
 // as expired, the way hard-cap leases already expire). maxAge <= 0 means
 // policies never expire. The reason is operator-facing and secret-free.
 func (s *Syncer) GovernanceReady(maxAge time.Duration) (bool, string) {
+	if s.authorityInvalid.Load() {
+		return false, "durable budget authority response is invalid"
+	}
 	last := s.lastSuccess.Load()
 	if last == 0 {
 		return false, "no policy generation received from the control plane yet (control_plane.require_sync)"
@@ -197,11 +202,24 @@ func (s *Syncer) Run(ctx context.Context) {
 	interval := s.tick(ctx, policy.MinPolicySyncInterval)
 	t := time.NewTimer(interval)
 	defer t.Stop()
+	var wake <-chan struct{}
+	if s.Authority != nil {
+		wake = s.Authority.Wake()
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			interval = s.tick(ctx, interval)
+			t.Reset(interval)
+		case <-wake:
+			if !t.Stop() {
+				select {
+				case <-t.C:
+				default:
+				}
+			}
 			interval = s.tick(ctx, interval)
 			t.Reset(interval)
 		}
@@ -271,6 +289,13 @@ func (s *Syncer) syncOnce(ctx context.Context) (time.Duration, error) {
 		Generation:  s.generation,
 		Rejections:  s.pending,
 	}
+	if s.Authority != nil {
+		request, err := s.Authority.Request(ctx)
+		if err != nil {
+			return 0, fmt.Errorf("control plane sync: authority request: %w", err)
+		}
+		req.Authority = &request
+	}
 	// Cumulative spend per lease-managed budget rule of the APPLIED set.
 	//
 	// TODO(per-rule spend): SpentOf reads ONE team-level counter, so a team
@@ -282,6 +307,9 @@ func (s *Syncer) syncOnce(ctx context.Context) (time.Duration, error) {
 	// for the rule's own window — so only the several-rules-in-one-window
 	// case remains conservative.
 	for _, p := range s.Store.Policies() {
+		if s.Authority != nil {
+			break
+		}
 		// A user-scoped budget rule has no ledger row upstream (ADR-042
 		// Phase 3), so reporting the TEAM's spend against it would be
 		// reporting the wrong quantity to a row that does not exist.
@@ -315,18 +343,36 @@ func (s *Syncer) syncOnce(ctx context.Context) (time.Duration, error) {
 	if s.Token != "" {
 		hreq.Header.Set("Authorization", "Bearer "+s.Token)
 	}
+	started := time.Now()
 	hresp, err := s.client.Do(hreq)
 	if err != nil {
 		return 0, fmt.Errorf("control plane sync: %w", err)
 	}
 	defer hresp.Body.Close()
 	if hresp.StatusCode != http.StatusOK {
+		if s.Authority != nil && (hresp.StatusCode == 401 || hresp.StatusCode == 403 || hresp.StatusCode == 409 || hresp.StatusCode == 426) {
+			s.authorityInvalid.Store(true)
+		}
 		io.Copy(io.Discard, io.LimitReader(hresp.Body, 4096))
 		return 0, fmt.Errorf("control plane sync: status %d", hresp.StatusCode)
 	}
 	var resp policy.SyncResponse
 	if err := json.NewDecoder(io.LimitReader(hresp.Body, 8<<20)).Decode(&resp); err != nil {
 		return 0, fmt.Errorf("control plane sync: decode: %w", err)
+	}
+	if s.Authority != nil {
+		if err := policy.ValidateAuthorityBundle(resp.Authority); err != nil || resp.Authority.Generation != resp.Generation || len(resp.Leases) != 0 {
+			s.authorityInvalid.Store(true)
+			return 0, fmt.Errorf("control plane sync: invalid durable budget bundle")
+		}
+		resp.Policies = resp.Authority.Policies
+		// Install the financial constraints before publishing the matching
+		// policy snapshot. Otherwise a new hard rule could become visible
+		// while admission still consulted the old, less restrictive journal.
+		s.authorityInvalid.Store(true)
+		if err := s.Authority.Apply(ctx, *resp.Authority, time.Since(started)); err != nil {
+			return 0, fmt.Errorf("control plane sync: authority apply: %w", err)
+		}
 	}
 
 	// The heartbeat delivered the pending rejections; new ones may replace
@@ -336,6 +382,13 @@ func (s *Syncer) syncOnce(ctx context.Context) (time.Duration, error) {
 		rejected := s.Store.ApplyWire(resp.Policies)
 		s.pending = rejected
 		s.generation = resp.Generation
+		if s.Authority != nil && len(rejected) > 0 {
+			s.authorityInvalid.Store(true)
+			return 0, fmt.Errorf("control plane sync: durable policy rejected")
+		}
+	}
+	if s.Authority != nil {
+		s.authorityInvalid.Store(false)
 	}
 	if s.Leases != nil {
 		s.Leases.set(resp.Leases)
