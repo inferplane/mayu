@@ -515,6 +515,13 @@ var converseUnsupportedInference = []struct {
 	// accept every sampling param — probed via
 	// bedrock-mantle.us-east-1.api.aws /openai/v1/chat/completions.
 	{"openai.gpt-5.6", []string{"temperature", "topP", "stopSequences"}},
+	// OpenAI gpt-6 (gpt-6-astra, global.openai.gpt-6-astra) — same contract
+	// as gpt-5.6: every sampling param 400s ("This model doesn't support the
+	// temperature field"), probed live 2026-09-09 ap-northeast-2. Unlike
+	// gpt-5.6 its Converse usage is already DISJOINT (inputTokens excludes
+	// cacheRead/WriteInputTokens — probed: input 2 + cacheWrite 4008), so it
+	// is deliberately NOT in converseInclusiveInputUsage.
+	{"openai.gpt-6", []string{"temperature", "topP", "stopSequences"}},
 	// xai (grok-4.6) rejects all sampling params.
 	{"xai.", []string{"temperature", "topP", "stopSequences"}},
 	// These accept temperature/topP but reject stopSequences:
@@ -544,6 +551,7 @@ var converseMinMaxTokens = []struct {
 	min   int64
 }{
 	{"openai.gpt-5.6", 16},
+	{"openai.gpt-6", 16}, // gpt-6-astra: "Expected a value >= 16, but got 1" (live 2026-09-09)
 	{"xai.", 16},
 }
 
