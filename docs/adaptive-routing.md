@@ -110,6 +110,51 @@ OpenAI reference material used:
 - https://developers.openai.com/api/reference/resources/responses/methods/create
 - https://developers.openai.com/api/docs/guides/streaming-responses
 
+## Codex with Amazon Bedrock IAM credentials
+
+The `bedrock` provider's Converse/InvokeModel routes do not accept Responses
+ingress. Use `bedrock_responses` for Bedrock Mantle's native Responses API:
+
+```json
+{
+  "providers": {
+    "codex-bedrock": {
+      "type": "bedrock_responses",
+      "base_url": "https://bedrock-mantle.us-west-2.api.aws/openai"
+    }
+  },
+  "models": {
+    "openai.gpt-6-astra": {
+      "targets": [
+        {"provider": "codex-bedrock", "model": "openai.gpt-6-astra"}
+      ]
+    }
+  }
+}
+```
+
+Merge these entries into an existing gateway configuration and declare the
+model's verified price under `pricing.overrides.codex-bedrock`. Confirm model
+access in the selected region. The endpoint determines the signing region;
+only explicit commercial Bedrock Mantle HTTPS endpoints are accepted.
+The Astra example uses `us-west-2`, its documented Mantle region:
+[AWS model card](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-astra.html).
+
+Mayu uses its own standard AWS credential chain and signs requests for the
+`bedrock` service. This provider uses IAM credentials, not `api_key_ref` or
+the credential broker. Client virtual keys terminate at mayu. The native
+Responses transport supplies streaming and usage accounting; the signing
+transport preserves request bytes. No Converse conversion is involved.
+Requests requiring Bedrock Guardrails are refused because this transport
+cannot enforce them.
+
+Use the custom Codex provider configuration above with
+`model = "openai.gpt-6-astra"` and the local gateway's actual port. Keep
+`supports_websockets = false` and `web_search = "disabled"` unless a supported
+search path has separately been configured. The `amazon-bedrock` Codex
+provider connects to AWS directly; select the custom `inferplane` provider
+to use gateway authentication, routing and accounting.
+
 ## Privacy and cache limits
 
 An enabled legacy PII filter also applies to Responses through the complete
